@@ -1,0 +1,93 @@
+import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
+import { promisify } from "node:util";
+import { ShuttleError } from "../shared/errors.js";
+
+const scryptAsync = promisify(scrypt) as (
+  password: string | Buffer,
+  salt: Buffer,
+  keylen: number,
+  options: { N: number; r: number; p: number; maxmem: number },
+) => Promise<Buffer>;
+
+const ALGO = "aes-256-gcm";
+const KDF_N = 1 << 15;
+const KDF_R = 8;
+const KDF_P = 1;
+const MAXMEM = 64 * 1024 * 1024;
+
+export interface EnvelopeFile {
+  version: 2;
+  kdf: "scrypt";
+  kdfParams: { N: number; r: number; p: number };
+  salt: string;
+  algorithm: "aes-256-gcm";
+  nonce: string;
+  authTag: string;
+  ciphertext: string;
+  created_at: string;
+}
+
+export async function encryptEnvelope(
+  masterKey: Buffer,
+  passphrase: string,
+): Promise<EnvelopeFile> {
+  if (masterKey.byteLength !== 32) {
+    throw new ShuttleError("invalid_master_key", "Master key must be 32 bytes.");
+  }
+  if (passphrase.length === 0) {
+    throw new ShuttleError("invalid_passphrase", "Passphrase must not be empty.");
+  }
+
+  const salt = randomBytes(16);
+  const kek = await scryptAsync(passphrase, salt, 32, {
+    N: KDF_N, r: KDF_R, p: KDF_P, maxmem: MAXMEM,
+  });
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv(ALGO, kek, nonce);
+  const ciphertext = Buffer.concat([cipher.update(masterKey), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+
+  return {
+    version: 2,
+    kdf: "scrypt",
+    kdfParams: { N: KDF_N, r: KDF_R, p: KDF_P },
+    salt: salt.toString("base64url"),
+    algorithm: ALGO,
+    nonce: nonce.toString("base64url"),
+    authTag: authTag.toString("base64url"),
+    ciphertext: ciphertext.toString("base64url"),
+    created_at: new Date().toISOString(),
+  };
+}
+
+export async function decryptEnvelope(
+  envelope: EnvelopeFile,
+  passphrase: string,
+): Promise<Buffer> {
+  if (envelope.version !== 2 || envelope.kdf !== "scrypt" || envelope.algorithm !== ALGO) {
+    throw new ShuttleError("unsupported_envelope", "Unsupported envelope format.");
+  }
+
+  const salt = Buffer.from(envelope.salt, "base64url");
+  const kek = await scryptAsync(passphrase, salt, 32, {
+    N: envelope.kdfParams.N,
+    r: envelope.kdfParams.r,
+    p: envelope.kdfParams.p,
+    maxmem: MAXMEM,
+  });
+  try {
+    const decipher = createDecipheriv(ALGO, kek, Buffer.from(envelope.nonce, "base64url"));
+    decipher.setAuthTag(Buffer.from(envelope.authTag, "base64url"));
+    const plain = Buffer.concat([
+      decipher.update(Buffer.from(envelope.ciphertext, "base64url")),
+      decipher.final(),
+    ]);
+    if (plain.byteLength !== 32) {
+      throw new ShuttleError("vault_unlock_failed", "vault_unlock_failed: Unlocked key has wrong length.");
+    }
+    return plain;
+  } catch (cause) {
+    if (cause instanceof ShuttleError) throw cause;
+    throw new ShuttleError("vault_unlock_failed", "vault_unlock_failed: Could not unlock the vault.");
+  }
+}
