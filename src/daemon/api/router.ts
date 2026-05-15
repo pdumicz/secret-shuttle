@@ -8,6 +8,7 @@ import { registerBlind } from "./routes/blind.js";
 import { registerSecrets } from "./routes/secrets.js";
 import { registerApprovals } from "./routes/approvals.js";
 import { registerBrowser } from "./routes/browser.js";
+import { registerTemplates } from "./routes/templates.js";
 
 export function registerRoutes(
   server: DaemonServer,
@@ -21,4 +22,5 @@ export function registerRoutes(
   registerSecrets(server, services, daemonPortRef);
   registerApprovals(server, services);
   registerBrowser(server, services);
+  registerTemplates(server, services, daemonPortRef);
 }
