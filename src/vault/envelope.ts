@@ -68,6 +68,10 @@ export async function decryptEnvelope(
     throw new ShuttleError("unsupported_envelope", "Unsupported envelope format.");
   }
 
+  if (envelope.kdfParams.N < KDF_N || envelope.kdfParams.r < KDF_R || envelope.kdfParams.p < KDF_P) {
+    throw new ShuttleError("unsupported_envelope", "Envelope KDF parameters are weaker than the current minimum.");
+  }
+
   const salt = Buffer.from(envelope.salt, "base64url");
   const kek = await scryptAsync(passphrase, salt, 32, {
     N: envelope.kdfParams.N,
@@ -75,6 +79,7 @@ export async function decryptEnvelope(
     p: envelope.kdfParams.p,
     maxmem: MAXMEM,
   });
+  // decipher.final() throws if the GCM auth tag does not validate; plaintext is never returned on failure.
   try {
     const decipher = createDecipheriv(ALGO, kek, Buffer.from(envelope.nonce, "base64url"));
     decipher.setAuthTag(Buffer.from(envelope.authTag, "base64url"));

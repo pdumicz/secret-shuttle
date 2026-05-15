@@ -29,3 +29,12 @@ test("encryptEnvelope uses a fresh salt and nonce each call", async () => {
   assert.notEqual(a.nonce, b.nonce);
   assert.notEqual(a.ciphertext, b.ciphertext);
 });
+
+test("decryptEnvelope refuses a weakened KDF N parameter", async () => {
+  const envelope = await encryptEnvelope(Buffer.alloc(32, 3), "pw");
+  const downgraded = { ...envelope, kdfParams: { ...envelope.kdfParams, N: 2 } };
+  await assert.rejects(
+    () => decryptEnvelope(downgraded, "pw"),
+    (err) => err instanceof ShuttleError && err.code === "unsupported_envelope",
+  );
+});
