@@ -131,3 +131,40 @@ test("ShuttleError from a route handler becomes a 400 JSON error", async () => {
     await server.close();
   }
 });
+
+test("server refuses bodies over 1 MB", async () => {
+  const server = new DaemonServer({ token: "t" });
+  server.addRoute("POST", "/v1/big", () => ({}));
+  const { port } = await server.listen();
+  try {
+    const huge = Buffer.alloc(2 * 1024 * 1024, "x");
+    const res = await fetch(`http://127.0.0.1:${port}/v1/big`, {
+      method: "POST",
+      headers: { Authorization: "Bearer t", "content-type": "application/json" },
+      body: huge,
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json() as { ok: boolean; error: { code: string } };
+    assert.equal(body.error.code, "request_too_large");
+  } finally {
+    await server.close();
+  }
+});
+
+test("server reports invalid_json instead of 500 on malformed body", async () => {
+  const server = new DaemonServer({ token: "t" });
+  server.addRoute("POST", "/v1/echo", () => ({}));
+  const { port } = await server.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/echo`, {
+      method: "POST",
+      headers: { Authorization: "Bearer t", "content-type": "application/json" },
+      body: "{ not json",
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json() as { ok: boolean; error: { code: string } };
+    assert.equal(body.error.code, "invalid_json");
+  } finally {
+    await server.close();
+  }
+});

@@ -11,6 +11,7 @@ export interface DaemonServerOptions {
 }
 
 const ALLOWED_HOST_PREFIXES = ["127.0.0.1:", "localhost:", "[::1]:"];
+const MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MB
 
 export class DaemonServer {
   private readonly token: string;
@@ -27,6 +28,12 @@ export class DaemonServer {
     this.routes.set(`${method} ${path}`, handler);
   }
 
+  /**
+   * Register a raw route that bypasses Host-header AND bearer-token checks.
+   * The handler MUST perform its own authentication (e.g., a URL-embedded per-request
+   * token, as the Approval UI does). Raw routes are intentionally unreachable from
+   * external networks because the server binds to 127.0.0.1 only.
+   */
   addRouteRaw(method: Method, pattern: RegExp, handler: RawHandler): void {
     this.rawRoutes.push({ method, pattern, handler });
   }
@@ -113,6 +120,7 @@ export class DaemonServer {
   }
 
   private writeError(res: ServerResponse, err: unknown): void {
+    if (res.writableEnded) return;
     const payload = errorToJson(err);
     res.statusCode = err instanceof ShuttleError ? 400 : 500;
     res.setHeader("content-type", "application/json");
@@ -122,7 +130,19 @@ export class DaemonServer {
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    total += buf.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      throw new ShuttleError("request_too_large", `Request body exceeds ${MAX_BODY_BYTES} bytes.`);
+    }
+    chunks.push(buf);
+  }
   if (chunks.length === 0) return null;
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new ShuttleError("invalid_json", "Request body is not valid JSON.");
+  }
 }
