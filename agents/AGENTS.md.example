@@ -1,0 +1,38 @@
+# Secret Shuttle Agent Instructions
+
+Use Secret Shuttle whenever this repository or task needs API keys, tokens, webhook secrets, env vars, production credentials, generated secrets, or secret values.
+
+Rules:
+
+- Never ask the user to paste raw secrets into chat.
+- Never print, log, summarize, screenshot, or expose raw secret values.
+- Use refs like `ss://stripe/prod/STRIPE_WEBHOOK_SECRET`.
+- Use normal browser tooling only for navigation.
+- When a secret is visible or about to be entered, stop observing the page.
+- While blind mode is active, do not use screenshots, DOM inspection, accessibility-tree reads, console reads, network-body reads, or clipboard reads.
+- Use `secret-shuttle capture` for visible generated secrets.
+- Use `secret-shuttle generate` for new local secrets.
+- Use `secret-shuttle inject` for focused-field secret entry.
+- Use `secret-shuttle compare` for verification without reading values.
+- Verify production setup using non-secret UI signals only.
+
+Common flow:
+
+```bash
+secret-shuttle blind start \
+  --domain dashboard.stripe.com \
+  --reason "capture Stripe webhook signing secret"
+
+secret-shuttle capture \
+  --name STRIPE_WEBHOOK_SECRET \
+  --env production \
+  --source stripe \
+  --from focused-field \
+  --allow-domain dashboard.stripe.com \
+  --allow-domain vercel.com
+
+secret-shuttle inject \
+  --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET \
+  --to focused-field \
+  --domain vercel.com
+```

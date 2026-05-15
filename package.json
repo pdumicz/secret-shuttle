@@ -1,0 +1,45 @@
+{
+  "name": "secret-shuttle",
+  "version": "0.1.0",
+  "description": "A local blind-secret bridge for AI coding agents.",
+  "type": "module",
+  "bin": {
+    "secret-shuttle": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.js.map",
+    "skills",
+    "agents",
+    "docs",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/**/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "ai",
+    "secrets",
+    "cli",
+    "playwright",
+    "cdp",
+    "local-first"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "playwright-core": "^1.53.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.3"
+  }
+}
