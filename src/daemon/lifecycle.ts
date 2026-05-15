@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { ShuttleError } from "../shared/errors.js";
 import { readSocketFile, removeSocketFile, type SocketFile } from "./socket-file.js";
 import { hasLegacyKeyFile } from "../vault/keychain.js";
+import { buildDaemonEnv } from "./safe-env.js";
 
 export async function startDaemon(): Promise<SocketFile> {
   if (await hasLegacyKeyFile()) {
@@ -26,10 +27,12 @@ export async function startDaemon(): Promise<SocketFile> {
     "main.js",
   );
 
+  const cleanEnv = buildDaemonEnv();
+  cleanEnv.SECRET_SHUTTLE_DAEMON_TOKEN = randomBytes(32).toString("base64url");
   const child = spawn(process.execPath, [daemonScript], {
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
-    env: { ...process.env, SECRET_SHUTTLE_DAEMON_TOKEN: randomBytes(32).toString("base64url") },
+    env: cleanEnv,
   });
   child.unref();
 

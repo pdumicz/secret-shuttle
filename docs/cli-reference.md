@@ -92,6 +92,8 @@ Launches Chrome under the daemon via `--remote-debugging-pipe` and returns the f
 
 The agent uses the proxy URL only.
 
+To override the Chrome binary, set `SECRET_SHUTTLE_CHROME_PATH` on the daemon process before `daemon start`. The agent has no way to influence which binary the daemon launches.
+
 ## `secret-shuttle list | inspect`
 
 Metadata-only views, scoped by `--env` / `--source` for `list`.

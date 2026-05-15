@@ -11,10 +11,10 @@ export interface ChromeSession {
   transport: PipeTransport;
 }
 
-export async function launchChrome(opts: { profile: string; chromePath?: string }): Promise<ChromeSession> {
-  const chromePath = opts.chromePath ?? defaultChromePath();
+export async function launchChrome(opts: { profile: string }): Promise<ChromeSession> {
+  const chromePath = process.env.SECRET_SHUTTLE_CHROME_PATH ?? defaultChromePath();
   if (chromePath === null) {
-    throw new ShuttleError("chrome_not_found", "Could not find Chrome. Pass --chrome-path.");
+    throw new ShuttleError("chrome_not_found", "Could not find Chrome. Set SECRET_SHUTTLE_CHROME_PATH on the daemon process to a trusted absolute path.");
   }
   const profileDir = path.join(os.homedir(), ".secret-shuttle", "browser-profiles", opts.profile);
   await mkdir(profileDir, { recursive: true });

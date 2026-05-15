@@ -6,11 +6,8 @@ export function browserCommand(): Command {
   const c = new Command("browser").description("Browser session controlled by the daemon.");
   c.command("start")
     .option("--profile <profile>", "Browser profile name.", "prod-config")
-    .option("--chrome-path <path>")
     .action(async (options) => {
-      const body: Record<string, unknown> = { profile: options.profile };
-      if (options.chromePath !== undefined) body.chrome_path = options.chromePath;
-      const r = await daemonRequest("POST", "/v1/browser/start", body);
+      const r = await daemonRequest("POST", "/v1/browser/start", { profile: options.profile });
       outputJson(ok(r as Record<string, unknown>));
     });
   return c;

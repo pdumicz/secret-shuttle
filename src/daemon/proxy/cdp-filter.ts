@@ -1,74 +1,65 @@
-// Blocked prefixes apply to both client→Chrome commands and Chrome→client events.
-// Event names follow the same "Domain.eventName" shape as method names, so the same
-// prefix check covers both.  Add entries here once; isMethodAllowed is the single
-// source of truth for the inbound filter (cdp-proxy agent→Chrome) and the outbound
-// filter (cdp-proxy Chrome→agent).
-const BLIND_BLOCKED_PREFIXES = [
-  // Page rendering / capture
-  "Page.captureScreenshot",
-  "Page.captureSnapshot",
-  "Page.printToPDF",
-  "Page.startScreencast",
-  "Page.screencastFrame",
-  "Page.screencastVisibilityChanged",
-  // DOM inspection
-  "DOM.getDocument",
-  "DOM.getOuterHTML",
-  "DOM.getFlattenedDocument",
-  "DOM.getNodeForLocation",
-  "DOM.performSearch",
-  "DOM.querySelector",
-  "DOM.querySelectorAll",
-  "DOM.describeNode",
-  "DOM.getBoxModel",
-  "DOM.getContentQuads",
-  "DOM.getNodeStackTraces",
-  "DOM.resolveNode",
-  "DOM.requestChildNodes",
-  "DOMSnapshot",
-  // Accessibility tree
-  "Accessibility",
-  // Runtime / scripting
-  "Runtime.evaluate",
-  "Runtime.callFunctionOn",
-  "Runtime.getProperties",
-  "Runtime.queryObjects",
-  "Runtime.consoleAPICalled",
-  "Runtime.exceptionThrown",
-  "Runtime.bindingCalled",
-  // Console / log streams
-  "Console",
-  "Log",
-  // Network observation
-  "Network.getResponseBody",
-  "Network.getRequestPostData",
-  "Network.takeResponseBodyForInterceptionAsStream",
-  "Network.responseReceived",
-  "Network.dataReceived",
-  "Network.responseReceivedExtraInfo",
-  "Network.requestWillBeSentExtraInfo",
-  "Fetch.getResponseBody",
-  // Tracing / profiler streams that can leak page content
-  "Tracing",
-  "Profiler",
-  "HeapProfiler",
-  // Generic IO
-  "IO.read",
-  // Storage readbacks
-  "Storage.getCookies",
-  "Storage.getStorageKeyForFrame",
-  "Storage.getTrustTokens",
-  "Storage.getInterestGroupDetails",
-  "IndexedDB.requestData",
-  "IndexedDB.getMetadata",
-  "Database.executeSQL",
-  "DOMStorage.getDOMStorageItems",
-];
+/**
+ * CDP method filter for blind mode.
+ *
+ * - When blind mode is OFF: allow everything (Chrome behaves normally for the agent).
+ * - When blind mode is ON: default-deny. Only the small allowlist below is forwarded
+ *   in either direction. The agent has no legitimate need to observe the page during
+ *   the brief blind window — daemon-internal capture/inject runs through its own
+ *   CDP connection, not the proxy.
+ *
+ * The allowlist permits navigation primitives (so the agent can move between pages
+ * across blind windows without reconnecting) and Chrome's own lifecycle events
+ * (so the agent's view of navigation/target state stays coherent). It does NOT
+ * permit any read of DOM, accessibility, runtime state, console, log, network
+ * bodies/cookies/resources, screencast, profiler, or storage.
+ *
+ * This function is used in both directions:
+ *   - inbound (agent → Chrome): the method the agent wants to call
+ *   - outbound (Chrome → agent): the event name Chrome is emitting
+ * The same allowlist applies to both.
+ */
+const BLIND_ALLOWED_METHODS = new Set<string>([
+  // Navigation commands the agent might legitimately need.
+  "Page.navigate",
+  "Page.reload",
+  "Page.bringToFront",
+  "Page.handleJavaScriptDialog",
+  "Page.close",
+  // Target management.
+  "Target.attachToTarget",
+  "Target.detachFromTarget",
+  "Target.setDiscoverTargets",
+  "Target.setAutoAttach",
+  "Target.activateTarget",
+  "Target.closeTarget",
+  "Target.createTarget",
+  // Input — kept so an agent can still click safe (non-secret) navigation buttons
+  // during blind mode. The user-visible approval still gates value-handling.
+  "Input.dispatchKeyEvent",
+  "Input.dispatchMouseEvent",
+  "Input.dispatchTouchEvent",
+  "Input.insertText",
+  // Lifecycle and navigation events the agent listens to.
+  "Page.frameNavigated",
+  "Page.frameAttached",
+  "Page.frameDetached",
+  "Page.frameStartedLoading",
+  "Page.frameStoppedLoading",
+  "Page.loadEventFired",
+  "Page.domContentEventFired",
+  "Page.lifecycleEvent",
+  "Page.javascriptDialogOpening",
+  "Page.javascriptDialogClosed",
+  "Page.windowOpen",
+  "Target.targetCreated",
+  "Target.targetDestroyed",
+  "Target.targetInfoChanged",
+  "Target.targetCrashed",
+  "Target.attachedToTarget",
+  "Target.detachedFromTarget",
+]);
 
 export function isMethodAllowed(method: string, blindModeActive: boolean): boolean {
   if (!blindModeActive) return true;
-  for (const prefix of BLIND_BLOCKED_PREFIXES) {
-    if (method === prefix || method.startsWith(`${prefix}.`)) return false;
-  }
-  return true;
+  return BLIND_ALLOWED_METHODS.has(method);
 }

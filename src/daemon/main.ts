@@ -7,22 +7,7 @@ import { registerRoutes } from "./api/router.js";
 import { writeSocketFile, removeSocketFile } from "./socket-file.js";
 import { hasLegacyKeyFile } from "../vault/keychain.js";
 import { writeDaemonAudit } from "./audit.js";
-
-function safeDaemonPath(): string {
-  if (process.platform === "darwin") {
-    return ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":");
-  }
-  if (process.platform === "win32") {
-    return [
-      "C:\\Windows\\System32",
-      "C:\\Windows",
-      "C:\\Windows\\System32\\Wbem",
-      "C:\\Program Files\\Vercel CLI",
-    ].join(";");
-  }
-  // Linux + everything else
-  return ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"].join(":");
-}
+import { safeDaemonPath } from "./safe-env.js";
 
 async function main(): Promise<void> {
   if (process.getuid !== undefined && process.getuid() === 0) {

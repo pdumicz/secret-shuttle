@@ -5,7 +5,7 @@ import { startCdpProxy } from "../../proxy/cdp-proxy.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 
-interface StartBody { profile?: string; chrome_path?: string; }
+interface StartBody { profile?: string; }
 
 export function registerBrowser(server: DaemonServer, services: DaemonServices): void {
   server.addRoute("POST", "/v1/browser/start", async (_req, raw) => {
@@ -13,10 +13,7 @@ export function registerBrowser(server: DaemonServer, services: DaemonServices):
       throw new ShuttleError("browser_already_started", "Browser already started.");
     }
     const b = (raw ?? {}) as StartBody;
-    const session = await launchChrome({
-      profile: b.profile ?? "prod-config",
-      ...(b.chrome_path !== undefined ? { chromePath: b.chrome_path } : {}),
-    });
+    const session = await launchChrome({ profile: b.profile ?? "prod-config" });
     services.browser = new CdpBrowserOps(session.cdp);
     services.cdp = session.cdp;
     const proxy = await startCdpProxy({
