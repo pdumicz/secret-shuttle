@@ -1,23 +1,17 @@
 import { Command } from "commander";
+import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
-import { loadOrCreateMasterKey } from "../../vault/keychain.js";
-import { Vault } from "../../vault/vault.js";
 
 export function listCommand(): Command {
   return new Command("list")
     .description("List secret metadata only.")
-    .option("--env <environment>", "Filter by environment.")
-    .option("--source <source>", "Filter by source.")
+    .option("--env <environment>")
+    .option("--source <source>")
     .action(async (options) => {
-      const key = await loadOrCreateMasterKey();
-      const vault = new Vault(() => key);
-      const secrets = await vault.list({
-        environment: options.env,
-        source: options.source,
-      });
-      outputJson(ok({
-        secrets,
-        value_visible_to_agent: false,
-      }));
+      const body: Record<string, string> = {};
+      if (options.env !== undefined) body.environment = options.env;
+      if (options.source !== undefined) body.source = options.source;
+      const r = await daemonRequest("POST", "/v1/secrets/list", body);
+      outputJson(ok(r as Record<string, unknown>));
     });
 }

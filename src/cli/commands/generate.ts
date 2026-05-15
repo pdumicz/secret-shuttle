@@ -1,47 +1,33 @@
 import { Command } from "commander";
-import { writeAuditEvent } from "../../logging/logger.js";
+import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
-import { loadOrCreateMasterKey } from "../../vault/keychain.js";
-import { Vault } from "../../vault/vault.js";
-import { collectRepeated, generateSecretValue } from "./helpers.js";
+import { collectRepeated } from "./helpers.js";
 
 export function generateCommand(): Command {
   return new Command("generate")
-    .description("Generate and store a new secret locally. The raw value is never printed.")
-    .requiredOption("--name <name>", "Secret name, for example INTERNAL_CRON_SECRET.")
-    .requiredOption("--env <environment>", "Environment, for example production.")
+    .description("Generate and store a new secret via the daemon.")
+    .requiredOption("--name <name>")
+    .requiredOption("--env <environment>")
     .option("--source <source>", "Secret source namespace.", "local")
     .option("--kind <kind>", "Secret kind.", "random_32_bytes")
-    .option("--allow-domain <domain>", "Allowed destination domain. Can be repeated.", collectRepeated, [])
-    .option("--description <description>", "Non-secret description.")
+    .option("--allow-domain <domain>", "Allowed destination domain.", collectRepeated, [])
+    .option("--description <description>")
     .option("--force", "Overwrite an existing secret with the same ref.", false)
+    .option("--approval-id <id>", "Pre-issued approval id.")
+    .option("--no-wait", "Return approval_required without waiting.")
     .action(async (options) => {
-      const value = generateSecretValue(options.kind);
-      const key = await loadOrCreateMasterKey();
-      const vault = new Vault(() => key);
-      const metadata = await vault.upsertSecret({
+      const body: Record<string, unknown> = {
         name: options.name,
         environment: options.env,
         source: options.source,
-        value,
-        description: options.description,
-        allowedDomains: options.allowDomain,
-        force: options.force,
-      });
-      await writeAuditEvent({
-        action: "generate",
-        ok: true,
-        ref: metadata.ref,
-        environment: metadata.environment,
-      });
-      outputJson(ok({
-        generated: true,
-        secret_ref: metadata.ref,
-        name: metadata.name,
-        environment: metadata.environment,
-        source: metadata.source,
-        fingerprint: metadata.fingerprint,
-        value_visible_to_agent: false,
-      }));
+        kind: options.kind,
+        allowed_domains: options.allowDomain,
+        force: options.force === true,
+        wait_for_approval: options.wait !== false,
+      };
+      if (options.description !== undefined) body.description = options.description;
+      if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      const r = await daemonRequest("POST", "/v1/secrets/generate", body);
+      outputJson(ok(r as Record<string, unknown>));
     });
 }

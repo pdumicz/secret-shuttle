@@ -1,20 +1,14 @@
 import { Command } from "commander";
+import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
-import { loadOrCreateMasterKey } from "../../vault/keychain.js";
-import { Vault } from "../../vault/vault.js";
 import { normalizeRef } from "./helpers.js";
 
 export function inspectCommand(): Command {
   return new Command("inspect")
     .description("Inspect secret metadata. Raw values are never returned.")
-    .argument("<ref>", "Secret Shuttle ref, for example ss://stripe/prod/STRIPE_WEBHOOK_SECRET.")
+    .argument("<ref>")
     .action(async (ref: string) => {
-      const key = await loadOrCreateMasterKey();
-      const vault = new Vault(() => key);
-      const metadata = await vault.inspect(normalizeRef(ref));
-      outputJson(ok({
-        secret: metadata,
-        value_visible_to_agent: false,
-      }));
+      const r = await daemonRequest("POST", "/v1/secrets/inspect", { ref: normalizeRef(ref) });
+      outputJson(ok(r as Record<string, unknown>));
     });
 }

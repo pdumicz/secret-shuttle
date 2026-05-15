@@ -1,58 +1,25 @@
 import { Command } from "commander";
-import { PlaywrightFocusedFieldAdapter } from "../../browser/playwright-adapter.js";
-import { writeAuditEvent } from "../../logging/logger.js";
-import { requireApproval } from "../../policy/approvals.js";
-import { assertDomainAllowed, assertProvidedDomainMatchesCurrent } from "../../policy/domain-policy.js";
-import { assertSecretActionAllowed } from "../../policy/policy.js";
+import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
-import { loadOrCreateMasterKey } from "../../vault/keychain.js";
-import { Vault } from "../../vault/vault.js";
 import { assertFocusedTarget, normalizeRef } from "./helpers.js";
 
 export function injectCommand(): Command {
   return new Command("inject")
-    .description("Inject a stored secret into the focused browser field without printing it.")
-    .requiredOption("--ref <ref>", "Secret Shuttle ref.")
+    .description("Inject a stored secret into the focused browser field via the daemon.")
+    .requiredOption("--ref <ref>")
     .option("--to <target>", "Injection target.", "focused-field")
-    .option("--domain <domain>", "Expected current browser domain.")
-    .option("--cdp-url <url>", "Chrome DevTools Protocol URL.", process.env.SECRET_SHUTTLE_CDP_URL)
-    .option("--confirm-production <word>", "Non-interactive production approval. Must be PRODUCTION.")
+    .option("--domain <domain>")
+    .option("--approval-id <id>")
+    .option("--no-wait")
     .action(async (options) => {
       assertFocusedTarget(options.to);
-      const ref = normalizeRef(options.ref);
-      const key = await loadOrCreateMasterKey();
-      const vault = new Vault(() => key);
-      const secret = await vault.getSecret(ref);
-      assertSecretActionAllowed(secret, "inject_into_field");
-
-      const adapter = new PlaywrightFocusedFieldAdapter({ cdpUrl: options.cdpUrl });
-      const currentDomain = await adapter.currentDomain();
-      assertProvidedDomainMatchesCurrent(options.domain, currentDomain);
-      assertDomainAllowed(currentDomain, secret.allowed_domains, "inject");
-
-      await requireApproval({
-        secret,
-        action: "inject",
-        destination: currentDomain,
-        confirmProduction: options.confirmProduction,
-      });
-
-      const result = await adapter.write(secret.value);
-      await vault.markUsed(secret.ref);
-      await writeAuditEvent({
-        action: "inject",
-        ok: true,
-        ref: secret.ref,
-        domain: result.domain,
-        environment: secret.environment,
-      });
-
-      outputJson(ok({
-        injected: true,
-        secret_ref: secret.ref,
-        browser_domain: result.domain,
-        field: result.field,
-        value_visible_to_agent: false,
-      }));
+      const body: Record<string, unknown> = {
+        ref: normalizeRef(options.ref),
+        wait_for_approval: options.wait !== false,
+      };
+      if (options.domain !== undefined) body.domain = options.domain;
+      if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      const r = await daemonRequest("POST", "/v1/secrets/inject", body);
+      outputJson(ok(r as Record<string, unknown>));
     });
 }
