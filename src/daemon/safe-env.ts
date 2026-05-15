@@ -14,9 +14,7 @@ export function buildDaemonEnv(): NodeJS.ProcessEnv {
     "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "TMP",
     "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     "SECRET_SHUTTLE_HOME",
-    "SECRET_SHUTTLE_INSECURE_DEV_MODE",
     "SECRET_SHUTTLE_NO_OPEN_URL",
-    "SECRET_SHUTTLE_CHROME_PATH",
     // Windows-only basics:
     "SystemRoot", "SystemDrive", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
     "PROGRAMFILES", "PROGRAMFILES(X86)", "ComSpec",

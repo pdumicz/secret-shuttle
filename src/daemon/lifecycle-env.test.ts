@@ -4,6 +4,26 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { getDaemonStatus, startDaemon, stopDaemon } from "./lifecycle.js";
+import { buildDaemonEnv } from "./safe-env.js";
+
+test("daemon does not honor SECRET_SHUTTLE_CHROME_PATH set in the parent environment", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "ss-env-chrome-"));
+  const prevHome = process.env.SECRET_SHUTTLE_HOME;
+  const prevChrome = process.env.SECRET_SHUTTLE_CHROME_PATH;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  process.env.SECRET_SHUTTLE_CHROME_PATH = "/tmp/should-not-be-in-daemon-env";
+  try {
+    const env = buildDaemonEnv();
+    assert.equal(env.SECRET_SHUTTLE_CHROME_PATH, undefined);
+    assert.equal(env.SECRET_SHUTTLE_INSECURE_DEV_MODE, undefined);
+  } finally {
+    if (prevHome === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+    else process.env.SECRET_SHUTTLE_HOME = prevHome;
+    if (prevChrome === undefined) delete process.env.SECRET_SHUTTLE_CHROME_PATH;
+    else process.env.SECRET_SHUTTLE_CHROME_PATH = prevChrome;
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test("daemon does not honor NODE_OPTIONS set in the parent environment", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-env-"));

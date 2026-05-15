@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ShuttleError } from "../../shared/errors.js";
+import { readDaemonConfig } from "../config.js";
 import { spawnChromePipe, type PipeTransport } from "./pipe-transport.js";
 import { CdpClient } from "./cdp-client.js";
 
@@ -11,10 +12,17 @@ export interface ChromeSession {
   transport: PipeTransport;
 }
 
+const STARTUP_TIMEOUT_MS = 10_000;
+
 export async function launchChrome(opts: { profile: string }): Promise<ChromeSession> {
-  const chromePath = process.env.SECRET_SHUTTLE_CHROME_PATH ?? defaultChromePath();
+  const config = await readDaemonConfig();
+  const chromePath = config?.chromePath ?? defaultChromePath();
   if (chromePath === null) {
-    throw new ShuttleError("chrome_not_found", "Could not find Chrome. Set SECRET_SHUTTLE_CHROME_PATH on the daemon process to a trusted absolute path.");
+    throw new ShuttleError(
+      "chrome_not_found",
+      "Could not find Chrome. Either install Chrome at its default location or write " +
+        '{"version":1,"chromePath":"/abs/path/to/Chrome"} into ~/.secret-shuttle/daemon.config.json.',
+    );
   }
   const profileDir = path.join(os.homedir(), ".secret-shuttle", "browser-profiles", opts.profile);
   await mkdir(profileDir, { recursive: true });
@@ -25,7 +33,30 @@ export async function launchChrome(opts: { profile: string }): Promise<ChromeSes
     "about:blank",
   ]);
   const cdp = new CdpClient(transport);
-  await cdp.send("Browser.getVersion");
+  try {
+    await Promise.race([
+      cdp.send("Browser.getVersion"),
+      new Promise<never>((_, reject) => {
+        setTimeout(
+          () =>
+            reject(
+              new ShuttleError(
+                "chrome_startup_timeout",
+                `Chrome did not respond within ${STARTUP_TIMEOUT_MS}ms.`,
+              ),
+            ),
+          STARTUP_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } catch (err) {
+    try {
+      child.kill();
+    } catch {
+      // best-effort
+    }
+    throw err;
+  }
   return { child, cdp, transport };
 }
 
