@@ -4,7 +4,6 @@ import { ShuttleError } from "../shared/errors.js";
 import { buildSecretRef, canonicalEnvironment } from "../shared/refs.js";
 import { decryptVault, encryptVault } from "./crypto.js";
 import { fingerprintSecret } from "./fingerprints.js";
-import { loadOrCreateMasterKey } from "./keychain.js";
 import type {
   AgentSecretMetadata,
   EncryptedVaultFile,
@@ -22,17 +21,17 @@ const DEFAULT_ACTIONS: SecretAction[] = [
 ];
 
 export class Vault {
-  async init(): Promise<{ created: boolean; vaultPath: string; keyStorage: "local-file" }> {
+  constructor(private readonly keyProvider: () => Buffer) {}
+
+  async ensureInitialized(): Promise<{ created: boolean; vaultPath: string }> {
     const paths = getShuttlePaths();
     await ensureShuttleHome(paths);
-    await loadOrCreateMasterKey();
 
     if (await fileExists(paths.vaultPath)) {
       await this.read();
       return {
         created: false,
         vaultPath: paths.vaultPath,
-        keyStorage: "local-file",
       };
     }
 
@@ -42,17 +41,16 @@ export class Vault {
     });
 
     await writeJsonFileAtomic(paths.configPath, {
-      version: 1,
+      version: 2,
       created_at: new Date().toISOString(),
       vault_path: paths.vaultPath,
-      security_model: "cooperative_blind_mode_v0",
+      security_model: "daemon_secure_mode_v2",
       raw_secret_read_api: false,
     });
 
     return {
       created: true,
       vaultPath: paths.vaultPath,
-      keyStorage: "local-file",
     };
   }
 
@@ -142,7 +140,7 @@ export class Vault {
     if (!(await fileExists(paths.vaultPath))) {
       throw new ShuttleError("vault_not_initialized", "Secret Shuttle is not initialized. Run `secret-shuttle init`.");
     }
-    const key = await loadOrCreateMasterKey();
+    const key = this.keyProvider();
     const file = await readJsonFile<EncryptedVaultFile>(paths.vaultPath);
     const plaintext = decryptVault(file, key);
     if (plaintext.version !== 1 || !Array.isArray(plaintext.secrets)) {
@@ -154,7 +152,7 @@ export class Vault {
   private async write(plaintext: VaultPlaintext): Promise<void> {
     const paths = getShuttlePaths();
     await ensureShuttleHome(paths);
-    const key = await loadOrCreateMasterKey();
+    const key = this.keyProvider();
     await writeJsonFileAtomic(paths.vaultPath, encryptVault(plaintext, key));
   }
 }

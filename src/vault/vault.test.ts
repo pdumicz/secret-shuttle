@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,8 +13,9 @@ test("vault stores encrypted secrets and returns metadata only", async () => {
   process.env.SECRET_SHUTTLE_HOME = home;
 
   try {
-    const vault = new Vault();
-    await vault.init();
+    const key = randomBytes(32);
+    const vault = new Vault(() => key);
+    await vault.ensureInitialized();
     const metadata = await vault.upsertSecret({
       name: "STRIPE_WEBHOOK_SECRET",
       environment: "production",

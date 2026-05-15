@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { writeAuditEvent } from "../../logging/logger.js";
 import { ok, outputJson } from "../../shared/result.js";
+import { loadOrCreateMasterKey } from "../../vault/keychain.js";
 import { Vault } from "../../vault/vault.js";
 import { collectRepeated, generateSecretValue } from "./helpers.js";
 
@@ -16,7 +17,8 @@ export function generateCommand(): Command {
     .option("--force", "Overwrite an existing secret with the same ref.", false)
     .action(async (options) => {
       const value = generateSecretValue(options.kind);
-      const vault = new Vault();
+      const key = await loadOrCreateMasterKey();
+      const vault = new Vault(() => key);
       const metadata = await vault.upsertSecret({
         name: options.name,
         environment: options.env,

@@ -5,6 +5,7 @@ import { redactKnownSecrets } from "../../logging/redactor.js";
 import { requireApproval } from "../../policy/approvals.js";
 import { assertSecretActionAllowed } from "../../policy/policy.js";
 import { ok, outputJson } from "../../shared/result.js";
+import { loadOrCreateMasterKey } from "../../vault/keychain.js";
 import { Vault } from "../../vault/vault.js";
 import { normalizeRef } from "./helpers.js";
 
@@ -20,7 +21,8 @@ export function useAsStdinCommand(): Command {
     .option("--no-newline", "Do not append a trailing newline to stdin.")
     .action(async (options) => {
       const ref = normalizeRef(options.ref);
-      const vault = new Vault();
+      const key = await loadOrCreateMasterKey();
+      const vault = new Vault(() => key);
       const secret = await vault.getSecret(ref);
       assertSecretActionAllowed(secret, "use_as_stdin");
 

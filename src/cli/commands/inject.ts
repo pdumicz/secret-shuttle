@@ -5,6 +5,7 @@ import { requireApproval } from "../../policy/approvals.js";
 import { assertDomainAllowed, assertProvidedDomainMatchesCurrent } from "../../policy/domain-policy.js";
 import { assertSecretActionAllowed } from "../../policy/policy.js";
 import { ok, outputJson } from "../../shared/result.js";
+import { loadOrCreateMasterKey } from "../../vault/keychain.js";
 import { Vault } from "../../vault/vault.js";
 import { assertFocusedTarget, normalizeRef } from "./helpers.js";
 
@@ -19,7 +20,8 @@ export function injectCommand(): Command {
     .action(async (options) => {
       assertFocusedTarget(options.to);
       const ref = normalizeRef(options.ref);
-      const vault = new Vault();
+      const key = await loadOrCreateMasterKey();
+      const vault = new Vault(() => key);
       const secret = await vault.getSecret(ref);
       assertSecretActionAllowed(secret, "inject_into_field");
 

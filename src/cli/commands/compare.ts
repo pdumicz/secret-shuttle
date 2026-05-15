@@ -5,6 +5,7 @@ import { assertDomainAllowed, assertProvidedDomainMatchesCurrent } from "../../p
 import { assertSecretActionAllowed } from "../../policy/policy.js";
 import { ok, outputJson } from "../../shared/result.js";
 import { fingerprintMatches } from "../../vault/fingerprints.js";
+import { loadOrCreateMasterKey } from "../../vault/keychain.js";
 import { Vault } from "../../vault/vault.js";
 import { assertCaptureSource, normalizeRef } from "./helpers.js";
 
@@ -18,7 +19,8 @@ export function compareCommand(): Command {
     .action(async (options) => {
       assertCaptureSource(options.with);
       const ref = normalizeRef(options.ref);
-      const vault = new Vault();
+      const key = await loadOrCreateMasterKey();
+      const vault = new Vault(() => key);
       const secret = await vault.getSecret(ref);
       assertSecretActionAllowed(secret, "compare_fingerprint");
 

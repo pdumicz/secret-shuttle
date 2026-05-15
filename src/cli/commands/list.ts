@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { ok, outputJson } from "../../shared/result.js";
+import { loadOrCreateMasterKey } from "../../vault/keychain.js";
 import { Vault } from "../../vault/vault.js";
 
 export function listCommand(): Command {
@@ -8,7 +9,8 @@ export function listCommand(): Command {
     .option("--env <environment>", "Filter by environment.")
     .option("--source <source>", "Filter by source.")
     .action(async (options) => {
-      const vault = new Vault();
+      const key = await loadOrCreateMasterKey();
+      const vault = new Vault(() => key);
       const secrets = await vault.list({
         environment: options.env,
         source: options.source,

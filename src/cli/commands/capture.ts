@@ -4,6 +4,7 @@ import { assertBlindModeForDomain } from "../../policy/blind-mode.js";
 import { assertDomainAllowed } from "../../policy/domain-policy.js";
 import { PlaywrightFocusedFieldAdapter } from "../../browser/playwright-adapter.js";
 import { ok, outputJson } from "../../shared/result.js";
+import { loadOrCreateMasterKey } from "../../vault/keychain.js";
 import { Vault } from "../../vault/vault.js";
 import { assertCaptureSource, collectRepeated } from "./helpers.js";
 
@@ -27,7 +28,8 @@ export function captureCommand(): Command {
       const allowedDomains = options.allowDomain.length > 0 ? options.allowDomain : [capture.domain];
       assertDomainAllowed(capture.domain, allowedDomains, "capture");
 
-      const vault = new Vault();
+      const key = await loadOrCreateMasterKey();
+      const vault = new Vault(() => key);
       const metadata = await vault.upsertSecret({
         name: options.name,
         environment: options.env,
