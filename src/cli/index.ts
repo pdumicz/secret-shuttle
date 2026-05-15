@@ -17,7 +17,7 @@ const program = new Command();
 program
   .name("secret-shuttle")
   .description("A local blind-secret bridge for AI coding agents.")
-  .version("0.1.0");
+  .version("0.1.1");
 
 program.addCommand(initCommand());
 program.addCommand(browserCommand());
