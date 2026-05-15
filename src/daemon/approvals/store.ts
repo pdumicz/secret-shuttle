@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { ShuttleError } from "../../shared/errors.js";
 
+export type ApprovalLifecycleEvent =
+  | { kind: "created"; grant: ApprovalGrant }
+  | { kind: "granted"; grant: ApprovalGrant }
+  | { kind: "denied"; grant: ApprovalGrant }
+  | { kind: "expired"; grant: ApprovalGrant }
+  | { kind: "used"; grant: ApprovalGrant }
+  | { kind: "mismatch"; binding: ApprovalBinding; existingGrant: ApprovalGrant };
+
 export interface ApprovalBinding {
   action: "inject" | "capture" | "generate" | "compare" | "template";
   ref: string | null;
@@ -31,10 +39,12 @@ export class ApprovalStore {
   private readonly grants = new Map<string, ApprovalGrant>();
   private readonly ttlMs: number;
   private now: () => number;
+  private readonly onEvent: ((event: ApprovalLifecycleEvent) => void) | undefined;
 
-  constructor(opts: { ttlMs?: number; now?: () => number } = {}) {
+  constructor(opts: { ttlMs?: number; now?: () => number; onEvent?: (event: ApprovalLifecycleEvent) => void } = {}) {
     this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
     this.now = opts.now ?? (() => Date.now());
+    this.onEvent = opts.onEvent;
   }
 
   create(binding: ApprovalBinding): ApprovalGrant {
@@ -49,6 +59,7 @@ export class ApprovalStore {
       ui_token: randomUUID(),
     };
     this.grants.set(id, grant);
+    this.onEvent?.({ kind: "created", grant });
     return grant;
   }
 
@@ -57,6 +68,7 @@ export class ApprovalStore {
     if (g === undefined) return undefined;
     if (g.status === "pending" && this.now() > g.expires_at) {
       g.status = "expired";
+      this.onEvent?.({ kind: "expired", grant: g });
     }
     return g;
   }
@@ -64,11 +76,13 @@ export class ApprovalStore {
   approve(id: string): void {
     const g = this.requirePending(id);
     g.status = "granted";
+    this.onEvent?.({ kind: "granted", grant: g });
   }
 
   deny(id: string): void {
     const g = this.requirePending(id);
     g.status = "denied";
+    this.onEvent?.({ kind: "denied", grant: g });
   }
 
   consume(id: string, binding: ApprovalBinding): ApprovalGrant {
@@ -81,9 +95,11 @@ export class ApprovalStore {
       throw new ShuttleError("approval_expired", "Approval expired.");
     }
     if (!bindingsMatch(g, binding)) {
+      this.onEvent?.({ kind: "mismatch", binding, existingGrant: g });
       throw new ShuttleError("approval_mismatch", "Approval does not match the requested action.");
     }
     g.status = "used";
+    this.onEvent?.({ kind: "used", grant: g });
     return g;
   }
 

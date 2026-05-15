@@ -7,6 +7,8 @@ import { runTemplate } from "../../templates/run.js";
 import { TemplateRegistry } from "../../templates/registry.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
+import { writeDaemonAudit } from "../../audit.js";
+import { ShuttleError } from "../../../shared/errors.js";
 
 const registry = new TemplateRegistry();
 
@@ -31,49 +33,67 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
   server.addRoute("POST", "/v1/templates/run", async (_req, raw) => {
     services.lock.requireKey();
     const b = raw as RunBody;
-    const tpl = registry.get(b.template_id);
-    const secret = await services.vault.getSecret(b.ref);
+    try {
+      const tpl = registry.get(b.template_id);
+      const secret = await services.vault.getSecret(b.ref);
 
-    // Resolve and hash the binary BEFORE creating the approval grant so the
-    // human sees exactly which file will run and its content fingerprint.
-    const absolute = await resolveBinary(tpl.binary);
-    const sha256 = createHash("sha256").update(await readFile(absolute)).digest("hex");
+      // Resolve and hash the binary BEFORE creating the approval grant so the
+      // human sees exactly which file will run and its content fingerprint.
+      const absolute = await resolveBinary(tpl.binary);
+      const sha256 = createHash("sha256").update(await readFile(absolute)).digest("hex");
 
-    const binding: ApprovalBinding = {
-      action: "template",
-      ref: secret.ref,
-      environment: secret.environment,
-      destination_domain: null,
-      target_id: null,
-      field_fingerprint: null,
-      template_id: tpl.id,
-      template_params: b.params ?? {},
-      template_binary_path: absolute,
-      template_binary_sha256: sha256,
-    };
-    await requireApproval({
-      store: services.approvals,
-      binding,
-      daemonPort: daemonPortRef(),
-      ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
-      ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
-    });
+      const binding: ApprovalBinding = {
+        action: "template",
+        ref: secret.ref,
+        environment: secret.environment,
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: tpl.id,
+        template_params: b.params ?? {},
+        template_binary_path: absolute,
+        template_binary_sha256: sha256,
+      };
+      await requireApproval({
+        store: services.approvals,
+        binding,
+        daemonPort: daemonPortRef(),
+        ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
+        ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
+      });
 
-    const result = await runTemplate({
-      template: { ...tpl, binary: absolute },
-      params: b.params ?? {},
-      secret: secret.value,
-      expectedSha256: sha256,
-    });
-    await services.vault.markUsed(secret.ref);
-    return {
-      executed: result.exit_code === 0,
-      template_id: result.template_id,
-      secret_ref: secret.ref,
-      binary_path: absolute,
-      binary_sha256: sha256,
-      exit_code: result.exit_code,
-      value_visible_to_agent: false,
-    };
+      const result = await runTemplate({
+        template: { ...tpl, binary: absolute },
+        params: b.params ?? {},
+        secret: secret.value,
+        expectedSha256: sha256,
+      });
+      await services.vault.markUsed(secret.ref);
+      await writeDaemonAudit({
+        action: "template_run",
+        ok: result.exit_code === 0,
+        ref: secret.ref,
+        environment: secret.environment,
+        template_id: tpl.id,
+      });
+      return {
+        executed: result.exit_code === 0,
+        template_id: result.template_id,
+        secret_ref: secret.ref,
+        binary_path: absolute,
+        binary_sha256: sha256,
+        exit_code: result.exit_code,
+        value_visible_to_agent: false,
+      };
+    } catch (err) {
+      await writeDaemonAudit({
+        action: "template_run",
+        ok: false,
+        error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+        ...(b.ref !== undefined ? { ref: b.ref } : {}),
+        ...(b.template_id !== undefined ? { template_id: b.template_id } : {}),
+      });
+      throw err;
+    }
   });
 }

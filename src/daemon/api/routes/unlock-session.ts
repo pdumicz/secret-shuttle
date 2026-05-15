@@ -7,6 +7,7 @@ import { decryptEnvelope, encryptEnvelope, readEnvelope, writeEnvelope } from ".
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { openUrl } from "../../approvals/open-url.js";
+import { writeDaemonAudit } from "../../audit.js";
 
 const HTML_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -72,12 +73,18 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
       services.lock.unlock(masterKey);
       await services.vault.ensureInitialized();
       session.status = "unlocked";
+      await writeDaemonAudit({ action: "unlock", ok: true });
       res.statusCode = 200;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ ok: true }));
     } catch (err) {
       session.status = "failed";
       session.message = err instanceof Error ? err.message : "failed";
+      await writeDaemonAudit({
+        action: "unlock",
+        ok: false,
+        error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+      });
       res.statusCode = 400;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ ok: false, error: { code: "vault_unlock_failed", message: session.message } }));

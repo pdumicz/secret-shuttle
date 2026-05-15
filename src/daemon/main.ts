@@ -6,6 +6,7 @@ import { DaemonServices } from "./services.js";
 import { registerRoutes } from "./api/router.js";
 import { writeSocketFile, removeSocketFile } from "./socket-file.js";
 import { hasLegacyKeyFile } from "../vault/keychain.js";
+import { writeDaemonAudit } from "./audit.js";
 
 function safeDaemonPath(): string {
   if (process.platform === "darwin") {
@@ -53,6 +54,7 @@ async function main(): Promise<void> {
   await writeSocketFile({ port, token, pid: process.pid });
 
   const shutdown = async () => {
+    await writeDaemonAudit({ action: "lock", ok: true, message: "daemon shutdown" });
     services.lock.lock();
     await removeSocketFile();
     await server.close();
