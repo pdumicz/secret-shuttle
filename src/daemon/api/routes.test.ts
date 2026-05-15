@@ -257,3 +257,55 @@ test("approvals/poll returns status of a pending grant", async () => {
     assert.equal((r.body as { status: string }).status, "pending");
   });
 });
+
+test("unlock via web UI flow: start, submit passphrase, poll, unlocked", async () => {
+  await withDaemon(async (ctx) => {
+    // Start an unlock session.
+    const start = await call(ctx, "POST", "/v1/unlock/start");
+    assert.equal(start.status, 200);
+    const sb = start.body as { session_id: string; ui_token: string; requires_create: boolean };
+    assert.equal(sb.requires_create, true);
+
+    // Poll — pending.
+    const pollPending = await call(ctx, "POST", "/v1/unlock/poll", { session_id: sb.session_id });
+    assert.equal((pollPending.body as { status: string }).status, "pending");
+
+    // Submit passphrase via UI route (no bearer; URL token).
+    const submitRes = await fetch(`http://127.0.0.1:${ctx.port}/ui/unlock/${sb.session_id}?token=${sb.ui_token}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "secret123", set_passphrase: true }),
+    });
+    assert.equal(submitRes.status, 200);
+
+    // Poll — unlocked.
+    const pollDone = await call(ctx, "POST", "/v1/unlock/poll", { session_id: sb.session_id });
+    assert.equal((pollDone.body as { status: string }).status, "unlocked");
+
+    // Daemon status now reports unlocked: true.
+    const status = await call(ctx, "GET", "/v1/status");
+    assert.equal((status.body as { unlocked: boolean }).unlocked, true);
+  });
+});
+
+test("UI unlock route rejects invalid ui_token", async () => {
+  await withDaemon(async (ctx) => {
+    const start = await call(ctx, "POST", "/v1/unlock/start");
+    const sb = start.body as { session_id: string };
+    const res = await fetch(`http://127.0.0.1:${ctx.port}/ui/unlock/${sb.session_id}?token=nope`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "x", set_passphrase: true }),
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
+test("GET /ui/unlock serves the HTML page", async () => {
+  await withDaemon(async (ctx) => {
+    const res = await fetch(`http://127.0.0.1:${ctx.port}/ui/unlock`);
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    assert.ok(text.includes("Unlock Secret Shuttle"));
+  });
+});
