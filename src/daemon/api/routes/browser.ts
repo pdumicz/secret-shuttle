@@ -18,6 +18,7 @@ export function registerBrowser(server: DaemonServer, services: DaemonServices):
       ...(b.chrome_path !== undefined ? { chromePath: b.chrome_path } : {}),
     });
     services.browser = new CdpBrowserOps(session.cdp);
+    services.cdp = session.cdp;
     const proxy = await startCdpProxy({
       transport: session.transport,
       cdp: session.cdp,

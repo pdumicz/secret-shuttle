@@ -30,7 +30,21 @@ export async function startCdpProxy(opts: {
   });
 
   function wireSocket(ws: WebSocket): void {
-    const onChrome = (msg: unknown) => ws.send(JSON.stringify(msg as CdpMessage));
+    const onChrome = (msg: unknown) => {
+      const m = msg as CdpMessage;
+      const method = m.method ?? "";
+      // Chrome → agent path. Events have a method but no id.
+      // Drop sensitive events while blind mode is active so that pre-enabled
+      // subscriptions (Runtime.consoleAPICalled, Network.responseReceived,
+      // Page.screencastFrame, etc.) cannot leak page content to the agent.
+      if (method !== "" && m.id === undefined) {
+        const blindOn = opts.blind.current() !== null;
+        if (blindOn && !isMethodAllowed(method, true)) {
+          return;
+        }
+      }
+      ws.send(JSON.stringify(m));
+    };
     opts.transport.on("message", onChrome);
     ws.on("close", () => opts.transport.removeListener("message", onChrome));
     ws.on("message", (raw: Buffer) => {

@@ -29,3 +29,33 @@ test("blind mode allows navigation primitives", () => {
   assert.equal(isMethodAllowed("Target.attachToTarget", true), true);
   assert.equal(isMethodAllowed("Input.dispatchKeyEvent", true), true);
 });
+
+test("blind mode blocks Page.startScreencast and screencast events", () => {
+  assert.equal(isMethodAllowed("Page.startScreencast", true), false);
+  assert.equal(isMethodAllowed("Page.screencastFrame", true), false);
+  assert.equal(isMethodAllowed("Page.screencastVisibilityChanged", true), false);
+});
+
+test("blind mode blocks Runtime event streams", () => {
+  assert.equal(isMethodAllowed("Runtime.consoleAPICalled", true), false);
+  assert.equal(isMethodAllowed("Runtime.exceptionThrown", true), false);
+  assert.equal(isMethodAllowed("Runtime.bindingCalled", true), false);
+});
+
+test("blind mode blocks Profiler / HeapProfiler / Tracing", () => {
+  assert.equal(isMethodAllowed("Profiler.enable", true), false);
+  assert.equal(isMethodAllowed("HeapProfiler.startSampling", true), false);
+  assert.equal(isMethodAllowed("Tracing.start", true), false);
+});
+
+test("blind mode blocks Network event streams + body reads", () => {
+  assert.equal(isMethodAllowed("Network.responseReceived", true), false);
+  assert.equal(isMethodAllowed("Network.dataReceived", true), false);
+  assert.equal(isMethodAllowed("Fetch.getResponseBody", true), false);
+});
+
+test("blind mode blocks Storage / IndexedDB / DOMStorage readbacks", () => {
+  assert.equal(isMethodAllowed("Storage.getCookies", true), false);
+  assert.equal(isMethodAllowed("IndexedDB.requestData", true), false);
+  assert.equal(isMethodAllowed("DOMStorage.getDOMStorageItems", true), false);
+});

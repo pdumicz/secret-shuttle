@@ -2,6 +2,39 @@
 import { createHash } from "node:crypto";
 import type { CdpClient } from "./cdp-client.js";
 
+const OBSERVATION_DISABLE_METHODS = [
+  "Runtime.disable",
+  "Network.disable",
+  "Console.disable",
+  "Log.disable",
+  "Profiler.disable",
+  "HeapProfiler.disable",
+] as const;
+
+/**
+ * Best-effort: tells Chrome to stop emitting observation domains on every attached
+ * page target.  Called when blind mode starts so that pre-enabled subscriptions
+ * (Runtime.consoleAPICalled, Network.responseReceived, etc.) stop flowing even
+ * for events that were registered before the blind-mode flag was set.
+ */
+export async function disableObservationDomains(cdp: CdpClient): Promise<void> {
+  const r = await cdp.send<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets");
+  for (const t of r.targetInfos.filter((t) => t.type === "page")) {
+    const { sessionId } = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+      targetId: t.targetId,
+      flatten: true,
+    });
+    try {
+      for (const method of OBSERVATION_DISABLE_METHODS) {
+        await cdp.send(method, {}, sessionId).catch(() => undefined);
+      }
+      await cdp.send("Page.stopScreencast", {}, sessionId).catch(() => undefined);
+    } finally {
+      await cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+}
+
 export interface FieldDescriptor {
   tag: string;
   type?: string;

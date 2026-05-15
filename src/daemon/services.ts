@@ -4,6 +4,7 @@ import { LockedVaultState } from "../vault/locked-state.js";
 import { Vault } from "../vault/vault.js";
 import { DaemonBlindModeState } from "./services-blind.js";
 import type { BrowserOps } from "./chrome/internal-ops.js";
+import type { CdpClient } from "./chrome/cdp-client.js";
 import { randomUUID } from "node:crypto";
 
 export interface UnlockSession {
@@ -40,4 +41,6 @@ export class DaemonServices {
   readonly unlockSessions = new UnlockSessions();
   browser: BrowserOps | null = null;
   browserSessionId: string | null = null;
+  /** Internal CDP client for the running Chrome process; null before browser start. */
+  cdp: CdpClient | null = null;
 }
