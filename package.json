@@ -26,7 +26,6 @@
     "ai",
     "secrets",
     "cli",
-    "playwright",
     "cdp",
     "local-first"
   ],
@@ -36,7 +35,6 @@
   },
   "dependencies": {
     "commander": "^12.1.0",
-    "playwright-core": "^1.53.0",
     "ws": "^8.20.1"
   },
   "devDependencies": {
