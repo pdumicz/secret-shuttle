@@ -10,7 +10,7 @@ Goal:
 npm install
 npm run build
 npm link
-secret-shuttle init
+secret-shuttle daemon start && secret-shuttle unlock
 secret-shuttle browser start --profile prod-config
 ```
 
@@ -53,6 +53,8 @@ secret-shuttle capture \
   --allow-domain vercel.com
 ```
 
+Approve the request in the Secret Shuttle window your browser opens.
+
 Expected output shape:
 
 ```json
@@ -94,11 +96,7 @@ secret-shuttle inject \
   --domain vercel.com
 ```
 
-Approve production injection by typing:
-
-```text
-PRODUCTION
-```
+Approve the request in the Secret Shuttle window your browser opens.
 
 Expected output shape:
 
@@ -122,3 +120,16 @@ Verify using non-secret signals only:
 - application webhook behavior
 
 Do not reveal or read back the env var value.
+
+## Template Alternative
+
+Instead of manual injection, you can use the built-in template:
+
+```bash
+secret-shuttle template run vercel-env-add \
+  --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET \
+  --param name=STRIPE_WEBHOOK_SECRET \
+  --param environment=production
+```
+
+The template runs the Vercel CLI with `shell: false` and never echoes the secret back to the agent.

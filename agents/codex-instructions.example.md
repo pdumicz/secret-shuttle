@@ -2,12 +2,19 @@
 
 When handling secrets, route the secret moment through Secret Shuttle.
 
+Setup before the first secret operation:
+
+```bash
+secret-shuttle daemon start && secret-shuttle unlock
+```
+
 Do:
 
 - navigate with the browser normally until a secret becomes visible or a secret value field is focused
 - stop observing before the secret is visible to the model
 - run Secret Shuttle commands from the terminal
 - report only refs, fingerprints, and status
+- approve production actions in the Secret Shuttle window your browser opens
 
 Do not:
 
@@ -26,4 +33,13 @@ secret-shuttle inject --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET --to focused-
 secret-shuttle compare --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET --with focused-field
 ```
 
-Production injection requires the human to approve by typing `PRODUCTION`, unless the human explicitly allowed `--confirm-production PRODUCTION`.
+To hand a secret to an external binary, use a template:
+
+```bash
+secret-shuttle template run vercel-env-add \
+  --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET \
+  --param name=STRIPE_WEBHOOK_SECRET \
+  --param environment=production
+```
+
+Production actions require the human to approve in the Secret Shuttle window their browser opens. There is no CLI flag that bypasses approval.

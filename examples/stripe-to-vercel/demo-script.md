@@ -14,6 +14,10 @@ Scene 1:
 Scene 2:
 
 ```bash
+secret-shuttle daemon start && secret-shuttle unlock
+```
+
+```bash
 secret-shuttle blind start \
   --domain dashboard.stripe.com \
   --reason "capture Stripe webhook signing secret"
@@ -30,6 +34,8 @@ secret-shuttle capture \
 ```
 
 Narration:
+
+> Secret Shuttle asks for approval in the browser window it owns. The agent approves nothing — the human does.
 
 > Secret Shuttle stores the raw value locally and gives the agent only a ref and fingerprint.
 
@@ -48,15 +54,11 @@ secret-shuttle inject \
   --domain vercel.com
 ```
 
-Approval prompt:
-
-```text
-Type PRODUCTION to continue:
-```
-
 Narration:
 
-> The model still does not know the `whsec_...` value. The local runtime injects it into the focused field.
+> The daemon opens a one-shot approval window. Approve the request in the Secret Shuttle window your browser opens.
+
+> The model still does not know the `whsec_...` value. The daemon injects it into the focused field through its Chrome pipe.
 
 Scene 5:
 

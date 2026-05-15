@@ -4,11 +4,14 @@ When working with production credentials, webhook signing secrets, API keys, or 
 
 - never put raw values in chat, files, logs, or screenshots
 - use Secret Shuttle refs instead of raw values
+- run `secret-shuttle daemon start && secret-shuttle unlock` before the first secret operation
 - use `secret-shuttle generate` for new secrets
 - use `secret-shuttle capture` after stopping page observation
 - use `secret-shuttle inject` into a focused field
 - use `secret-shuttle compare` to verify without revealing the value
 - do not inspect DOM, accessibility tree, console, network bodies, or clipboard while blind mode is active
+- approve production actions in the Secret Shuttle window your browser opens — there is no CLI flag that bypasses approval
+- use `secret-shuttle template run vercel-env-add ...` to hand a secret to an external binary
 
 Safe values to mention:
 

@@ -2,6 +2,14 @@
 
 Use Secret Shuttle whenever this repository or task needs API keys, tokens, webhook secrets, env vars, production credentials, generated secrets, or secret values.
 
+Setup:
+
+```bash
+secret-shuttle daemon start && secret-shuttle unlock
+```
+
+Run these before the first secret operation. `unlock` opens a local web window for the passphrase.
+
 Rules:
 
 - Never ask the user to paste raw secrets into chat.
@@ -15,6 +23,7 @@ Rules:
 - Use `secret-shuttle inject` for focused-field secret entry.
 - Use `secret-shuttle compare` for verification without reading values.
 - Verify production setup using non-secret UI signals only.
+- Approve production actions in the Secret Shuttle window your browser opens — there is no CLI flag that bypasses approval.
 
 Common flow:
 
@@ -35,4 +44,13 @@ secret-shuttle inject \
   --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET \
   --to focused-field \
   --domain vercel.com
+```
+
+To hand a secret to an external binary, use a template instead of arbitrary commands:
+
+```bash
+secret-shuttle template run vercel-env-add \
+  --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET \
+  --param name=STRIPE_WEBHOOK_SECRET \
+  --param environment=production
 ```

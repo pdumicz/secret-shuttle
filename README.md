@@ -4,9 +4,26 @@ Let AI agents use secrets without seeing them.
 
 > **Status: 0.1.1 — early prototype. Do not trust this with real production secrets yet.**
 >
-> Secret Shuttle V0 is a cooperative-mode prototype. It cannot enforce that another tool on your machine refrains from screenshotting, reading the DOM, or scraping the clipboard while a secret is visible. Enforced Secure Mode (daemon-owned vault and CDP proxy) is being implemented under the `secure-v2` branch and is not yet released. Use this only on test accounts and throwaway secrets.
+> Secret Shuttle is moving from cooperative blind mode (V0) to enforced Secure Mode V2 (daemon-owned vault, CDP proxy, approval UI). The Secure Mode code lives on this branch but has not yet been released. Until the released build catches up, use Secret Shuttle only with test accounts and throwaway secrets.
 
-Secret Shuttle is a local bridge that lets coding agents like Claude Code, Codex, Cursor, and browser-using agents capture, store, generate, compare, and inject secrets through browser and CLI workflows. The agent sees only refs like `ss://stripe/prod/STRIPE_WEBHOOK_SECRET`, fingerprints, and status — never the raw value.
+Secret Shuttle is a local bridge that lets coding agents — Claude Code, Codex, Cursor, browser-using agents — capture, generate, store, compare, and inject secrets through browser and CLI workflows. The agent sees only refs like `ss://stripe/prod/STRIPE_WEBHOOK_SECRET`, fingerprints, field metadata, and status — never the raw value.
+
+## How Secure Mode Works
+
+```text
+Agent CLI (untrusted client)
+        |
+        | localhost HTTP, bearer token from ~/.secret-shuttle/daemon-socket.json
+        v
+Secret Shuttle daemon
+  - vault key (in memory only, after passphrase unlock through web UI)
+  - approval grants (single-use, 2-min TTL, bound to action/ref/domain/target/field/template)
+  - browser owner — talks raw CDP over a pipe
+  - filtered CDP WebSocket proxy exposed to the agent
+  - safe command-template runner (no shell, no arbitrary commands)
+```
+
+The daemon owns every secret moment. The agent sees refs and status, never raw values, never the raw Chrome CDP URL, never the vault key.
 
 ## Install (from source)
 
@@ -14,8 +31,11 @@ Secret Shuttle is a local bridge that lets coding agents like Claude Code, Codex
 npm install
 npm run build
 npm link
-secret-shuttle init
+secret-shuttle daemon start
+secret-shuttle unlock
 ```
+
+`unlock` opens a local web window — you enter the passphrase there. The CLI never reads it.
 
 ## Quickstart
 
@@ -25,32 +45,46 @@ secret-shuttle generate \
   --env production \
   --kind random_32_bytes \
   --allow-domain vercel.com
+# (production secret — approve in the window the daemon opens)
 
 secret-shuttle list --env production
 secret-shuttle inspect ss://local/prod/INTERNAL_CRON_SECRET
 ```
 
-For browser capture/injection see [examples/stripe-to-vercel/walkthrough.md](examples/stripe-to-vercel/walkthrough.md).
+For the full browser walkthrough see [examples/stripe-to-vercel/walkthrough.md](examples/stripe-to-vercel/walkthrough.md).
+
+## Templates Instead of Arbitrary Commands
+
+```bash
+secret-shuttle template list
+secret-shuttle template run vercel-env-add \
+  --ref ss://stripe/prod/STRIPE_SECRET_KEY \
+  --param name=STRIPE_SECRET_KEY \
+  --param environment=production
+```
+
+Templates run vetted binaries with `shell: false`, absolute paths only, and never echo stdout/stderr back to the agent.
 
 ## What Works Today (0.1.1)
 
 - TypeScript CLI distributed as `secret-shuttle`
-- local encrypted JSON vault and `ss://source/env/name` refs
-- generate, capture (focused field / selection), inject, compare
-- cooperative blind-mode flag (advisory, not enforced)
-- production approval prompt (terminal)
+- Local daemon with bearer-authenticated HTTP API on 127.0.0.1
+- Passphrase-derived envelope around the vault master key (scrypt + AES-256-GCM)
+- `ss://source/env/name` refs
+- Generate, capture (focused field / selection), inject, compare — all routed through the daemon
+- Approval UI with one-shot, context-bound grants for production actions
+- Daemon-owned Chrome over `--remote-debugging-pipe`
+- Filtered WebSocket CDP proxy that blocks screenshots, DOM, accessibility, runtime, console, log, and network-body reads during blind mode
+- Built-in `vercel-env-add` command template
+- Exact-by-default domain matching (`*.example.com` for wildcards)
+- Migration command: `secret-shuttle migrate secure-vault`
 
 ## What Does Not Work Yet
 
-- enforced screenshot, DOM, AX-tree, console, network-body, or clipboard blocking
-- daemon-owned vault key
-- daemon-issued, context-bound approvals
-- CDP proxy
-- OS-keychain or passphrase-backed key storage
-- team vaults, cloud sync, MCP server, browser extension
-- platform-specific Stripe, Vercel, Supabase, Clerk, GitHub Actions adapters
-
-These are tracked in `docs/superpowers/plans/2026-05-15-secret-shuttle-secure-v2.md` (Secure Mode V2).
+- OS-keychain or hardware-backed key storage
+- Team vaults, cloud sync, MCP server, browser extension
+- Platform-specific helpers for Stripe, Supabase, Clerk, GitHub Actions, Cloudflare, Railway
+- Signed desktop binaries
 
 ## Docs
 

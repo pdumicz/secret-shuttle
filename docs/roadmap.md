@@ -1,67 +1,27 @@
 # Roadmap
 
-## V0: OSS Prototype
+## V0 — OSS Prototype (released)
 
-- CLI
-- encrypted local vault
-- secret refs
-- generate
-- focused-field capture
-- selected-text capture
-- focused-field injection
-- fingerprint comparison
-- cooperative blind mode
-- production approval prompt
-- stdin handoff
-- Claude Skill and generic agent instructions
-- Stripe to Vercel walkthrough
+Cooperative blind mode, CLI, local encrypted vault, focused-field CDP capture/injection, stdin handoff, agent instructions, Stripe→Vercel walkthrough.
 
-## V1: Better Browser Runtime
+## V2 — Secure Mode (this branch, not yet released)
 
-- Secret Shuttle-owned browser sessions
-- better active-tab selection
-- stronger focused-field detection
-- local approval UI
-- clearer action receipts
-- more robust Browser Harness docs
+Daemon-owned vault key (passphrase + scrypt envelope), one-shot context-bound approval grants through a local web UI, daemon-owned Chrome over `--remote-debugging-pipe`, filtered CDP proxy that blocks screenshots / DOM / AX / Runtime / Console / network-body reads during blind mode, command templates (no arbitrary `use-as-stdin`), exact-by-default domain matching, migration from V0.
 
-## V2: Enforced Blind Mode
+## V3 — Stronger Key Storage
 
-- CDP proxy
-- block screenshots during blind mode
-- block DOM tree extraction during blind mode
-- block accessibility tree extraction during blind mode
-- restrict unsafe `Runtime.evaluate`
-- block console and network-body reads
-- redact known secret patterns at protocol boundaries
+- OS keychain (macOS / Windows / Linux Secret Service)
+- Signed desktop daemon binary
+- Optional hardware-backed unlock (Touch ID / WebAuthn)
 
-## V3: Platform Workflows
+## V4 — Platform Helpers
 
-- Vercel env workflow helper
-- Stripe webhook helper
-- Supabase secret helper
-- Clerk key helper
-- GitHub Actions secrets helper
-- Cloudflare Workers secret helper
-- Railway variables helper
+Stripe, Supabase, Clerk, GitHub Actions, Cloudflare, Railway adapters as additional templates and approval flows.
 
-## V4: Integrations
+## V5 — Integrations
 
-- 1Password
-- Bitwarden
-- Doppler
-- Infisical
-- AWS Secrets Manager
-- GCP Secret Manager
-- HashiCorp Vault
+1Password, Bitwarden, Doppler, Infisical, AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault backends.
 
-## V5: Team And Commercial
+## V6 — Team And Commercial
 
-- team policies
-- shared vaults
-- production approval workflows
-- audit logs and action receipts
-- cloud sync
-- RBAC
-- SSO
-- compliance reports
+Shared vaults, approval workflows, audit attestations, cloud sync, RBAC, SSO.

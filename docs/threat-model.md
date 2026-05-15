@@ -2,124 +2,68 @@
 
 ## Assets
 
-- production API keys
-- webhook signing secrets
-- service-role keys
-- generated internal secrets
-- production env var values
-- local encrypted vault
-- local master key
+- Production API keys, webhook signing secrets, service-role keys, generated internal secrets
+- Local encrypted vault
+- Vault master key (in daemon memory only after unlock)
+- Approval grants
 
-## Trusted Components In V0
+## Trust Surface
 
-- the local Secret Shuttle CLI process
-- the local filesystem permissions protecting `~/.secret-shuttle`
-- the Chrome instance reached over local CDP
-- the user approving production operations
+- The Secret Shuttle daemon process
+- The local filesystem permissions protecting `~/.secret-shuttle`
+- The Chrome instance launched by the daemon over `--remote-debugging-pipe`
+- The user approving production operations through the local web UI
 
-## Untrusted Or Partially Trusted Components
+## Untrusted Or Partially Trusted
 
 - AI coding agents
-- browser pages
+- Browser pages
 - SaaS dashboards
-- shell commands invoked through `use-as-stdin`
-- logs from external tools
-- screenshots, DOM observations, and accessibility-tree observations from browser automation tools
+- Command templates (vetted; cannot be supplied by the agent at runtime)
+- Logs from external tools
+- Screenshots, DOM observations, accessibility-tree observations from browser automation tools
 
 ## Threats And Mitigations
 
-### Agent asks to read a secret
+### Agent asks the daemon to return a raw secret
 
-Mitigation:
-
-- no raw-value read command exists
-- list and inspect return metadata only
-- local API should keep the same rule when implemented
+There is no daemon endpoint that returns raw secret values. `list` and `inspect` return metadata only.
 
 ### Agent takes a screenshot while a secret is visible
 
-V0 mitigation:
+Blind mode is daemon state. The agent reaches Chrome only through the filtered CDP proxy. While blind mode is active, `Page.captureScreenshot`, `Page.captureSnapshot`, and `Page.printToPDF` are rejected at the proxy.
 
-- cooperative blind mode instructions
-- agent guidance tells the agent to stop observing
+### Agent inspects DOM, AX tree, console, runtime, or network bodies
 
-Future mitigation:
-
-- CDP proxy blocks `Page.captureScreenshot` during blind mode
-
-### Agent inspects DOM or accessibility tree while a secret is visible
-
-V0 mitigation:
-
-- cooperative blind mode instructions
-
-Future mitigation:
-
-- CDP proxy blocks or sanitizes DOM, AX tree, console, runtime, clipboard, and network-body reads
-
-### Secret leaks through CLI output
-
-Mitigation:
-
-- Secret Shuttle never prints raw secret values
-- command success payloads include refs and fingerprints only
-- `use-as-stdin --show-output` redacts known exact values and common secret patterns
-
-Residual risk:
-
-- external commands may write secrets somewhere else
-- commands may encode or transform secrets before printing them
+The CDP proxy blocks the corresponding methods during blind mode. The daemon's own internal capture/injection scripts bypass the proxy.
 
 ### Secret is injected into the wrong domain
 
-Mitigation:
-
-- each secret stores allowed domains
-- injection checks the current browser domain
-- optional `--domain` must match current browser domain
-- production operations require approval
+Each secret stores allowed domains (exact match by default; `*.example.com` for wildcards). The daemon checks the current page domain before injecting. Production actions also require a grant bound to the exact domain.
 
 ### Secret is captured from the wrong field
 
-Mitigation:
-
-- V0 captures only selected text or the currently focused editable field
-- output includes non-secret field metadata
-- user/agent workflow should stop observation and focus the exact field before capture
-
-Future mitigation:
-
-- local approval UI with field context
-- platform-specific helpers for high-value flows
+The daemon takes a focused-field fingerprint snapshot before approval and re-checks the same fingerprint immediately before capture or injection. Field changes after approval throw `field_changed`.
 
 ### Local malware reads the vault
 
-Mitigation:
+The vault is AES-256-GCM encrypted with a master key wrapped in a scrypt-derived KEK. The master key only exists in daemon memory while unlocked. An attacker who can read the daemon's memory wins; protect the host accordingly.
 
-- vault contents are encrypted at rest
-- vault and key files are written with restricted permissions where supported
+### Agent bypasses approval with a CLI flag
 
-Residual risk:
+There is no such flag in Secure Mode. `--confirm-production` is removed. Approval is daemon-issued and bound to the exact action context.
 
-- V0 local-file key storage is not a defense against local malware or a user with full filesystem access
+### Agent runs `use-as-stdin --command "rm -rf /"`
 
-### Malicious website reads an injected secret
+`use-as-stdin` returns `removed_in_secure_mode`. The replacement (`template run`) only accepts a fixed registry id, runs an absolute non-workspace binary, uses `shell: false`, and suppresses stdout/stderr from the agent.
 
-Mitigation:
+### Agent receives the raw CDP URL
 
-- domain allowlists
-- production approval
+It does not. `secret-shuttle browser start` returns the proxy URL only.
 
-Residual risk:
+## Non-Goals
 
-- if the user intentionally injects a secret into a website, that website receives the value
-
-## Non-Goals For V0
-
-- enterprise compliance
-- SSO or RBAC
-- root-user defense
-- malicious kernel defense
-- cloud sync
-- browser extension isolation
-- enforced browser observation blocking
+- Defense against a user with unrestricted same-user shell, process, or GUI access. Secure Mode assumes the agent is sandboxed to the Secret Shuttle CLI and CDP proxy.
+- Compromised kernel.
+- Browser extension already trusted in the daemon-owned profile.
+- Enterprise compliance — SSO, RBAC, audit attestations.

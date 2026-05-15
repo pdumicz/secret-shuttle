@@ -1,65 +1,62 @@
 # Architecture
 
-Secret Shuttle separates navigation from secret handling.
+Secret Shuttle separates navigation from secret handling, and pushes the trust boundary into a local daemon.
 
 ```text
 Claude Code / Codex / Cursor / Browser Agent
         |
-        | normal browser navigation
+        | normal browser navigation through the Secret Shuttle CDP proxy
         v
 Sensitive page or field
         |
-        | stop observing, call CLI
+        | stop observing; call the CLI; the CLI calls the daemon
         v
-Secret Shuttle CLI
+Secret Shuttle CLI (untrusted client)
         |
-        | policy, vault, approval
+        | HTTP 127.0.0.1 + bearer token
         v
-Encrypted local vault
+Secret Shuttle daemon
+  - policy (exact domains, approval grants, blind mode)
+  - vault (unlocked key in memory)
+  - CDP proxy that filters observation methods during blind mode
+  - template runner (no shell, absolute paths only)
         |
-        | focused-field capture/injection over CDP
+        | raw CDP over pipe
         v
-Chrome / SaaS Dashboard
+Chrome / SaaS dashboard
 ```
 
-## V0 Implementation
+## Modules
 
-V0 is direct CLI first. Commands perform vault, policy, and browser operations in-process.
+- `src/cli` — Commander surface; every command is an HTTP client to the daemon.
+- `src/client` — daemon-client.ts: bearer-authenticated `fetch` wrapper that reads the socket file.
+- `src/daemon` — daemon process entry, HTTP server, routes, service container.
+- `src/daemon/approvals` — grant store, UI server, openUrl helper, requireApproval helper.
+- `src/daemon/chrome` — pipe transport, raw CDP client, Chrome launcher, internal capture/inject ops.
+- `src/daemon/proxy` — WebSocket CDP proxy + blind-mode method filter.
+- `src/daemon/templates` — registry, built-in `vercel-env-add`, safe runner, resolve-binary.
+- `src/policy` — domain matching (exact + wildcard) and action whitelists.
+- `src/vault` — locked-state container, scrypt envelope, vault crypto, fingerprints.
 
-Main modules:
-
-- `src/cli`: Commander command surface
-- `src/vault`: encrypted local vault and metadata-only secret model
-- `src/browser`: Playwright Core CDP focused-field adapter
-- `src/policy`: blind mode, domains, production approval, action checks
-- `src/logging`: local audit events and redaction helpers
-- `src/shared`: config paths, refs, errors, JSON output
-
-## Why Not MCP-First
-
-MCP is a useful tool interface, but it is not the security boundary here. The durable product surface is:
-
-- CLI commands agents can call today
-- local browser bridge for secret moments
-- local vault
-- future enforced CDP proxy
-
-An MCP adapter can wrap the same core later without becoming the core security model.
-
-## Future Daemon
-
-The product architecture calls for a localhost daemon. The V0 prototype keeps operations inside the CLI to minimize moving parts. The daemon should become useful once Secret Shuttle owns browser sessions, approval UI, policy state, and CDP proxying.
-
-Planned local API shape:
+## Local API Shape
 
 ```http
-POST /blind/start
-POST /blind/end
-POST /secrets/generate
-POST /secrets/capture
-POST /secrets/inject
-POST /secrets/compare
-GET  /secrets
+POST /v1/unlock/start
+POST /v1/unlock/poll
+GET  /v1/status
+POST /v1/lock
+POST /v1/blind/start
+POST /v1/blind/end
+POST /v1/secrets/list
+POST /v1/secrets/inspect
+POST /v1/secrets/generate
+POST /v1/secrets/capture
+POST /v1/secrets/inject
+POST /v1/secrets/compare
+POST /v1/approvals/poll
+POST /v1/browser/start
+POST /v1/templates/list
+POST /v1/templates/run
 ```
 
-No local API endpoint should return raw secret values.
+No endpoint returns raw secret values.

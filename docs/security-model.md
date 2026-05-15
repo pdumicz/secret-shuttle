@@ -1,147 +1,96 @@
 # Security Model
 
-Secret Shuttle V0 is a local-first blind-secret runtime for AI coding-agent workflows.
+Secret Shuttle V2 is a local Secure-Mode bridge for AI coding agent workflows.
 
-The V0 security claim is intentionally narrow:
+## Claim
 
-> Secret Shuttle keeps raw secret values local and does not intentionally return them to the AI agent. V0 uses cooperative blind mode; enforced browser observation blocking is planned for later versions.
+In Secure Mode, the agent can request generation, capture, injection, comparison, and approved template execution, but raw secret values and vault keys never leave the daemon. Browser observation is blocked during blind mode by the Secret Shuttle CDP proxy.
 
-## Planes
+## Two Planes
 
 ```text
 Agent Plane
-- navigates browser pages
-- reasons about setup
-- identifies fields and workflows
-- calls CLI commands
-- sees refs, fingerprints, labels, domains, and status
+- runs the CLI (untrusted client) and a normal browser tool
+- sees refs, fingerprints, labels, domains, target ids, field metadata, and status
 
-Secret Plane
-- generates random values
-- captures selected text or focused-field values
-- encrypts values locally
-- injects values into focused fields
-- passes values to commands over stdin
-- compares values by fingerprint
+Secret Plane (daemon)
+- owns the unlocked vault key (in memory after passphrase unlock)
+- generates secrets, captures values, injects values
+- runs vetted command templates
+- exposes a filtered CDP WebSocket proxy to the agent
 ```
 
-There is no CLI, API, or helper that returns the raw secret value.
+There is no daemon endpoint that returns raw secret values.
 
-## What The Agent Can See
+## Trust Boundary
 
-```json
-{
-  "secret_ref": "ss://stripe/prod/STRIPE_WEBHOOK_SECRET",
-  "name": "STRIPE_WEBHOOK_SECRET",
-  "environment": "production",
-  "source": "stripe",
-  "fingerprint": "sha256:...",
-  "value_visible_to_agent": false
-}
-```
+- The CLI talks to the daemon over HTTP on 127.0.0.1.
+- The bearer token lives in `~/.secret-shuttle/daemon-socket.json` (mode 0600).
+- The daemon enforces a Host-header allowlist (loopback only).
+- The approval UI runs on the daemon and is reached via system-browser open. Each grant gets its own URL-embedded `ui_token`.
+- The vault master key is wrapped in `~/.secret-shuttle/key-envelope.json` (scrypt KDF + AES-256-GCM). Decrypted only in daemon memory after `secret-shuttle unlock`.
 
-## What The Agent Cannot Ask Secret Shuttle For
+## Approval Grants
 
-- raw secret values
-- decrypted vault contents
-- `.env` file materialization
-- clipboard reads
-- screenshots
-- DOM dumps
-
-V0 cannot technically prevent a separate browser tool from taking screenshots or reading DOM while the secret is visible. That is why the docs call V0 cooperative blind mode.
-
-## Local Storage
-
-V0 uses an encrypted JSON vault:
-
-```text
-~/.secret-shuttle/vault.json.enc
-```
-
-The master key is stored in a local restricted-permission file:
-
-```text
-~/.secret-shuttle/master-key.json
-```
-
-This is enough for an inspectable OSS prototype and prevents accidental raw-value storage in the vault file. It is not equivalent to OS keychain, hardware-backed, or enterprise secret-manager storage.
-
-Future versions should use:
-
-- macOS Keychain
-- Windows Credential Manager
-- Linux Secret Service
-- passphrase-backed vaults
-- 1Password, Bitwarden, Doppler, Infisical, AWS Secrets Manager, GCP Secret Manager, or HashiCorp Vault backends
+Every production-classed action requires a one-shot grant.
+- Daemon-memory only.
+- 2-minute TTL.
+- Bound to action, ref or planned ref, environment, destination domain, browser target id, focused-field fingerprint, template id, and template params.
+- Mismatched, expired, reused, or forged grants are refused.
 
 ## Browser Control
 
-V0 connects to Chrome over CDP through Playwright Core and supports generic focused-field operations:
+- The daemon launches Chrome with `--remote-debugging-pipe`. The raw CDP port is never exposed.
+- Agents receive a token-gated WebSocket CDP proxy URL.
+- Blind mode is daemon state. While active, the proxy blocks at minimum:
+  - `Page.captureScreenshot`, `Page.captureSnapshot`, `Page.printToPDF`
+  - `DOM.getDocument`, `DOM.getOuterHTML`, `DOM.getNodeForLocation`, `DOM.performSearch`, `DOM.querySelector*`, `DOM.describeNode`, `DOMSnapshot.*`
+  - `Accessibility.*`
+  - `Runtime.evaluate`, `Runtime.callFunctionOn`, `Runtime.getProperties`, `Runtime.queryObjects`
+  - `Console.*`, `Log.*`
+  - `Network.getResponseBody`, `Network.getRequestPostData`, `Network.takeResponseBodyForInterceptionAsStream`, `Fetch.getResponseBody`
+- Daemon-internal capture/injection runs narrow scripts directly against Chrome — those calls never traverse the agent proxy.
 
-- capture selected text
-- capture focused input, textarea, or contenteditable text
-- inject into focused input, textarea, or contenteditable text
-- compare focused value against a stored fingerprint
+## Templates
 
-The browser must be started with remote debugging, for example:
+Generic `use-as-stdin --command "..."` is removed. Templates are the only way to hand a secret to an external binary:
+- Binary must be an absolute path.
+- Binary must not live inside the current workspace.
+- Binary must not be world-writable.
+- `spawn(binary, args, { shell: false })`.
+- Stdout and stderr are suppressed from the agent.
+- Result returns only `template_id`, `secret_ref`, `exit_code`, `executed`.
 
-```bash
-secret-shuttle browser start --profile prod-config
-```
+## Domain Matching
 
-## Production Guardrails
+Exact by default. Wildcards require `*.example.com`. `vercel.com` does not match `evil-vercel.com` or `dashboard.stripe.com`.
 
-Production injection and production stdin use require explicit approval:
-
-```text
-Type PRODUCTION to continue:
-```
-
-Non-interactive scripts can pass:
-
-```bash
---confirm-production PRODUCTION
-```
-
-The approval output shows:
-
-- secret ref
-- destination
-- environment
-- action
-- value visibility status
-
-It never shows the raw value.
-
-## Logs
-
-Audit logs are stored locally at:
+## Local Storage
 
 ```text
-~/.secret-shuttle/audit.jsonl
+~/.secret-shuttle/
+  config.json
+  vault.json.enc
+  key-envelope.json    (KDF salt + AES-GCM wrapped master key)
+  daemon-socket.json   (port + bearer token + pid)
+  state.json           (legacy V0 blind state, unused in Secure Mode)
+  audit.jsonl
 ```
 
-Audit events include:
-
-- timestamp
-- action
-- ref
-- domain
-- environment
-- success status
-
-They do not include raw secret values.
+`master-key.json` from V0 is migrated away by `secret-shuttle migrate secure-vault`. The daemon refuses to start while it exists.
 
 ## Honest Limitations
 
-V0 does not protect against:
+Secure Mode protects against:
+- Agents reading the vault.
+- Agents observing the browser during blind mode through the proxy.
+- Agents running arbitrary commands with a secret on stdin.
+- Agents bypassing approval with a CLI flag.
 
-- malicious local users with filesystem access
-- compromised browser extensions
-- a malicious destination site receiving a value that the user intentionally injects
-- another tool taking a screenshot while cooperative blind mode is active
-- another tool reading DOM or accessibility content while cooperative blind mode is active
-- commands that intentionally echo stdin, though Secret Shuttle redacts known command output when `--show-output` is used
+Secure Mode does NOT protect against:
+- A user with unrestricted same-user shell or process access. The agent must be sandboxed to the Secret Shuttle CLI and CDP proxy surfaces; if it can read process memory, drive arbitrary GUI windows, or open the approval UI on its own, the local guarantee no longer holds.
+- A browser extension already installed in the daemon-owned Chrome profile.
+- A malicious destination site receiving a secret that the user intentionally injects.
+- A compromised kernel.
 
-The next major security step is an enforced CDP proxy that blocks unsafe browser observation calls during blind mode.
+The next steps to harden Secure Mode are OS-keychain key storage and a signed desktop binary.
