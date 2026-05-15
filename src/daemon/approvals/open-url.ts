@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 
 export function openUrl(url: string): void {
+  if (process.env.SECRET_SHUTTLE_NO_OPEN_URL === "1") {
+    return;
+  }
   const platform = process.platform;
   let cmd: string;
   let args: string[];

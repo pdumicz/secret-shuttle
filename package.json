@@ -19,7 +19,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node -e \"import('node:fs').then(({copyFileSync})=>{copyFileSync('src/daemon/approvals/ui.html','dist/daemon/approvals/ui.html');copyFileSync('src/daemon/approvals/unlock-ui.html','dist/daemon/approvals/unlock-ui.html');})\"",
-    "test": "npm run build && node --test \"dist/**/*.test.js\"",
+    "test": "npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test \"dist/**/*.test.js\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "keywords": [
