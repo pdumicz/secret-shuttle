@@ -13,6 +13,7 @@ import { listCommand } from "./commands/list.js";
 import { useAsStdinCommand } from "./commands/use-as-stdin.js";
 import { unlockCommand } from "./commands/unlock.js";
 import { templateCommand } from "./commands/template.js";
+import { migrateCommand } from "./commands/migrate.js";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
 
 const program = new Command();
@@ -35,6 +36,7 @@ program.addCommand(inspectCommand());
 program.addCommand(unlockCommand());
 program.addCommand(templateCommand());
 program.addCommand(daemonCommand());
+program.addCommand(migrateCommand());
 
 if (process.argv.length <= 2) {
   program.help();
