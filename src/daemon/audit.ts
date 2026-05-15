@@ -1,0 +1,30 @@
+import { appendFile } from "node:fs/promises";
+import { ensureShuttleHome, getShuttlePaths } from "../shared/config.js";
+
+export type DaemonAuditAction =
+  | "init" | "unlock" | "lock"
+  | "blind_start" | "blind_end"
+  | "generate" | "capture" | "inject" | "compare"
+  | "template_run"
+  | "approval_created" | "approval_granted" | "approval_denied"
+  | "approval_expired" | "approval_used" | "approval_mismatch";
+
+export interface DaemonAuditEvent {
+  action: DaemonAuditAction;
+  ok: boolean;
+  ref?: string;
+  planned_ref?: string;
+  environment?: string;
+  domain?: string;
+  template_id?: string;
+  approval_id?: string;
+  error_code?: string;
+  message?: string;
+}
+
+export async function writeDaemonAudit(event: DaemonAuditEvent): Promise<void> {
+  const paths = getShuttlePaths();
+  await ensureShuttleHome(paths);
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...event, value_visible_to_agent: false });
+  await appendFile(paths.auditLogPath, `${line}\n`, { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
+}
