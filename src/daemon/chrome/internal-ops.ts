@@ -114,8 +114,8 @@ const WRITE_SCRIPT = (value: string) => `
 })(${JSON.stringify(value)})
 `;
 
-function fieldFingerprint(domain: string, target: string, field: FieldDescriptor): string {
-  const seed = JSON.stringify({ domain, target, ...field });
+function fieldFingerprint(domain: string, target: string, backendNodeId: number | null, field: FieldDescriptor): string {
+  const seed = JSON.stringify({ domain, target, backendNodeId, ...field });
   return `sha256:${createHash("sha256").update(seed).digest("hex").slice(0, 16)}`;
 }
 
@@ -152,6 +152,30 @@ export class CdpBrowserOps implements BrowserOps {
     }
   }
 
+  private async getFocusedBackendNodeId(targetId: string): Promise<number | null> {
+    const sessionId = await this.attach(targetId);
+    try {
+      const ev = await this.cdp.send<{ result: { objectId?: string; subtype?: string } }>(
+        "Runtime.evaluate",
+        { expression: "document.activeElement", returnByValue: false },
+        sessionId,
+      );
+      const objectId = ev.result.objectId;
+      if (objectId === undefined) return null;
+      try {
+        const r = await this.cdp.send<{ nodeId: number }>("DOM.requestNode", { objectId }, sessionId);
+        const desc = await this.cdp.send<{ node: { backendNodeId: number } }>("DOM.describeNode", { nodeId: r.nodeId }, sessionId);
+        return desc.node.backendNodeId;
+      } finally {
+        await this.cdp.send("Runtime.releaseObject", { objectId }, sessionId).catch(() => undefined);
+      }
+    } catch {
+      return null;
+    } finally {
+      await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+
   async currentDomainAndTarget(): Promise<{ domain: string; target_id: string }> {
     const page = await this.pickPage();
     const r = await this.evaluate<{ domain: string }>(page.id, "({domain: location.hostname})");
@@ -162,7 +186,8 @@ export class CdpBrowserOps implements BrowserOps {
     const page = await this.pickPage();
     const r = await this.evaluate<{ ok: boolean; field?: FieldDescriptor; domain?: string }>(page.id, READ_SCRIPT);
     if (!r.ok || r.field === undefined || r.domain === undefined) throw new Error("focused_field_unavailable");
-    const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, r.field);
+    const backendNodeId = await this.getFocusedBackendNodeId(page.id);
+    const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, backendNodeId, r.field);
     return { domain: r.domain.toLowerCase(), target_id: page.id, field: r.field, field_fingerprint: fp };
   }
 
@@ -170,7 +195,8 @@ export class CdpBrowserOps implements BrowserOps {
     const page = await this.pickPage();
     const r = await this.evaluate<{ ok: boolean; value?: string; field?: FieldDescriptor; domain?: string; reason?: string }>(page.id, READ_SCRIPT);
     if (!r.ok || r.value === undefined || r.field === undefined || r.domain === undefined) throw new Error(r.reason ?? "focused_field_unavailable");
-    const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, r.field);
+    const backendNodeId = await this.getFocusedBackendNodeId(page.id);
+    const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, backendNodeId, r.field);
     return { value: r.value, domain: r.domain.toLowerCase(), target_id: page.id, field: r.field, field_fingerprint: fp };
   }
 
@@ -182,7 +208,8 @@ export class CdpBrowserOps implements BrowserOps {
     const page = await this.pickPage();
     const r = await this.evaluate<{ ok: boolean; field?: FieldDescriptor; domain?: string; reason?: string }>(page.id, WRITE_SCRIPT(value));
     if (!r.ok || r.field === undefined || r.domain === undefined) throw new Error(r.reason ?? "focused_field_unavailable");
-    const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, r.field);
+    const backendNodeId = await this.getFocusedBackendNodeId(page.id);
+    const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, backendNodeId, r.field);
     return { domain: r.domain.toLowerCase(), target_id: page.id, field: r.field, field_fingerprint: fp };
   }
 }
