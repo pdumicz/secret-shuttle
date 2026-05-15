@@ -40,3 +40,17 @@ export async function loadOrCreateMasterKey(): Promise<Buffer> {
   await chmod(paths.keyPath, 0o600).catch(() => undefined);
   return key;
 }
+
+export async function hasLegacyKeyFile(): Promise<boolean> {
+  return fileExists(getShuttlePaths().keyPath);
+}
+
+export async function readLegacyKey(): Promise<Buffer | null> {
+  const paths = getShuttlePaths();
+  if (!(await fileExists(paths.keyPath))) return null;
+  const file = JSON.parse(await readFile(paths.keyPath, "utf8")) as MasterKeyFile;
+  if (file.version !== 1 || file.storage !== "local-file") {
+    throw new ShuttleError("unsupported_key_storage", "Unsupported legacy key format.");
+  }
+  return decodeKey(file.key);
+}
