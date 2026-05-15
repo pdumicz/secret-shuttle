@@ -11,6 +11,9 @@ export interface RequireApprovalOptions {
   waitMs?: number;
   /** Hook so tests can disable the system-browser open. */
   openUrlImpl?: (url: string) => void;
+  /**
+   * URL+token are not exposed to callers; the daemon opens the UI itself via openUrl.
+   */
 }
 
 export async function requireApproval(opts: RequireApprovalOptions): Promise<ApprovalGrant> {
@@ -30,7 +33,7 @@ export async function requireApproval(opts: RequireApprovalOptions): Promise<App
   if (opts.waitMs === 0) {
     throw new ShuttleError(
       "approval_required",
-      JSON.stringify({ approval_id: grant.id, approval_url: url, expires_at: grant.expires_at }),
+      JSON.stringify({ approval_id: grant.id, expires_at: grant.expires_at }),
     );
   }
 

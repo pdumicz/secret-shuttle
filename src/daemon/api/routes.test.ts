@@ -12,7 +12,9 @@ import type { BrowserOps, CaptureResult } from "../chrome/internal-ops.js";
 async function withDaemon<T>(fn: (ctx: { port: number; token: string; services: DaemonServices }) => Promise<T>): Promise<T> {
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-api-"));
   const prev = process.env.SECRET_SHUTTLE_HOME;
+  const prevSecure = process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
   process.env.SECRET_SHUTTLE_HOME = home;
+  process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
   const server = new DaemonServer({ token: "t" });
   const services = new DaemonServices();
   let port = 0;
@@ -24,6 +26,8 @@ async function withDaemon<T>(fn: (ctx: { port: number; token: string; services: 
     await server.close();
     if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
     else process.env.SECRET_SHUTTLE_HOME = prev;
+    if (prevSecure === undefined) delete process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
+    else process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = prevSecure;
     await rm(home, { recursive: true, force: true });
   }
 }
@@ -263,15 +267,21 @@ test("unlock via web UI flow: start, submit passphrase, poll, unlocked", async (
     // Start an unlock session.
     const start = await call(ctx, "POST", "/v1/unlock/start");
     assert.equal(start.status, 200);
-    const sb = start.body as { session_id: string; ui_token: string; requires_create: boolean };
+    const sb = start.body as { session_id: string; requires_create: boolean };
     assert.equal(sb.requires_create, true);
+    // The response must not expose ui_token to the CLI.
+    assert.equal("ui_token" in sb, false);
 
     // Poll — pending.
     const pollPending = await call(ctx, "POST", "/v1/unlock/poll", { session_id: sb.session_id });
     assert.equal((pollPending.body as { status: string }).status, "pending");
 
+    // Retrieve the ui_token from the server-side store (as the daemon would use it internally).
+    const session = ctx.services.unlockSessions.get(sb.session_id);
+    assert.ok(session, "session should exist in store");
+
     // Submit passphrase via UI route (no bearer; URL token).
-    const submitRes = await fetch(`http://127.0.0.1:${ctx.port}/ui/unlock/${sb.session_id}?token=${sb.ui_token}`, {
+    const submitRes = await fetch(`http://127.0.0.1:${ctx.port}/ui/unlock/${sb.session_id}?token=${session.ui_token}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ passphrase: "secret123", set_passphrase: true }),
@@ -307,5 +317,43 @@ test("GET /ui/unlock serves the HTML page", async () => {
     assert.equal(res.status, 200);
     const text = await res.text();
     assert.ok(text.includes("Unlock Secret Shuttle"));
+  });
+});
+
+test("approval_required payload does NOT include ui_token / approval_url", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "PROD_GEN", environment: "production", wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    const err = r.body as { error: { code: string; message: string } };
+    assert.equal(err.error.code, "approval_required");
+    // The message is a JSON-stringified body with approval_id + expires_at only.
+    const inner = JSON.parse(err.error.message) as Record<string, unknown>;
+    assert.ok(typeof inner.approval_id === "string");
+    assert.equal("approval_url" in inner, false);
+    assert.equal("ui_token" in inner, false);
+    // The grant in the store should have a ui_token, but it must not appear in the API response.
+    const grant = ctx.services.approvals.get(inner.approval_id as string);
+    assert.ok(grant);
+    assert.ok(grant.ui_token.length > 0);
+  });
+});
+
+test("CLI-visible payload cannot self-approve: no way to derive ui_token from response", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "PROD_GEN2", environment: "production", wait_for_approval: false,
+    });
+    const inner = JSON.parse((r.body as { error: { message: string } }).error.message) as { approval_id: string };
+    // An attacker who only sees the API response cannot guess the ui_token (UUID-random).
+    // Confirm /ui/approvals/<id>/approve without token is rejected.
+    const tryApprove = await fetch(`http://127.0.0.1:${ctx.port}/ui/approvals/${inner.approval_id}/approve`, { method: "POST" });
+    assert.equal(tryApprove.status, 400);
+    // Even attempting with a guessed-wrong token is rejected.
+    const wrongToken = await fetch(`http://127.0.0.1:${ctx.port}/ui/approvals/${inner.approval_id}/approve?token=wrong`, { method: "POST" });
+    assert.equal(wrongToken.status, 400);
   });
 });

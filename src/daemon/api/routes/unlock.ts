@@ -1,9 +1,19 @@
 // src/daemon/api/routes/unlock.ts
 import { randomBytes } from "node:crypto";
 import { ShuttleError } from "../../../shared/errors.js";
+import { isInsecureDevMode } from "../../../shared/secure-mode.js";
 import { decryptEnvelope, encryptEnvelope, readEnvelope, writeEnvelope } from "../../../vault/envelope.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
+
+function requireInsecureDevMode(): void {
+  if (!isInsecureDevMode()) {
+    throw new ShuttleError(
+      "removed_in_secure_mode",
+      "Direct passphrase unlock is disabled in Secure Mode. Use `secret-shuttle unlock` (web UI).",
+    );
+  }
+}
 
 interface UnlockBody {
   passphrase: string;
@@ -12,6 +22,7 @@ interface UnlockBody {
 
 export function registerUnlock(server: DaemonServer, services: DaemonServices): void {
   server.addRoute("POST", "/v1/unlock", async (_req, raw) => {
+    requireInsecureDevMode();
     const body = raw as UnlockBody | null;
     if (body === null || typeof body.passphrase !== "string" || body.passphrase === "") {
       throw new ShuttleError("invalid_passphrase", "passphrase is required");
@@ -40,6 +51,7 @@ export function registerUnlock(server: DaemonServer, services: DaemonServices): 
   });
 
   server.addRoute("POST", "/v1/lock", () => {
+    requireInsecureDevMode();
     services.lock.lock();
     return { unlocked: false };
   });

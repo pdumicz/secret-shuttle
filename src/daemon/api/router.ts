@@ -19,7 +19,7 @@ export function registerRoutes(
   registerUiRoutes(server, services.approvals);
   registerStatus(server, services);
   registerUnlock(server, services);
-  registerUnlockSession(server, services);
+  registerUnlockSession(server, services, daemonPortRef);
   registerBlind(server, services);
   registerSecrets(server, services, daemonPortRef);
   registerApprovals(server, services);

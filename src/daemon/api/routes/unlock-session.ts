@@ -6,19 +6,23 @@ import { ShuttleError } from "../../../shared/errors.js";
 import { decryptEnvelope, encryptEnvelope, readEnvelope, writeEnvelope } from "../../../vault/envelope.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
+import { openUrl } from "../../approvals/open-url.js";
 
 const HTML_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../approvals/unlock-ui.html",
 );
 
-export function registerUnlockSession(server: DaemonServer, services: DaemonServices): void {
+export function registerUnlockSession(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/unlock/start", async () => {
     const envelope = await readEnvelope();
     const session = services.unlockSessions.create();
+    // Open the UI window from the daemon process itself, so the CLI/agent never
+    // sees the per-session ui_token.
+    const url = `http://127.0.0.1:${daemonPortRef()}/ui/unlock?id=${session.id}&token=${session.ui_token}${envelope === null ? "&create=1" : ""}`;
+    openUrl(url);
     return {
       session_id: session.id,
-      ui_token: session.ui_token,
       requires_create: envelope === null,
       expires_at: session.expires_at,
     };

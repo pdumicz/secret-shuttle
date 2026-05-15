@@ -31,7 +31,9 @@ function stubBrowser(state: { domain: string; target: string; value: string }): 
 test("Stripe→Vercel end-to-end through daemon API with no raw secret in any response", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-e2e-"));
   const prev = process.env.SECRET_SHUTTLE_HOME;
+  const prevSecure = process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
   process.env.SECRET_SHUTTLE_HOME = home;
+  process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
   const server = new DaemonServer({ token: "t" });
   const services = new DaemonServices();
   let port = 0;
@@ -140,6 +142,8 @@ test("Stripe→Vercel end-to-end through daemon API with no raw secret in any re
     await server.close();
     if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
     else process.env.SECRET_SHUTTLE_HOME = prev;
+    if (prevSecure === undefined) delete process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
+    else process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = prevSecure;
     await rm(home, { recursive: true, force: true });
   }
 });
