@@ -11,6 +11,9 @@ export class LockedVaultState {
     if (key.byteLength !== 32) {
       throw new ShuttleError("invalid_master_key", "Master key must be 32 bytes.");
     }
+    if (this.key !== null) {
+      this.key.fill(0);
+    }
     this.key = Buffer.from(key);
   }
 
@@ -28,6 +31,6 @@ export class LockedVaultState {
         "The Secret Shuttle vault is locked. Run `secret-shuttle unlock`.",
       );
     }
-    return this.key;
+    return Buffer.from(this.key);
   }
 }
