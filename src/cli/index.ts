@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { browserCommand } from "./commands/browser.js";
 import { blindCommand } from "./commands/blind.js";
+import { daemonCommand } from "./commands/daemon.js";
 import { captureCommand } from "./commands/capture.js";
 import { compareCommand } from "./commands/compare.js";
 import { generateCommand } from "./commands/generate.js";
@@ -29,6 +30,7 @@ program.addCommand(compareCommand());
 program.addCommand(useAsStdinCommand());
 program.addCommand(listCommand());
 program.addCommand(inspectCommand());
+program.addCommand(daemonCommand());
 
 if (process.argv.length <= 2) {
   program.help();
