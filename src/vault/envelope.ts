@@ -83,11 +83,11 @@ export async function decryptEnvelope(
       decipher.final(),
     ]);
     if (plain.byteLength !== 32) {
-      throw new ShuttleError("vault_unlock_failed", "vault_unlock_failed: Unlocked key has wrong length.");
+      throw new ShuttleError("vault_unlock_failed", "Unlocked key has wrong length.");
     }
     return plain;
   } catch (cause) {
     if (cause instanceof ShuttleError) throw cause;
-    throw new ShuttleError("vault_unlock_failed", "vault_unlock_failed: Could not unlock the vault.");
+    throw new ShuttleError("vault_unlock_failed", "Could not unlock the vault.");
   }
 }
