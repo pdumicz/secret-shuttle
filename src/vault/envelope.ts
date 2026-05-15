@@ -1,6 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { ShuttleError } from "../shared/errors.js";
+import { ensureShuttleHome, fileExists, getShuttlePaths } from "../shared/config.js";
 
 const scryptAsync = promisify(scrypt) as (
   password: string | Buffer,
@@ -58,6 +60,27 @@ export async function encryptEnvelope(
     ciphertext: ciphertext.toString("base64url"),
     created_at: new Date().toISOString(),
   };
+}
+
+export async function readEnvelope(): Promise<EnvelopeFile | null> {
+  const paths = getShuttlePaths();
+  if (!(await fileExists(paths.envelopePath))) return null;
+  const raw = await readFile(paths.envelopePath, "utf8");
+  const parsed = JSON.parse(raw) as EnvelopeFile;
+  if (parsed.version !== 2) {
+    throw new ShuttleError("unsupported_envelope", "Envelope file version is not 2.");
+  }
+  return parsed;
+}
+
+export async function writeEnvelope(envelope: EnvelopeFile): Promise<void> {
+  const paths = getShuttlePaths();
+  await ensureShuttleHome(paths);
+  await writeFile(paths.envelopePath, `${JSON.stringify(envelope, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await chmod(paths.envelopePath, 0o600).catch(() => undefined);
 }
 
 export async function decryptEnvelope(

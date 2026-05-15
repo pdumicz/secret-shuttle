@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { decryptEnvelope, encryptEnvelope } from "./envelope.js";
+import { decryptEnvelope, encryptEnvelope, readEnvelope, writeEnvelope } from "./envelope.js";
 import { ShuttleError } from "../shared/errors.js";
 
 test("encryptEnvelope round-trips the master key under a passphrase", async () => {
@@ -37,4 +40,33 @@ test("decryptEnvelope refuses a weakened KDF N parameter", async () => {
     () => decryptEnvelope(downgraded, "pw"),
     (err) => err instanceof ShuttleError && err.code === "unsupported_envelope",
   );
+});
+
+test("readEnvelope returns null when no file exists", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "ss-env-"));
+  const prev = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  try {
+    assert.equal(await readEnvelope(), null);
+  } finally {
+    if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+    else process.env.SECRET_SHUTTLE_HOME = prev;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("writeEnvelope round-trips through readEnvelope", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "ss-env-"));
+  const prev = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  try {
+    const env = await encryptEnvelope(Buffer.alloc(32, 4), "pw");
+    await writeEnvelope(env);
+    const read = await readEnvelope();
+    assert.deepEqual(read, env);
+  } finally {
+    if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+    else process.env.SECRET_SHUTTLE_HOME = prev;
+    await rm(home, { recursive: true, force: true });
+  }
 });

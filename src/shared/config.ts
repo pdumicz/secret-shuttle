@@ -8,6 +8,8 @@ export interface ShuttlePaths {
   vaultPath: string;
   statePath: string;
   keyPath: string;
+  envelopePath: string;
+  daemonSocketPath: string;
   auditLogPath: string;
 }
 
@@ -22,6 +24,8 @@ export function getShuttlePaths(homeDir = getSecretShuttleHome()): ShuttlePaths 
     vaultPath: path.join(homeDir, "vault.json.enc"),
     statePath: path.join(homeDir, "state.json"),
     keyPath: path.join(homeDir, "master-key.json"),
+    envelopePath: path.join(homeDir, "key-envelope.json"),
+    daemonSocketPath: path.join(homeDir, "daemon-socket.json"),
     auditLogPath: path.join(homeDir, "audit.jsonl"),
   };
 }
