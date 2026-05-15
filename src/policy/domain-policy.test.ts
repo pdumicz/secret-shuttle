@@ -7,10 +7,14 @@ test("normalizeDomain accepts URLs and domains", () => {
   assert.equal(normalizeDomain("dashboard.stripe.com"), "dashboard.stripe.com");
 });
 
-test("domainMatches allows exact and subdomains", () => {
-  assert.equal(domainMatches("dashboard.stripe.com", "stripe.com"), true);
+test("domainMatches is exact by default", () => {
   assert.equal(domainMatches("vercel.com", "vercel.com"), true);
+  assert.equal(domainMatches("dashboard.stripe.com", "stripe.com"), false);
   assert.equal(domainMatches("evil-vercel.com", "vercel.com"), false);
+});
+
+test("wildcard patterns match strict subdomains", () => {
   assert.equal(domainMatches("app.example.com", "*.example.com"), true);
   assert.equal(domainMatches("example.com", "*.example.com"), false);
+  assert.equal(domainMatches("a.b.example.com", "*.example.com"), true);
 });

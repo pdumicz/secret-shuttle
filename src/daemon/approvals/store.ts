@@ -1,0 +1,115 @@
+import { randomUUID } from "node:crypto";
+import { ShuttleError } from "../../shared/errors.js";
+
+export interface ApprovalBinding {
+  action: "inject" | "capture" | "generate" | "compare" | "template";
+  ref: string | null;
+  planned_ref?: string | null;
+  environment: string;
+  destination_domain: string | null;
+  target_id: string | null;
+  field_fingerprint: string | null;
+  template_id: string | null;
+  template_params: Record<string, string> | null;
+}
+
+export type ApprovalStatus = "pending" | "granted" | "denied" | "expired" | "used";
+
+export interface ApprovalGrant extends ApprovalBinding {
+  id: string;
+  status: ApprovalStatus;
+  created_at: number;
+  expires_at: number;
+  ui_token: string;
+}
+
+const DEFAULT_TTL_MS = 2 * 60 * 1000;
+
+export class ApprovalStore {
+  private readonly grants = new Map<string, ApprovalGrant>();
+  private readonly ttlMs: number;
+  private now: () => number;
+
+  constructor(opts: { ttlMs?: number; now?: () => number } = {}) {
+    this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
+    this.now = opts.now ?? (() => Date.now());
+  }
+
+  create(binding: ApprovalBinding): ApprovalGrant {
+    const id = randomUUID();
+    const created = this.now();
+    const grant: ApprovalGrant = {
+      ...binding,
+      id,
+      status: "pending",
+      created_at: created,
+      expires_at: created + this.ttlMs,
+      ui_token: randomUUID(),
+    };
+    this.grants.set(id, grant);
+    return grant;
+  }
+
+  get(id: string): ApprovalGrant | undefined {
+    const g = this.grants.get(id);
+    if (g === undefined) return undefined;
+    if (g.status === "pending" && this.now() > g.expires_at) {
+      g.status = "expired";
+    }
+    return g;
+  }
+
+  approve(id: string): void {
+    const g = this.requirePending(id);
+    g.status = "granted";
+  }
+
+  deny(id: string): void {
+    const g = this.requirePending(id);
+    g.status = "denied";
+  }
+
+  consume(id: string, binding: ApprovalBinding): ApprovalGrant {
+    const g = this.grants.get(id);
+    if (g === undefined) throw new ShuttleError("approval_not_found", "Unknown approval id.");
+    if (g.status === "used") throw new ShuttleError("approval_already_used", "Approval was already used.");
+    if (g.status !== "granted") throw new ShuttleError("approval_not_granted", "Approval not granted.");
+    if (this.now() > g.expires_at) {
+      g.status = "expired";
+      throw new ShuttleError("approval_expired", "Approval expired.");
+    }
+    if (!bindingsMatch(g, binding)) {
+      throw new ShuttleError("approval_mismatch", "Approval does not match the requested action.");
+    }
+    g.status = "used";
+    return g;
+  }
+
+  private requirePending(id: string): ApprovalGrant {
+    const g = this.get(id);
+    if (g === undefined) throw new ShuttleError("approval_not_found", "Unknown approval id.");
+    if (g.status !== "pending") throw new ShuttleError("approval_not_pending", "Approval is not pending.");
+    return g;
+  }
+}
+
+function bindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
+  return (
+    a.action === b.action &&
+    a.ref === b.ref &&
+    (a.planned_ref ?? null) === (b.planned_ref ?? null) &&
+    a.environment === b.environment &&
+    a.destination_domain === b.destination_domain &&
+    a.target_id === b.target_id &&
+    a.field_fingerprint === b.field_fingerprint &&
+    a.template_id === b.template_id &&
+    stableStringify(a.template_params) === stableStringify(b.template_params)
+  );
+}
+
+function stableStringify(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  const obj = v as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return JSON.stringify(Object.fromEntries(keys.map((k) => [k, obj[k]])));
+}

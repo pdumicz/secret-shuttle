@@ -16,13 +16,11 @@ export function normalizeDomain(domain: string): string {
 export function domainMatches(currentDomain: string, allowedDomain: string): boolean {
   const current = normalizeDomain(currentDomain);
   const allowed = normalizeDomain(allowedDomain);
-
   if (allowed.startsWith("*.")) {
     const suffix = allowed.slice(1);
     return current.endsWith(suffix) && current.length > suffix.length;
   }
-
-  return current === allowed || current.endsWith(`.${allowed}`);
+  return current === allowed;
 }
 
 export function assertDomainAllowed(
