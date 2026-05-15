@@ -18,7 +18,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"import('node:fs').then(({copyFileSync})=>copyFileSync('src/daemon/approvals/ui.html','dist/daemon/approvals/ui.html'))\"",
     "test": "npm run build && node --test \"dist/**/*.test.js\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

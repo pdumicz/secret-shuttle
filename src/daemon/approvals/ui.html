@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Secret Shuttle Approval</title>
+    <style>
+      body { font-family: -apple-system, system-ui, sans-serif; max-width: 36rem; margin: 2rem auto; padding: 1rem; }
+      .card { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; }
+      .row { display: flex; justify-content: space-between; padding: 0.25rem 0; }
+      .label { color: #555; }
+      button { font-size: 1rem; padding: 0.5rem 1rem; margin-right: 0.5rem; }
+      .approve { background: #0a7; color: #fff; border: 0; }
+      .deny { background: #c33; color: #fff; border: 0; }
+      .status { margin-top: 1rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Secret Shuttle</h1>
+    <div class="card" id="grant"></div>
+    <div id="actions"></div>
+    <div class="status" id="status"></div>
+    <script type="module">
+      const params = new URLSearchParams(location.search);
+      const id = params.get("id");
+      const token = params.get("token");
+      async function load() {
+        const r = await fetch(`/ui/approvals/${id}?token=${token}`);
+        const g = await r.json();
+        document.getElementById("grant").innerHTML = `
+          <div class="row"><span class="label">Action</span><b>${g.action}</b></div>
+          <div class="row"><span class="label">Secret</span><b>${g.ref ?? g.planned_ref ?? "(new)"}</b></div>
+          <div class="row"><span class="label">Environment</span><b>${g.environment}</b></div>
+          ${g.destination_domain ? `<div class="row"><span class="label">Destination</span><b>${g.destination_domain}</b></div>` : ""}
+          ${g.template_id ? `<div class="row"><span class="label">Template</span><b>${g.template_id}</b></div>` : ""}
+          ${g.target_id ? `<div class="row"><span class="label">Browser target</span><code>${g.target_id}</code></div>` : ""}
+          ${g.field_fingerprint ? `<div class="row"><span class="label">Field fingerprint</span><code>${g.field_fingerprint}</code></div>` : ""}
+        `;
+        document.getElementById("status").textContent = `Status: ${g.status}`;
+      }
+      async function send(action) {
+        const r = await fetch(`/ui/approvals/${id}/${action}?token=${token}`, { method: "POST" });
+        if (r.ok) document.getElementById("status").textContent = `Status: ${action}d`;
+      }
+      document.getElementById("actions").innerHTML = `
+        <button class="approve" id="ok">Approve</button>
+        <button class="deny" id="no">Deny</button>
+      `;
+      document.getElementById("ok").addEventListener("click", () => send("approve"));
+      document.getElementById("no").addEventListener("click", () => send("deny"));
+      load();
+    </script>
+  </body>
+</html>
