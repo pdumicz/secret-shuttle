@@ -40,6 +40,8 @@ export function registerUiRoutes(server: DaemonServer, store: ApprovalStore): vo
       field_fingerprint: grant.field_fingerprint,
       template_id: grant.template_id,
       template_params: grant.template_params,
+      template_binary_path: grant.template_binary_path ?? null,
+      template_binary_sha256: grant.template_binary_sha256 ?? null,
       status: grant.status,
       expires_at: grant.expires_at,
     }));

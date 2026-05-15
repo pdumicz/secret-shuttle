@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { requireApproval } from "../../approvals/require-approval.js";
 import type { ApprovalBinding } from "../../approvals/store.js";
 import { resolveBinary } from "../../templates/resolve-binary.js";
@@ -32,6 +34,11 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
     const tpl = registry.get(b.template_id);
     const secret = await services.vault.getSecret(b.ref);
 
+    // Resolve and hash the binary BEFORE creating the approval grant so the
+    // human sees exactly which file will run and its content fingerprint.
+    const absolute = await resolveBinary(tpl.binary);
+    const sha256 = createHash("sha256").update(await readFile(absolute)).digest("hex");
+
     const binding: ApprovalBinding = {
       action: "template",
       ref: secret.ref,
@@ -41,6 +48,8 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
       field_fingerprint: null,
       template_id: tpl.id,
       template_params: b.params ?? {},
+      template_binary_path: absolute,
+      template_binary_sha256: sha256,
     };
     await requireApproval({
       store: services.approvals,
@@ -50,17 +59,19 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
       ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
     });
 
-    const absolute = await resolveBinary(tpl.binary);
     const result = await runTemplate({
       template: { ...tpl, binary: absolute },
       params: b.params ?? {},
       secret: secret.value,
+      expectedSha256: sha256,
     });
     await services.vault.markUsed(secret.ref);
     return {
       executed: result.exit_code === 0,
       template_id: result.template_id,
       secret_ref: secret.ref,
+      binary_path: absolute,
+      binary_sha256: sha256,
       exit_code: result.exit_code,
       value_visible_to_agent: false,
     };

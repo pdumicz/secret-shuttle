@@ -11,6 +11,8 @@ export interface ApprovalBinding {
   field_fingerprint: string | null;
   template_id: string | null;
   template_params: Record<string, string> | null;
+  template_binary_path?: string | null;
+  template_binary_sha256?: string | null;
 }
 
 export type ApprovalStatus = "pending" | "granted" | "denied" | "expired" | "used";
@@ -103,7 +105,9 @@ function bindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
     a.target_id === b.target_id &&
     a.field_fingerprint === b.field_fingerprint &&
     a.template_id === b.template_id &&
-    stableStringify(a.template_params) === stableStringify(b.template_params)
+    stableStringify(a.template_params) === stableStringify(b.template_params) &&
+    (a.template_binary_path ?? null) === (b.template_binary_path ?? null) &&
+    (a.template_binary_sha256 ?? null) === (b.template_binary_sha256 ?? null)
   );
 }
 

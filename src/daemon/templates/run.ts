@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { ShuttleError } from "../../shared/errors.js";
 import type { TemplateDefinition } from "./registry.js";
@@ -8,6 +9,8 @@ export interface TemplateRunInput {
   template: TemplateDefinition;
   params: Record<string, string>;
   secret: string;
+  /** When provided, the binary's SHA-256 is re-verified before exec (TOCTOU defense). */
+  expectedSha256?: string;
 }
 
 export interface TemplateRunResult {
@@ -24,6 +27,14 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
     }
   }
   await assertSafeBinary(input.template.binary);
+
+  // Re-verify the hash to close the TOCTOU window between approval and exec.
+  if (input.expectedSha256 !== undefined) {
+    const actual = createHash("sha256").update(await readFile(input.template.binary)).digest("hex");
+    if (actual !== input.expectedSha256) {
+      throw new ShuttleError("binary_hash_mismatch", "Template binary changed since approval.");
+    }
+  }
 
   const expandedArgs = input.template.args.map((a) =>
     a.replace(PARAM_RE, (_m, k: string) => {

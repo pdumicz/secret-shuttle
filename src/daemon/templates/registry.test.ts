@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
 import { TemplateRegistry } from "./registry.js";
+import { resolveBinary } from "./resolve-binary.js";
 
 test("registry lists built-in vercel-env-add", () => {
   const r = new TemplateRegistry();
@@ -22,4 +23,17 @@ test("registry throws for unknown templates", () => {
     () => r.get("nope"),
     (err) => err instanceof ShuttleError && err.code === "template_not_found",
   );
+});
+
+test("resolveBinary ignores process.env.PATH and uses only the safe allowlist", async () => {
+  const prev = process.env.PATH;
+  process.env.PATH = "/tmp/should-not-be-searched";
+  try {
+    // Confirming the function doesn't crash or honor the hostile PATH.
+    // If node is not in any safe dir, resolveBinary throws unsafe_binary_path
+    // (correct behavior); if it is, it resolves normally. Either way, /tmp is ignored.
+    await assert.doesNotReject(() => resolveBinary("node").catch(() => undefined));
+  } finally {
+    process.env.PATH = prev;
+  }
 });

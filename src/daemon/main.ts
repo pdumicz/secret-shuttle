@@ -7,12 +7,36 @@ import { registerRoutes } from "./api/router.js";
 import { writeSocketFile, removeSocketFile } from "./socket-file.js";
 import { hasLegacyKeyFile } from "../vault/keychain.js";
 
+function safeDaemonPath(): string {
+  if (process.platform === "darwin") {
+    return ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":");
+  }
+  if (process.platform === "win32") {
+    return [
+      "C:\\Windows\\System32",
+      "C:\\Windows",
+      "C:\\Windows\\System32\\Wbem",
+      "C:\\Program Files\\Vercel CLI",
+    ].join(";");
+  }
+  // Linux + everything else
+  return ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"].join(":");
+}
+
 async function main(): Promise<void> {
   if (process.getuid !== undefined && process.getuid() === 0) {
     process.stderr.write("Refusing to run as root.\n");
     process.exit(1);
   }
   process.umask(0o077);
+
+  // Sanitize the environment: replace PATH with a known-safe allowlist and
+  // strip dynamic-loader hijack vectors before any user-supplied code can run.
+  process.env.PATH = safeDaemonPath();
+  delete process.env.LD_PRELOAD;
+  delete process.env.DYLD_INSERT_LIBRARIES;
+  delete process.env.DYLD_LIBRARY_PATH;
+  delete process.env.NODE_OPTIONS;
 
   if (await hasLegacyKeyFile()) {
     process.stderr.write("Refusing to start: legacy master-key.json exists.\n");

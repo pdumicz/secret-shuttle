@@ -32,6 +32,8 @@
           <div class="row"><span class="label">Environment</span><b>${g.environment}</b></div>
           ${g.destination_domain ? `<div class="row"><span class="label">Destination</span><b>${g.destination_domain}</b></div>` : ""}
           ${g.template_id ? `<div class="row"><span class="label">Template</span><b>${g.template_id}</b></div>` : ""}
+          ${g.template_binary_path ? `<div class="row"><span class="label">Binary path</span><code>${g.template_binary_path}</code></div>` : ""}
+          ${g.template_binary_sha256 ? `<div class="row"><span class="label">Binary sha256</span><code>${g.template_binary_sha256}</code></div>` : ""}
           ${g.target_id ? `<div class="row"><span class="label">Browser target</span><code>${g.target_id}</code></div>` : ""}
           ${g.field_fingerprint ? `<div class="row"><span class="label">Field fingerprint</span><code>${g.field_fingerprint}</code></div>` : ""}
         `;
