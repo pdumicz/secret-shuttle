@@ -20,6 +20,9 @@ export function registerBlind(server: DaemonServer, services: DaemonServices): v
       if (services.cdp !== null) {
         await disableObservationDomains(services.cdp).catch(() => undefined);
       }
+      // Sever all agent WebSocket connections so any pre-armed requests
+      // (e.g. Runtime.evaluate with awaitPromise:true) cannot deliver responses.
+      services.cdpProxy?.severAgentConnections();
       await writeDaemonAudit({ action: "blind_start", ok: true, domain: state.domain });
       return {
         blind_mode: true,

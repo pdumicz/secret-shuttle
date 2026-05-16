@@ -8,6 +8,7 @@ import type { DaemonBlindModeState } from "../services-blind.js";
 
 export interface ProxyServer {
   url: string;
+  severAgentConnections(): void;
   close(): Promise<void>;
 }
 
@@ -19,6 +20,7 @@ export async function startCdpProxy(opts: {
   const token = randomBytes(24).toString("base64url");
   const httpServer: Server = createServer();
   const wss = new WebSocketServer({ noServer: true });
+  const sockets = new Set<WebSocket>();
 
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", `http://127.0.0.1`);
@@ -30,29 +32,30 @@ export async function startCdpProxy(opts: {
   });
 
   function wireSocket(ws: WebSocket): void {
+    sockets.add(ws);
     const onChrome = (msg: unknown) => {
       const m = msg as CdpMessage;
-      const method = m.method ?? "";
-      // Chrome → agent path. Events have a method but no id.
-      // Drop sensitive events while blind mode is active so that pre-enabled
-      // subscriptions (Runtime.consoleAPICalled, Network.responseReceived,
-      // Page.screencastFrame, etc.) cannot leak page content to the agent.
-      if (method !== "" && m.id === undefined) {
-        const blindOn = opts.blind.current() !== null;
-        if (blindOn && !isMethodAllowed(method, true)) {
-          return;
-        }
+      // BLIND MODE = TOTAL CHROME→AGENT BLACKOUT.
+      // Drop everything — events AND responses (including responses to requests
+      // the agent issued before blind mode, e.g. a pre-armed awaitPromise
+      // Runtime.evaluate that resolves while the secret is on screen).
+      if (opts.blind.current() !== null) {
+        return;
       }
       ws.send(JSON.stringify(m));
     };
     opts.transport.on("message", onChrome);
-    ws.on("close", () => opts.transport.removeListener("message", onChrome));
+    ws.on("close", () => {
+      sockets.delete(ws);
+      opts.transport.removeListener("message", onChrome);
+    });
     ws.on("message", (raw: Buffer) => {
       try {
         const msg = JSON.parse(raw.toString("utf8")) as CdpMessage;
-        const method = msg.method ?? "";
         const blindOn = opts.blind.current() !== null;
-        if (method !== "" && !isMethodAllowed(method, blindOn)) {
+        // In blind mode every inbound method is blocked; outside blind mode allow all.
+        const method = msg.method ?? "";
+        if (blindOn || (method !== "" && !isMethodAllowed(method, blindOn))) {
           if (typeof msg.id === "number") {
             ws.send(JSON.stringify({ id: msg.id, error: { code: -32603, message: "cdp_method_blocked" } }));
           }
@@ -72,6 +75,13 @@ export async function startCdpProxy(opts: {
   }
   return {
     url: `ws://127.0.0.1:${addr.port}/cdp/${token}`,
+    severAgentConnections: () => {
+      for (const ws of sockets) {
+        try { ws.close(1000, "blind_mode_active"); } catch { /* best-effort */ }
+        try { ws.terminate(); } catch { /* force-kill if close hangs */ }
+      }
+      sockets.clear();
+    },
     close: () => new Promise((resolve) => httpServer.close(() => resolve())),
   };
 }

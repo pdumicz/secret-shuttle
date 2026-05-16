@@ -5,6 +5,7 @@ import { Vault } from "../vault/vault.js";
 import { DaemonBlindModeState } from "./services-blind.js";
 import type { BrowserOps } from "./chrome/internal-ops.js";
 import type { CdpClient } from "./chrome/cdp-client.js";
+import type { ProxyServer } from "./proxy/cdp-proxy.js";
 import { randomUUID } from "node:crypto";
 import { writeDaemonAudit } from "./audit.js";
 
@@ -67,4 +68,5 @@ export class DaemonServices {
   browserSessionId: string | null = null;
   /** Internal CDP client for the running Chrome process; null before browser start. */
   cdp: CdpClient | null = null;
+  cdpProxy: ProxyServer | null = null;
 }

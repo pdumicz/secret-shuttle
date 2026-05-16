@@ -124,3 +124,85 @@ test("proxy drops Page.screencastFrame in blind mode", async () => {
     await proxy.close();
   }
 });
+
+test("blind mode drops Chrome→agent RESPONSES, not just events (pre-armed Runtime.evaluate leak)", async () => {
+  const transport = new FakeTransport();
+  const blind = new DaemonBlindModeState();
+  const proxy = await startCdpProxy({
+    transport: transport as never,
+    cdp: {} as unknown as CdpClient,
+    blind,
+  });
+  try {
+    const received: CdpMessage[] = [];
+    const ws = new WebSocket(proxy.url);
+    await new Promise<void>((res) => ws.on("open", () => res()));
+    ws.on("message", (d: Buffer) => received.push(JSON.parse(d.toString("utf8")) as CdpMessage));
+
+    // Agent issues a request BEFORE blind mode (id 99).
+    // Blind mode starts.
+    blind.start("dashboard.stripe.com", "secret window");
+
+    // Chrome now delivers the RESPONSE to that pre-blind request while blind is active.
+    transport.emit("message", { id: 99, result: { value: "SECRET_FROM_PENDING_RUNTIME_EVALUATE" } });
+    // And an event, for good measure.
+    transport.emit("message", { method: "Network.responseReceived", params: { x: 1 } });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const blob = JSON.stringify(received);
+    assert.equal(blob.includes("SECRET_FROM_PENDING_RUNTIME_EVALUATE"), false);
+    assert.equal(received.some((m) => m.id === 99), false);
+    assert.equal(received.some((m) => m.method === "Network.responseReceived"), false);
+
+    ws.close();
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("severAgentConnections closes connected agent sockets", async () => {
+  const transport = new FakeTransport();
+  const blind = new DaemonBlindModeState();
+  const proxy = await startCdpProxy({
+    transport: transport as never,
+    cdp: {} as unknown as CdpClient,
+    blind,
+  });
+  try {
+    const ws = new WebSocket(proxy.url);
+    await new Promise<void>((res) => ws.on("open", () => res()));
+    const closed = new Promise<void>((res) => ws.on("close", () => res()));
+    proxy.severAgentConnections();
+    await closed; // must resolve — the socket was force-closed by the proxy
+    assert.equal(ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED, true);
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("after blind ends, a fresh agent connection works again", async () => {
+  const transport = new FakeTransport();
+  const blind = new DaemonBlindModeState();
+  const proxy = await startCdpProxy({
+    transport: transport as never,
+    cdp: {} as unknown as CdpClient,
+    blind,
+  });
+  try {
+    blind.start("x.com", "r");
+    proxy.severAgentConnections();
+    blind.end();
+
+    const ws = new WebSocket(proxy.url);
+    await new Promise<void>((res) => ws.on("open", () => res()));
+    const received: CdpMessage[] = [];
+    ws.on("message", (d: Buffer) => received.push(JSON.parse(d.toString("utf8")) as CdpMessage));
+    transport.emit("message", { method: "Page.frameNavigated", params: { ok: true } });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(received.some((m) => m.method === "Page.frameNavigated"), true);
+    ws.close();
+  } finally {
+    await proxy.close();
+  }
+});

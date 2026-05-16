@@ -21,6 +21,7 @@ export function registerBrowser(server: DaemonServer, services: DaemonServices):
       cdp: session.cdp,
       blind: services.blind,
     });
+    services.cdpProxy = proxy;
     services.browserSessionId = proxy.url;
     return {
       started: true,

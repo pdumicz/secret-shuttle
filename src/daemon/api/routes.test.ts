@@ -123,6 +123,20 @@ function stubBrowser(s: { domain: string; target: string; value: string }): Brow
   };
 }
 
+test("blind start calls severAgentConnections when a cdpProxy is registered", async () => {
+  await withDaemon(async (ctx) => {
+    let severed = false;
+    ctx.services.cdpProxy = {
+      url: "ws://127.0.0.1:0/cdp/fake",
+      severAgentConnections: () => { severed = true; },
+      close: async () => undefined,
+    };
+    const r = await call(ctx, "POST", "/v1/blind/start", { domain: "stripe.com", reason: "sever-test" });
+    assert.equal(r.status, 200);
+    assert.equal(severed, true, "severAgentConnections must be called on blind start");
+  });
+});
+
 test("blind start activates state visible via /v1/status; end clears", async () => {
   await withDaemon(async (ctx) => {
     const s = await call(ctx, "POST", "/v1/blind/start", { domain: "stripe.com", reason: "r" });
