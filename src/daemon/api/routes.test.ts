@@ -298,6 +298,59 @@ test("unlock via web UI flow: start, submit passphrase, poll, unlocked", async (
   });
 });
 
+test("capture rejects when the focused field changes between approval and capture", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/blind/start", { domain: "dashboard.stripe.com", reason: "r" });
+
+    const field = { tag: "input", editable: true };
+    let reads = 0;
+    // readFocusedFingerprintAndDomain() is called once for `pre` (fingerprint FIELD_A).
+    // captureFocused() returns a DIFFERENT fingerprint FIELD_B but the SAME target_id
+    // (so the old target_id-only check would have passed).
+    ctx.services.browser = {
+      available: true,
+      currentDomainAndTarget: async () => ({ domain: "dashboard.stripe.com", target_id: "T1" }),
+      readFocusedFingerprintAndDomain: async () => {
+        reads += 1;
+        return { domain: "dashboard.stripe.com", target_id: "T1", field, field_fingerprint: "sha256:FIELD_A" };
+      },
+      captureFocused: async () => ({
+        value: "whsec_from_wrong_field",
+        domain: "dashboard.stripe.com",
+        target_id: "T1",
+        field,
+        field_fingerprint: "sha256:FIELD_B",
+      }),
+      captureSelection: async () => ({
+        value: "whsec_from_wrong_field",
+        domain: "dashboard.stripe.com",
+        target_id: "T1",
+        field,
+        field_fingerprint: "sha256:FIELD_B",
+      }),
+      injectFocused: async () => ({ domain: "dashboard.stripe.com", target_id: "T1", field, field_fingerprint: "sha256:FIELD_A" }),
+    };
+
+    // Pre-issue an approval bound to FIELD_A (matches the `pre` read).
+    const grant = ctx.services.approvals.create({
+      action: "capture", ref: null, planned_ref: "ss://stripe/prod/STRIPE_WEBHOOK_SECRET",
+      environment: "production", destination_domain: "dashboard.stripe.com",
+      target_id: "T1", field_fingerprint: "sha256:FIELD_A",
+      template_id: null, template_params: null,
+    });
+    ctx.services.approvals.approve(grant.id);
+
+    const r = await call(ctx, "POST", "/v1/secrets/capture", {
+      name: "STRIPE_WEBHOOK_SECRET", environment: "production", source: "stripe",
+      allowed_domains: ["dashboard.stripe.com"], approval_id: grant.id, wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "field_changed");
+    void reads;
+  });
+});
+
 test("UI unlock route rejects invalid ui_token", async () => {
   await withDaemon(async (ctx) => {
     const start = await call(ctx, "POST", "/v1/unlock/start");

@@ -17,7 +17,7 @@ class FakeTransport extends EventEmitter {
   }
 }
 
-test("proxy drops Chrome→agent events in the blocklist while blind mode is active", async () => {
+test("proxy drops ALL Chrome→agent events during blind mode (total blackout)", async () => {
   const transport = new FakeTransport();
   const blind = new DaemonBlindModeState();
   const fakeCdp = {} as unknown as CdpClient;
@@ -38,7 +38,7 @@ test("proxy drops Chrome→agent events in the blocklist while blind mode is act
 
     blind.start("dashboard.stripe.com", "test");
 
-    // Chrome emits a benign navigation event and two sensitive events.
+    // Chrome emits navigation, sensitive events — ALL must be dropped during blind mode.
     transport.emit("message", { method: "Page.frameNavigated", params: { url: "https://x" } });
     transport.emit("message", { method: "Network.responseReceived", params: { secret: "leak" } });
     transport.emit("message", { method: "Runtime.consoleAPICalled", params: { args: ["leak"] } });
@@ -47,9 +47,10 @@ test("proxy drops Chrome→agent events in the blocklist while blind mode is act
     await new Promise((r) => setTimeout(r, 50));
 
     const methods = messages.map((m) => m.method);
-    assert.ok(methods.includes("Page.frameNavigated"), "navigation event should pass through");
+    assert.equal(methods.includes("Page.frameNavigated"), false, "Page.frameNavigated must be dropped during blind mode");
     assert.equal(methods.includes("Network.responseReceived"), false, "Network.responseReceived should be dropped");
     assert.equal(methods.includes("Runtime.consoleAPICalled"), false, "Runtime.consoleAPICalled should be dropped");
+    assert.equal(messages.length, 0, "no events should cross the proxy during blind mode");
 
     ws.close();
   } finally {

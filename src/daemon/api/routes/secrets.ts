@@ -155,8 +155,12 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         ? await services.browser.captureSelection()
         : await services.browser.captureFocused();
 
-      if (capture.target_id !== pre.target_id) {
-        throw new ShuttleError("target_changed", "Browser target changed after approval.");
+      if (
+        capture.target_id !== pre.target_id ||
+        capture.domain !== pre.domain ||
+        capture.field_fingerprint !== pre.field_fingerprint
+      ) {
+        throw new ShuttleError("field_changed", "Focused field changed after approval.");
       }
 
       const meta = await services.vault.upsertSecret({
