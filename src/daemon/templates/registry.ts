@@ -9,6 +9,7 @@ export interface TemplateDefinition {
   secret_delivery: "stdin";
   required_params: string[];
   requires_approval_when_production: boolean;
+  validateParams?: (params: Record<string, string>) => void;
 }
 
 export class TemplateRegistry {

@@ -37,6 +37,10 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
       const tpl = registry.get(b.template_id);
       const secret = await services.vault.getSecret(b.ref);
 
+      // Validate template params before creating the approval grant so a human
+      // is never prompted for a structurally invalid request.
+      tpl.validateParams?.(b.params ?? {});
+
       // Resolve and hash the binary BEFORE creating the approval grant so the
       // human sees exactly which file will run and its content fingerprint.
       const absolute = await resolveBinary(tpl.binary);

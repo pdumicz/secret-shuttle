@@ -4,6 +4,7 @@ import path from "node:path";
 import { ShuttleError } from "../../shared/errors.js";
 import { assertSafeExecutable } from "../safe-executable.js";
 import { readDaemonConfig } from "../config.js";
+import { fileExists } from "../../shared/config.js";
 import { spawnChromePipe, type PipeTransport } from "./pipe-transport.js";
 import { CdpClient } from "./cdp-client.js";
 
@@ -45,15 +46,14 @@ export async function launchChrome(opts: { profile: string }): Promise<ChromeSes
       ...(config.chromeSha256 !== undefined ? { expectedSha256: config.chromeSha256 } : {}),
     });
   } else {
-    const def = defaultChromePath();
+    const def = await defaultChromePath();
     if (def === null) {
       throw new ShuttleError(
         "chrome_not_found",
-        "Could not find Chrome. Create ~/.secret-shuttle/daemon.config.json with {\"version\":1,\"chromePath\":\"/abs/path\"}.",
+        "Could not find Chrome in a known system location. Create ~/.secret-shuttle/daemon.config.json with {\"version\":1,\"chromePath\":\"/abs/path\"}.",
       );
     }
-    // The platform default path is a well-known system location; still realpath + sanity check it.
-    chromePath = await assertSafeExecutable(def).catch(() => def);
+    chromePath = await assertSafeExecutable(def);
   }
 
   await mkdir(resolvedProfile, { recursive: true });
@@ -91,11 +91,28 @@ export async function launchChrome(opts: { profile: string }): Promise<ChromeSes
   return { child, cdp, transport };
 }
 
-function defaultChromePath(): string | null {
-  if (process.platform === "darwin") return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-  if (process.platform === "win32") {
-    const pf = process.env.PROGRAMFILES;
-    return pf === undefined ? null : path.join(pf, "Google", "Chrome", "Application", "chrome.exe");
+async function defaultChromePath(): Promise<string | null> {
+  const candidates =
+    process.platform === "darwin"
+      ? [
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+      : process.platform === "win32"
+        ? [
+            `${process.env.PROGRAMFILES ?? "C:\\Program Files"}\\Google\\Chrome\\Application\\chrome.exe`,
+            `${process.env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)"}\\Google\\Chrome\\Application\\chrome.exe`,
+            `${process.env.LOCALAPPDATA ?? ""}\\Google\\Chrome\\Application\\chrome.exe`,
+          ]
+        : [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/opt/google/chrome/chrome",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+          ];
+  for (const c of candidates) {
+    if (c !== "" && (await fileExists(c))) return c;
   }
-  return "google-chrome";
+  return null;
 }

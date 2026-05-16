@@ -25,6 +25,8 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
     }
   }
 
+  input.template.validateParams?.(input.params);
+
   // Re-verify the hash to close the TOCTOU window between approval and exec.
   const resolvedBinary = await assertSafeExecutable(input.template.binary, {
     ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),

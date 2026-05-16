@@ -6,6 +6,26 @@ import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
 import { launchChrome } from "./launch.js";
 
+test("config chromePath that does not exist hard-fails validation (no fallback)", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ss-bad-chrome-"));
+  const prev = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = dir;
+  await writeFile(
+    path.join(dir, "daemon.config.json"),
+    JSON.stringify({ version: 1, chromePath: "/nonexistent/abs/chrome" }),
+  );
+  try {
+    await assert.rejects(
+      () => launchChrome({ profile: "ok" }),
+      (e: unknown) => e instanceof ShuttleError && e.code === "unsafe_binary_path",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+    else process.env.SECRET_SHUTTLE_HOME = prev;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("launchChrome times out and kills the child when the binary never responds on the CDP pipe", async () => {
   // Create a "fake chrome" that just sleeps forever without speaking CDP.
   const dir = await mkdtemp(path.join(os.tmpdir(), "ss-fake-chrome-"));

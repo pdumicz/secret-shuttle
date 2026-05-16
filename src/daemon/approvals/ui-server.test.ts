@@ -76,3 +76,28 @@ test("POST /ui/approvals/:id/approve with wrong token is rejected", async () => 
     assert.equal(store.get(g.id)?.status, "pending");
   });
 });
+
+test("GET /ui/approvals/:id includes template_params in JSON", async () => {
+  await withServer(async ({ store, port }) => {
+    const g = store.create({
+      action: "template" as const,
+      ref: "ss://local/prod/STRIPE_SECRET",
+      environment: "production",
+      destination_domain: null,
+      target_id: null,
+      field_fingerprint: null,
+      template_id: "vercel-env-add",
+      template_params: { name: "STRIPE_KEY", environment: "production" },
+      template_binary_path: "/usr/local/bin/vercel",
+      template_binary_sha256: "abc123",
+    });
+    const r = await fetch(`http://127.0.0.1:${port}/ui/approvals/${g.id}?token=${g.ui_token}`);
+    assert.equal(r.status, 200);
+    const body = await r.json() as {
+      template_params: Record<string, string> | null;
+      template_id: string | null;
+    };
+    assert.deepEqual(body.template_params, { name: "STRIPE_KEY", environment: "production" });
+    assert.equal(body.template_id, "vercel-env-add");
+  });
+});

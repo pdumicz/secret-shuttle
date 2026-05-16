@@ -1,3 +1,4 @@
+import { ShuttleError } from "../../../shared/errors.js";
 import type { TemplateDefinition } from "../registry.js";
 
 export const vercelEnvAdd: TemplateDefinition = {
@@ -8,4 +9,20 @@ export const vercelEnvAdd: TemplateDefinition = {
   secret_delivery: "stdin",
   required_params: ["name", "environment"],
   requires_approval_when_production: true,
+  validateParams: (params) => {
+    const name = params["name"] ?? "";
+    const environment = params["environment"] ?? "";
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)) {
+      throw new ShuttleError(
+        "invalid_template_param",
+        "Vercel env var name must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$.",
+      );
+    }
+    if (!["production", "preview", "development"].includes(environment)) {
+      throw new ShuttleError(
+        "invalid_template_param",
+        "Vercel environment must be one of: production, preview, development.",
+      );
+    }
+  },
 };

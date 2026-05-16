@@ -20,6 +20,7 @@
     <div id="actions"></div>
     <div class="status" id="status"></div>
     <script type="module">
+      const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
       const params = new URLSearchParams(location.search);
       const id = params.get("id");
       const token = params.get("token");
@@ -27,15 +28,18 @@
         const r = await fetch(`/ui/approvals/${id}?token=${token}`);
         const g = await r.json();
         document.getElementById("grant").innerHTML = `
-          <div class="row"><span class="label">Action</span><b>${g.action}</b></div>
-          <div class="row"><span class="label">Secret</span><b>${g.ref ?? g.planned_ref ?? "(new)"}</b></div>
-          <div class="row"><span class="label">Environment</span><b>${g.environment}</b></div>
-          ${g.destination_domain ? `<div class="row"><span class="label">Destination</span><b>${g.destination_domain}</b></div>` : ""}
-          ${g.template_id ? `<div class="row"><span class="label">Template</span><b>${g.template_id}</b></div>` : ""}
-          ${g.template_binary_path ? `<div class="row"><span class="label">Binary path</span><code>${g.template_binary_path}</code></div>` : ""}
-          ${g.template_binary_sha256 ? `<div class="row"><span class="label">Binary sha256</span><code>${g.template_binary_sha256}</code></div>` : ""}
-          ${g.target_id ? `<div class="row"><span class="label">Browser target</span><code>${g.target_id}</code></div>` : ""}
-          ${g.field_fingerprint ? `<div class="row"><span class="label">Field fingerprint</span><code>${g.field_fingerprint}</code></div>` : ""}
+          <div class="row"><span class="label">Action</span><b>${esc(g.action)}</b></div>
+          <div class="row"><span class="label">Secret</span><b>${esc(g.ref ?? g.planned_ref ?? "(new)")}</b></div>
+          <div class="row"><span class="label">Environment</span><b>${esc(g.environment)}</b></div>
+          ${g.destination_domain ? `<div class="row"><span class="label">Destination</span><b>${esc(g.destination_domain)}</b></div>` : ""}
+          ${g.template_id ? `<div class="row"><span class="label">Template</span><b>${esc(g.template_id)}</b></div>` : ""}
+          ${g.template_binary_path ? `<div class="row"><span class="label">Binary path</span><code>${esc(g.template_binary_path)}</code></div>` : ""}
+          ${g.template_binary_sha256 ? `<div class="row"><span class="label">Binary sha256</span><code>${esc(g.template_binary_sha256)}</code></div>` : ""}
+          ${g.template_params ? Object.keys(g.template_params).sort().map((k) =>
+            `<div class="row"><span class="label">param: ${esc(k)}</span><code>${esc(g.template_params[k])}</code></div>`
+          ).join("") : ""}
+          ${g.target_id ? `<div class="row"><span class="label">Browser target</span><code>${esc(g.target_id)}</code></div>` : ""}
+          ${g.field_fingerprint ? `<div class="row"><span class="label">Field fingerprint</span><code>${esc(g.field_fingerprint)}</code></div>` : ""}
         `;
         document.getElementById("status").textContent = `Status: ${g.status}`;
       }
