@@ -5,6 +5,7 @@ import { ShuttleError } from "../shared/errors.js";
 export interface DaemonConfig {
   version: 1;
   chromePath?: string;
+  chromeSha256?: string;
 }
 
 export async function readDaemonConfig(): Promise<DaemonConfig | null> {
@@ -17,6 +18,9 @@ export async function readDaemonConfig(): Promise<DaemonConfig | null> {
   }
   if (parsed.chromePath !== undefined && typeof parsed.chromePath !== "string") {
     throw new ShuttleError("unsupported_daemon_config", "chromePath must be a string.");
+  }
+  if (parsed.chromeSha256 !== undefined && typeof parsed.chromeSha256 !== "string") {
+    throw new ShuttleError("unsupported_daemon_config", "chromeSha256 must be a string.");
   }
   return parsed;
 }

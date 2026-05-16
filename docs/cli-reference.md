@@ -95,10 +95,10 @@ The agent uses the proxy URL only.
 To override the Chrome binary, create `~/.secret-shuttle/daemon.config.json` (mode 0600 recommended) with:
 
 ```json
-{ "version": 1, "chromePath": "/absolute/path/to/Chrome" }
+{ "version": 1, "chromePath": "/absolute/path/to/Chrome", "chromeSha256": "<optional lowercase sha256 of that file>" }
 ```
 
-before running `secret-shuttle daemon start`. The agent cannot influence this file through the CLI/API.
+before running `secret-shuttle daemon start`. The agent cannot influence this file through the CLI/API. When `chromeSha256` is set, the daemon refuses to launch if the binary's hash does not match.
 
 ## `secret-shuttle list | inspect`
 

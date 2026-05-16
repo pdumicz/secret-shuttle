@@ -48,3 +48,13 @@ test("readDaemonConfig rejects unknown versions", async () => {
     );
   });
 });
+
+test("readDaemonConfig accepts an optional chromeSha256", async () => {
+  await withHome(async (home) => {
+    await writeFile(path.join(home, "daemon.config.json"), JSON.stringify({
+      version: 1, chromePath: "/usr/bin/google-chrome", chromeSha256: "abc123",
+    }));
+    const cfg = await readDaemonConfig();
+    assert.equal(cfg?.chromeSha256, "abc123");
+  });
+});
