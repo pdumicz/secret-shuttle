@@ -20,7 +20,7 @@ export function registerRoutes(
   registerStatus(server, services);
   registerUnlock(server, services);
   registerUnlockSession(server, services, daemonPortRef);
-  registerBlind(server, services);
+  registerBlind(server, services, daemonPortRef);
   registerSecrets(server, services, daemonPortRef);
   registerApprovals(server, services);
   registerBrowser(server, services);

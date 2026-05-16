@@ -88,8 +88,14 @@ test("Stripe→Vercel end-to-end through daemon API with no raw secret in any re
     assert.equal((captureOk.body as { captured: boolean }).captured, true);
     assert.equal((captureOk.body as { secret_ref: string }).secret_ref, "ss://stripe/prod/STRIPE_WEBHOOK_SECRET");
 
-    // 2c. End blind mode after capture.
-    responses.push(await call("POST", "/v1/blind/end"));
+    // 2c. End blind mode after capture — requires human approval gate.
+    const blindEndGrant = services.approvals.create({
+      action: "blind_end", ref: null, environment: "blind",
+      destination_domain: "dashboard.stripe.com", target_id: null,
+      field_fingerprint: null, template_id: null, template_params: null,
+    });
+    services.approvals.approve(blindEndGrant.id);
+    responses.push(await call("POST", "/v1/blind/end", { approval_id: blindEndGrant.id, wait_for_approval: false }));
 
     // 3. Vercel: navigate (simulated), inject with a new approval.
     services.browser = stubBrowser({ domain: "vercel.com", target: "T-vercel", value: "" });

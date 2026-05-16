@@ -10,6 +10,7 @@ export interface TemplateDefinition {
   required_params: string[];
   requires_approval_when_production: boolean;
   validateParams?: (params: Record<string, string>) => void;
+  destinationEnvironment?: (params: Record<string, string>) => string;
 }
 
 export class TemplateRegistry {

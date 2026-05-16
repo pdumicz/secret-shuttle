@@ -10,7 +10,7 @@ export type ApprovalLifecycleEvent =
   | { kind: "mismatch"; binding: ApprovalBinding; existingGrant: ApprovalGrant };
 
 export interface ApprovalBinding {
-  action: "inject" | "capture" | "generate" | "compare" | "template";
+  action: "inject" | "capture" | "generate" | "compare" | "template" | "blind_end";
   ref: string | null;
   planned_ref?: string | null;
   environment: string;

@@ -1,12 +1,15 @@
 import { ShuttleError } from "../../../shared/errors.js";
-import { disableObservationDomains } from "../../chrome/internal-ops.js";
+import { blankAllPages, disableObservationDomains } from "../../chrome/internal-ops.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
+import { requireApproval } from "../../approvals/require-approval.js";
+import type { ApprovalBinding } from "../../approvals/store.js";
 
 interface StartBody { domain?: string; reason?: string; }
+interface EndBody { approval_id?: string; wait_for_approval?: boolean; }
 
-export function registerBlind(server: DaemonServer, services: DaemonServices): void {
+export function registerBlind(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/blind/start", async (_req, raw) => {
     const b = (raw ?? {}) as StartBody;
     try {
@@ -40,10 +43,48 @@ export function registerBlind(server: DaemonServer, services: DaemonServices): v
       throw err;
     }
   });
-  server.addRoute("POST", "/v1/blind/end", async () => {
+  server.addRoute("POST", "/v1/blind/end", async (_req, raw) => {
+    const b = (raw ?? {}) as EndBody;
+    const { approval_id, wait_for_approval } = b;
     try {
+      // If blind mode is not active, this is an idempotent no-op — no approval needed.
+      const activeBlind = services.blind.current();
+      if (activeBlind === null) {
+        const result = services.blind.end();
+        await writeDaemonAudit({ action: "blind_end", ok: true });
+        return result;
+      }
+
+      const blindDomain = activeBlind.domain;
+
+      // Blind is active — require a human to attest the screen is safe.
+      const binding: ApprovalBinding = {
+        action: "blind_end",
+        ref: null,
+        environment: "blind",
+        destination_domain: blindDomain,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: null,
+        template_params: null,
+      };
+      await requireApproval({
+        store: services.approvals,
+        binding,
+        daemonPort: daemonPortRef(),
+        force: true,
+        ...(approval_id !== undefined ? { approvalIdFromClient: approval_id } : {}),
+        ...(wait_for_approval === false ? { waitMs: 0 } : {}),
+      });
+
+      // Approval granted: navigate every visible page to about:blank so any
+      // secret on screen is removed BEFORE observation can resume.
+      if (services.cdp !== null) {
+        await blankAllPages(services.cdp).catch(() => undefined);
+      }
+
       const result = services.blind.end();
-      await writeDaemonAudit({ action: "blind_end", ok: true });
+      await writeDaemonAudit({ action: "blind_end", ok: true, domain: blindDomain });
       return result;
     } catch (err) {
       await writeDaemonAudit({

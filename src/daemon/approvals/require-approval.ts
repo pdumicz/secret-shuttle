@@ -9,6 +9,7 @@ export interface RequireApprovalOptions {
   daemonPort: number;
   approvalIdFromClient?: string;
   waitMs?: number;
+  force?: boolean;
   /** Hook so tests can disable the system-browser open. */
   openUrlImpl?: (url: string) => void;
   /**
@@ -17,7 +18,7 @@ export interface RequireApprovalOptions {
 }
 
 export async function requireApproval(opts: RequireApprovalOptions): Promise<ApprovalGrant> {
-  const needsApproval = opts.binding.environment === "production";
+  const needsApproval = opts.force === true || opts.binding.environment === "production";
   if (!needsApproval) {
     return synthesizeGrant(opts.binding);
   }

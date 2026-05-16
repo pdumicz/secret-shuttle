@@ -35,6 +35,18 @@ export async function disableObservationDomains(cdp: CdpClient): Promise<void> {
   }
 }
 
+export async function blankAllPages(cdp: CdpClient): Promise<void> {
+  const r = await cdp.send<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets");
+  for (const t of r.targetInfos.filter((t) => t.type === "page")) {
+    const { sessionId } = await cdp.send<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true });
+    try {
+      await cdp.send("Page.navigate", { url: "about:blank" }, sessionId).catch(() => undefined);
+    } finally {
+      await cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+}
+
 export interface FieldDescriptor {
   tag: string;
   type?: string;

@@ -137,14 +137,21 @@ test("blind start calls severAgentConnections when a cdpProxy is registered", as
   });
 });
 
-test("blind start activates state visible via /v1/status; end clears", async () => {
+test("blind start activates state visible via /v1/status; end clears (with pre-issued approval)", async () => {
   await withDaemon(async (ctx) => {
     const s = await call(ctx, "POST", "/v1/blind/start", { domain: "stripe.com", reason: "r" });
     assert.equal(s.status, 200);
     const status = await call(ctx, "GET", "/v1/status");
     const bm = (status.body as { blind_mode?: { domain: string } }).blind_mode;
     assert.equal(bm?.domain, "stripe.com");
-    const e = await call(ctx, "POST", "/v1/blind/end");
+    // blind end now requires a human approval gate — pre-issue one.
+    const grant = ctx.services.approvals.create({
+      action: "blind_end", ref: null, environment: "blind",
+      destination_domain: "stripe.com", target_id: null,
+      field_fingerprint: null, template_id: null, template_params: null,
+    });
+    ctx.services.approvals.approve(grant.id);
+    const e = await call(ctx, "POST", "/v1/blind/end", { approval_id: grant.id, wait_for_approval: false });
     assert.equal(e.status, 200);
     const status2 = await call(ctx, "GET", "/v1/status");
     assert.equal((status2.body as { blind_mode: null }).blind_mode, null);
@@ -446,5 +453,85 @@ test("template run vercel-env-add with invalid environment returns 400 invalid_t
     // Validation must run before requireApproval — no new grant should have been created.
     const approvalsAfter = (ctx.services.approvals as unknown as { grants: Map<string, unknown> }).grants.size;
     assert.equal(approvalsAfter, approvalsBefore, "no approval should be created for an invalid template request");
+  });
+});
+
+// Fix 1 tests — blind end requires human approval
+
+test("blind end requires human approval and is not agent-controlled", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/blind/start", { domain: "dashboard.stripe.com", reason: "r" });
+    // No approval, no wait → must report approval_required, blind stays active.
+    const r = await call(ctx, "POST", "/v1/blind/end", { wait_for_approval: false });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "approval_required");
+    const status = await call(ctx, "GET", "/v1/status");
+    assert.notEqual((status.body as { blind_mode: unknown }).blind_mode, null);
+  });
+});
+
+test("blind end succeeds with a pre-issued approval bound to the blind domain", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/blind/start", { domain: "dashboard.stripe.com", reason: "r" });
+    const grant = ctx.services.approvals.create({
+      action: "blind_end", ref: null, environment: "blind",
+      destination_domain: "dashboard.stripe.com", target_id: null,
+      field_fingerprint: null, template_id: null, template_params: null,
+    });
+    ctx.services.approvals.approve(grant.id);
+    const r = await call(ctx, "POST", "/v1/blind/end", { approval_id: grant.id, wait_for_approval: false });
+    assert.equal(r.status, 200);
+    const status = await call(ctx, "GET", "/v1/status");
+    assert.equal((status.body as { blind_mode: unknown }).blind_mode, null);
+  });
+});
+
+test("blind end is a no-op (no approval needed) when blind mode is not active", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await call(ctx, "POST", "/v1/blind/end", { wait_for_approval: false });
+    assert.equal(r.status, 200);
+  });
+});
+
+// Fix 2 tests — template approval classifies destination environment
+
+test("template run: dev-classed secret targeting Vercel production REQUIRES approval", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Seed a development secret (no approval needed to generate dev).
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "API_KEY", environment: "development", source: "local",
+    });
+    // Run vercel-env-add targeting production with that dev secret, no approval.
+    const r = await call(ctx, "POST", "/v1/templates/run", {
+      template_id: "vercel-env-add",
+      ref: "ss://local/dev/API_KEY",
+      params: { name: "API_KEY", environment: "production" },
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "approval_required");
+  });
+});
+
+test("template run: dev secret to Vercel development does not force approval", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "API_KEY2", environment: "development", source: "local",
+    });
+    // No production anywhere → approval not forced. It will still try to run the
+    // real `vercel` binary which won't exist in CI/sandbox; that yields a
+    // template/binary error, NOT approval_required. Assert it's NOT approval_required.
+    const r = await call(ctx, "POST", "/v1/templates/run", {
+      template_id: "vercel-env-add",
+      ref: "ss://local/dev/API_KEY2",
+      params: { name: "API_KEY2", environment: "development" },
+      wait_for_approval: false,
+    });
+    assert.notEqual((r.body as { error?: { code?: string } }).error?.code, "approval_required");
   });
 });

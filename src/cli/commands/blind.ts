@@ -14,9 +14,14 @@ export function blindCommand(): Command {
       });
       outputJson(ok(r as Record<string, unknown>));
     });
-  c.command("end").action(async () => {
-    const r = await daemonRequest("POST", "/v1/blind/end");
-    outputJson(ok(r as Record<string, unknown>));
-  });
+  c.command("end")
+    .option("--approval-id <id>")
+    .option("--no-wait")
+    .action(async (options) => {
+      const body: Record<string, unknown> = { wait_for_approval: options.wait !== false };
+      if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      const r = await daemonRequest("POST", "/v1/blind/end", body);
+      outputJson(ok(r as Record<string, unknown>));
+    });
   return c;
 }

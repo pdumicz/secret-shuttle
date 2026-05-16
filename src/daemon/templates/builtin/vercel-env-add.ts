@@ -9,6 +9,7 @@ export const vercelEnvAdd: TemplateDefinition = {
   secret_delivery: "stdin",
   required_params: ["name", "environment"],
   requires_approval_when_production: true,
+  destinationEnvironment: (p) => (p["environment"] === "production" ? "production" : (p["environment"] ?? "development")),
   validateParams: (params) => {
     const name = params["name"] ?? "";
     const environment = params["environment"] ?? "";

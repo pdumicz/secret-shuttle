@@ -40,6 +40,7 @@
           ).join("") : ""}
           ${g.target_id ? `<div class="row"><span class="label">Browser target</span><code>${esc(g.target_id)}</code></div>` : ""}
           ${g.field_fingerprint ? `<div class="row"><span class="label">Field fingerprint</span><code>${esc(g.field_fingerprint)}</code></div>` : ""}
+          ${g.action === "blind_end" ? `<div class="row" style="color:#c33"><b>Only approve if the secret is NO LONGER visible on screen. Approving resumes browser observation.</b></div>` : ""}
         `;
         document.getElementById("status").textContent = `Status: ${g.status}`;
       }
