@@ -535,3 +535,43 @@ test("template run: dev secret to Vercel development does not force approval", a
     assert.notEqual((r.body as { error?: { code?: string } }).error?.code, "approval_required");
   });
 });
+
+test("production template: route-created grant is consumable on retry (no self-mismatch)", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Seed a production secret.
+    const g = ctx.services.approvals.create({
+      action: "generate", ref: null, planned_ref: "ss://local/prod/TPL2",
+      environment: "production", destination_domain: null, target_id: null,
+      field_fingerprint: null, template_id: null, template_params: null,
+    });
+    ctx.services.approvals.approve(g.id);
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "TPL2", environment: "production", source: "local",
+      approval_id: g.id, wait_for_approval: false,
+    });
+
+    // First call: no approval_id, no wait → route creates a grant + throws approval_required.
+    const first = await call(ctx, "POST", "/v1/templates/run", {
+      template_id: "vercel-env-add", ref: "ss://local/prod/TPL2",
+      params: { name: "TPL2", environment: "production" }, wait_for_approval: false,
+    });
+    assert.equal(first.status, 400);
+    const firstCode = (first.body as { error: { code: string; message: string } }).error.code;
+    assert.equal(firstCode, "approval_required");
+    const { approval_id } = JSON.parse(
+      (first.body as { error: { message: string } }).error.message,
+    ) as { approval_id: string };
+
+    // Human approves the route-created grant.
+    ctx.services.approvals.approve(approval_id);
+
+    // Retry with that approval_id → MUST NOT be approval_mismatch (same binding shape).
+    const second = await call(ctx, "POST", "/v1/templates/run", {
+      template_id: "vercel-env-add", ref: "ss://local/prod/TPL2",
+      params: { name: "TPL2", environment: "production" }, approval_id, wait_for_approval: false,
+    });
+    const code2 = (second.body as { error?: { code?: string } }).error?.code;
+    assert.notEqual(code2, "approval_mismatch");
+  });
+});
