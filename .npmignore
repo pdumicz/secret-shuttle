@@ -1,0 +1,6 @@
+docs/superpowers/
+**/*.map
+**/*.tsbuildinfo
+**/*.test.js
+**/*.test.d.ts
+src/

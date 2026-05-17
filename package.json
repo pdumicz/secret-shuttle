@@ -10,17 +10,25 @@
     "dist",
     "!dist/**/*.test.js",
     "!dist/**/*.test.js.map",
+    "!dist/**/*.test.d.ts",
+    "!dist/**/*.js.map",
+    "!dist/**/*.tsbuildinfo",
     "skills",
     "agents",
     "docs",
+    "!docs/superpowers/**",
     "examples",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "clean": "rm -rf dist",
     "build": "tsc -p tsconfig.json && node -e \"import('node:fs').then(({copyFileSync})=>{copyFileSync('src/daemon/approvals/ui.html','dist/daemon/approvals/ui.html');copyFileSync('src/daemon/approvals/unlock-ui.html','dist/daemon/approvals/unlock-ui.html');})\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test \"dist/**/*.test.js\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "check-pack": "npm run clean && npm run build && node scripts/check-pack.mjs",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run typecheck && npm test && node scripts/check-pack.mjs"
   },
   "keywords": [
     "ai",
