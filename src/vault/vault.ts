@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { ensureShuttleHome, fileExists, getShuttlePaths, readJsonFile, writeJsonFileAtomic } from "../shared/config.js";
 import { ShuttleError } from "../shared/errors.js";
 import { buildSecretRef, canonicalEnvironment } from "../shared/refs.js";
 import { decryptVault, encryptVault } from "./crypto.js";
-import { fingerprintSecret } from "./fingerprints.js";
+import { fingerprintSecret, isLegacyFingerprint } from "./fingerprints.js";
 import type {
   AgentSecretMetadata,
   EncryptedVaultFile,
@@ -77,7 +77,7 @@ export class Vault {
       created_at: existing?.created_at ?? now,
       updated_at: now,
       last_used_at: existing?.last_used_at ?? null,
-      fingerprint: fingerprintSecret(input.value),
+      fingerprint: fingerprintSecret(input.value, Buffer.from(plaintext.fingerprint_key as string, "base64")),
       allowed_domains: normalizeDomains(input.allowedDomains),
       allowed_actions: input.allowedActions ?? DEFAULT_ACTIONS,
       requires_approval: input.requiresApproval ?? environment === "production",
@@ -146,7 +146,34 @@ export class Vault {
     if (plaintext.version !== 1 || !Array.isArray(plaintext.secrets)) {
       throw new ShuttleError("invalid_vault", "Secret Shuttle vault contents are invalid.");
     }
+    if (this.migrateFingerprints(plaintext)) {
+      await this.write(plaintext);
+    }
     return plaintext;
+  }
+
+  /** One-shot transparent upgrade: ensure a per-vault HMAC key and re-key any
+   *  legacy raw-sha256 fingerprints. Returns true if the vault must be persisted. */
+  private migrateFingerprints(pt: VaultPlaintext): boolean {
+    let dirty = false;
+    if (typeof pt.fingerprint_key !== "string" || pt.fingerprint_key === "") {
+      pt.fingerprint_key = randomBytes(32).toString("base64");
+      dirty = true;
+    }
+    const fpKey = Buffer.from(pt.fingerprint_key, "base64");
+    for (const s of pt.secrets) {
+      if (isLegacyFingerprint(s.fingerprint)) {
+        s.fingerprint = fingerprintSecret(s.value, fpKey);
+        dirty = true;
+      }
+    }
+    return dirty;
+  }
+
+  /** Daemon-internal: the per-vault fingerprint HMAC key (never exposed to agents). */
+  async fingerprintKey(): Promise<Buffer> {
+    const pt = await this.read();
+    return Buffer.from(pt.fingerprint_key as string, "base64");
   }
 
   private async write(plaintext: VaultPlaintext): Promise<void> {

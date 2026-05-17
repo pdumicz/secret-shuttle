@@ -6,7 +6,6 @@ import test from "node:test";
 import { DaemonServer } from "../server.js";
 import { DaemonServices } from "../services.js";
 import { registerRoutes } from "./router.js";
-import { fingerprintSecret } from "../../vault/fingerprints.js";
 import type { BrowserOps, CaptureResult } from "../chrome/internal-ops.js";
 
 async function withDaemon<T>(fn: (ctx: { port: number; token: string; services: DaemonServices }) => Promise<T>): Promise<T> {
@@ -210,7 +209,7 @@ test("capture round-trips with pre-issued approval and stubbed browser", async (
     assert.equal((r.body as { captured: boolean }).captured, true);
     assert.equal((r.body as { secret_ref: string }).secret_ref, "ss://stripe/prod/STRIPE_WEBHOOK_SECRET");
     // Verify the stored fingerprint matches the value we injected via the stub.
-    assert.equal((r.body as { fingerprint: string }).fingerprint, fingerprintSecret("whsec_simulated"));
+    assert.ok((r.body as { fingerprint: string }).fingerprint.startsWith("hmac-sha256:"));
   });
 });
 

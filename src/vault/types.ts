@@ -45,6 +45,7 @@ export interface AgentSecretMetadata {
 export interface VaultPlaintext {
   version: 1;
   secrets: SecretRecord[];
+  fingerprint_key?: string;
 }
 
 export interface EncryptedVaultFile {

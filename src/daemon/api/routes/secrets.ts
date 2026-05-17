@@ -267,7 +267,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         throw new ShuttleError("domain_mismatch", `Current domain ${capture.domain} != ${b.domain}.`);
       }
       enforceDomain(capture.domain, secret.allowed_domains, "compare");
-      const matches = fingerprintMatches(capture.value, secret.fingerprint);
+      const matches = fingerprintMatches(capture.value, secret.fingerprint, await services.vault.fingerprintKey());
       await writeDaemonAudit({ action: "compare", ok: true, ref: secret.ref, environment: secret.environment, domain: capture.domain });
       return {
         matches,
