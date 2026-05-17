@@ -69,7 +69,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
     try {
       const env = canonicalEnvironment(b.environment);
       const plannedRef = buildSecretRef(b.source ?? "local", env, b.name);
-      const effectiveAllowed = b.allowed_domains ?? [];
+      const effectiveAllowed = (b.allowed_domains ?? []).map(normalizeDomain);
 
       const binding: ApprovalBinding = {
         action: "generate",
@@ -130,7 +130,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       const env = canonicalEnvironment(b.environment);
       const plannedRef = buildSecretRef(b.source, env, b.name);
       const pre = await services.browser.readFocusedFingerprintAndDomain();
-      const effectiveAllowed = b.allowed_domains ?? [pre.domain];
+      const effectiveAllowed = (b.allowed_domains ?? [pre.domain]).map(normalizeDomain);
 
       services.blind.assertForDomain(pre.domain);
       enforceDomain(pre.domain, effectiveAllowed, "capture");

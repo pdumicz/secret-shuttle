@@ -3,6 +3,7 @@ import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
 import { assertCaptureSource, collectRepeated } from "./helpers.js";
 import { ShuttleError } from "../../shared/errors.js";
+import { canonicalEnvironment } from "../../shared/refs.js";
 
 export function captureCommand(): Command {
   return new Command("capture")
@@ -19,7 +20,7 @@ export function captureCommand(): Command {
     .action(async (options) => {
       assertCaptureSource(options.from);
       const domains = options.allowDomain as string[];
-      if (options.env === "production" && domains.length === 0) {
+      if (canonicalEnvironment(options.env) === "production" && domains.length === 0) {
         throw new ShuttleError(
           "missing_allow_domain",
           "Production secrets require at least one --allow-domain.",

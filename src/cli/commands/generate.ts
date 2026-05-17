@@ -3,6 +3,7 @@ import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
 import { collectRepeated } from "./helpers.js";
 import { ShuttleError } from "../../shared/errors.js";
+import { canonicalEnvironment } from "../../shared/refs.js";
 
 export function generateCommand(): Command {
   return new Command("generate")
@@ -18,7 +19,7 @@ export function generateCommand(): Command {
     .option("--no-wait", "Return approval_required without waiting.")
     .action(async (options) => {
       const domains = options.allowDomain as string[];
-      if (options.env === "production" && domains.length === 0) {
+      if (canonicalEnvironment(options.env) === "production" && domains.length === 0) {
         throw new ShuttleError(
           "missing_allow_domain",
           "Production secrets require at least one --allow-domain.",
