@@ -679,3 +679,25 @@ test("inject that fails before writing the value auto-resumes (blind mode left O
     assert.equal((status.body as { blind_mode: unknown }).blind_mode, null);
   });
 });
+
+test("inject keeps blind mode ACTIVE if bookkeeping fails AFTER the value is written (fail closed)", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "INJ3", environment: "development", source: "local",
+      allowed_domains: ["app.example.com"],
+    });
+    ctx.services.browser = stubBrowser({ domain: "app.example.com", target: "T1", value: "" });
+    // injectFocused SUCCEEDS (value written), but post-write markUsed throws.
+    const realMarkUsed = ctx.services.vault.markUsed.bind(ctx.services.vault);
+    void realMarkUsed;
+    ctx.services.vault.markUsed = async () => { throw new Error("disk_failure_after_write"); };
+    const r = await call(ctx, "POST", "/v1/secrets/inject", {
+      ref: "ss://local/dev/INJ3", domain: "app.example.com", wait_for_approval: false,
+    });
+    assert.equal(r.status >= 400, true, "inject should report the post-write failure");
+    // CRITICAL: the secret is on the page; blind mode MUST stay active (fail closed).
+    const status = await call(ctx, "GET", "/v1/status");
+    assert.notEqual((status.body as { blind_mode: unknown }).blind_mode, null);
+  });
+});

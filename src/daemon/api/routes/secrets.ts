@@ -244,30 +244,32 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       }
       services.cdpProxy?.severAgentConnections();
 
+      let result: import("../../chrome/internal-ops.js").InjectResult;
       try {
         const post = await services.browser.readFocusedFingerprintAndDomain();
         if (post.target_id !== pre.target_id || post.field_fingerprint !== pre.field_fingerprint || post.domain !== pre.domain) {
           throw new ShuttleError("field_changed", "Focused field changed after approval.");
         }
-        const result = await services.browser.injectFocused(secret.value);
-        await services.vault.markUsed(secret.ref);
-        await writeDaemonAudit({ action: "inject", ok: true, ref: secret.ref, environment: secret.environment, domain: result.domain });
-        return {
-          injected: true,
-          secret_ref: secret.ref,
-          browser_domain: result.domain,
-          field: result.field,
-          blind_mode: true,
-          next: "Secret written with the agent blacked out. Run `secret-shuttle blind end` and approve once the secret is no longer visible to resume observation.",
-          value_visible_to_agent: false,
-        };
-      } catch (innerErr) {
-        // Nothing was written to the page (failure happened before/at injectFocused
-        // resolved with no value on screen) → safe to auto-resume so the user is not
-        // stranded in blind mode for a no-op.
+        result = await services.browser.injectFocused(secret.value);
+      } catch (preWriteErr) {
+        // Failure at or before injectFocused → nothing was written to the page,
+        // so it is safe to auto-resume rather than strand the user in blind mode.
         services.blind.end();
-        throw innerErr;
+        throw preWriteErr;
       }
+      // The secret IS now on the page. From here on, a failure must NOT resume
+      // observation — blind mode stays ACTIVE until a human-approved `blind end`.
+      await services.vault.markUsed(secret.ref);
+      await writeDaemonAudit({ action: "inject", ok: true, ref: secret.ref, environment: secret.environment, domain: result.domain });
+      return {
+        injected: true,
+        secret_ref: secret.ref,
+        browser_domain: result.domain,
+        field: result.field,
+        blind_mode: true,
+        next: "Secret written with the agent blacked out. Run `secret-shuttle blind end` and approve once the secret is no longer visible to resume observation.",
+        value_visible_to_agent: false,
+      };
     } catch (err) {
       await writeDaemonAudit({
         action: "inject",
