@@ -259,6 +259,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
   server.addRoute("POST", "/v1/secrets/compare", async (_req, raw) => {
     services.lock.requireKey();
     const b = raw as CompareBody;
+    if (typeof b?.ref === "string") services.compareLimiter.check(b.ref);
     try {
       if (services.browser === null) throw new ShuttleError("browser_not_started", "Run `secret-shuttle browser start` first.");
       const secret = await services.vault.getSecret(b.ref);
