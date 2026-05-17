@@ -46,17 +46,17 @@ Every production-classed action requires a one-shot grant.
 - The daemon launches Chrome with `--remote-debugging-pipe`. The raw CDP port is never exposed.
 - Agents receive a token-gated WebSocket CDP proxy URL.
 - Blind mode is daemon state. While active, the proxy blocks at minimum:
-- `secrets.inject` is itself a daemon-managed blind window: the daemon enters blind
-  mode, disables observation domains, and severs agent CDP sockets *before* the
-  value reaches the page, then leaves blind mode active until a human-approved
-  `blind end`. Inject never requires the agent to manage blind mode, and refuses
-  (`blind_mode_already_active`) if a blind window is already open.
   - `Page.captureScreenshot`, `Page.captureSnapshot`, `Page.printToPDF`
   - `DOM.getDocument`, `DOM.getOuterHTML`, `DOM.getNodeForLocation`, `DOM.performSearch`, `DOM.querySelector*`, `DOM.describeNode`, `DOMSnapshot.*`
   - `Accessibility.*`
   - `Runtime.evaluate`, `Runtime.callFunctionOn`, `Runtime.getProperties`, `Runtime.queryObjects`
   - `Console.*`, `Log.*`
   - `Network.getResponseBody`, `Network.getRequestPostData`, `Network.takeResponseBodyForInterceptionAsStream`, `Fetch.getResponseBody`
+- `secrets.inject` is itself a daemon-managed blind window: the daemon enters blind
+  mode, disables observation domains, and severs agent CDP sockets *before* the
+  value reaches the page, then leaves blind mode active until a human-approved
+  `blind end`. Inject never requires the agent to manage blind mode, and refuses
+  (`blind_mode_already_active`) if a blind window is already open.
 - Daemon-internal capture/injection runs narrow scripts directly against Chrome — those calls never traverse the agent proxy.
 
 ## Templates
