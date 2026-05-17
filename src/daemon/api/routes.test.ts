@@ -180,10 +180,40 @@ test("generate of production secret without approval returns approval_required",
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
     const r = await call(ctx, "POST", "/v1/secrets/generate", {
-      name: "PROD_GEN", environment: "production", wait_for_approval: false,
+      name: "PROD_GEN", environment: "production", allowed_domains: ["example.com"], wait_for_approval: false,
     });
     assert.equal(r.status, 400);
     assert.equal((r.body as { error: { code: string } }).error.code, "approval_required");
+  });
+});
+
+test("direct-API production generate with empty allowed_domains is rejected before any approval is created", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "DIRECT_PROD_GEN", environment: "production", allowed_domains: [], wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "missing_allow_domain");
+    // A non-CLI client must not be able to mint an inert production secret, and
+    // no human must be prompted for a structurally invalid request.
+    const grants = (ctx.services.approvals as unknown as { grants: Map<string, unknown> }).grants;
+    assert.equal(grants.size, 0, "no approval grant should be created for an invalid production request");
+  });
+});
+
+test("direct-API production capture with empty allowed_domains is rejected before any approval is created", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    ctx.services.browser = stubBrowser({ domain: "dashboard.stripe.com", target: "T1", value: "whsec_simulated" });
+    const r = await call(ctx, "POST", "/v1/secrets/capture", {
+      name: "DIRECT_PROD_CAP", environment: "production", source: "stripe",
+      allowed_domains: [], wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "missing_allow_domain");
+    const grants = (ctx.services.approvals as unknown as { grants: Map<string, unknown> }).grants;
+    assert.equal(grants.size, 0, "no approval grant should be created for an invalid production request");
   });
 });
 
@@ -399,7 +429,7 @@ test("approval_required payload does NOT include ui_token / approval_url", async
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
     const r = await call(ctx, "POST", "/v1/secrets/generate", {
-      name: "PROD_GEN", environment: "production", wait_for_approval: false,
+      name: "PROD_GEN", environment: "production", allowed_domains: ["example.com"], wait_for_approval: false,
     });
     assert.equal(r.status, 400);
     const err = r.body as { error: { code: string; message: string } };
@@ -420,7 +450,7 @@ test("CLI-visible payload cannot self-approve: no way to derive ui_token from re
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
     const r = await call(ctx, "POST", "/v1/secrets/generate", {
-      name: "PROD_GEN2", environment: "production", wait_for_approval: false,
+      name: "PROD_GEN2", environment: "production", allowed_domains: ["example.com"], wait_for_approval: false,
     });
     const inner = JSON.parse((r.body as { error: { message: string } }).error.message) as { approval_id: string };
     // An attacker who only sees the API response cannot guess the ui_token (UUID-random).
@@ -545,11 +575,12 @@ test("production template: route-created grant is consumable on retry (no self-m
       action: "generate", ref: null, planned_ref: "ss://local/prod/TPL2",
       environment: "production", destination_domain: null, target_id: null,
       field_fingerprint: null, template_id: null, template_params: null,
+      allowed_domains: ["example.com"],
     });
     ctx.services.approvals.approve(g.id);
     await call(ctx, "POST", "/v1/secrets/generate", {
       name: "TPL2", environment: "production", source: "local",
-      approval_id: g.id, wait_for_approval: false,
+      allowed_domains: ["example.com"], approval_id: g.id, wait_for_approval: false,
     });
 
     // First call: no approval_id, no wait → route creates a grant + throws approval_required.

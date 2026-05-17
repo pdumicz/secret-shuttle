@@ -91,13 +91,14 @@ test("approval lifecycle (created, granted, used) is audited; raw values never a
       environment: "production", destination_domain: null,
       target_id: null, field_fingerprint: null,
       template_id: null, template_params: null,
+      allowed_domains: ["example.com"],
     });
     ctx.services.approvals.approve(grant.id);
 
     // Use it.
     await call(ctx, "POST", "/v1/secrets/generate", {
       name: "X", environment: "production", source: "local",
-      approval_id: grant.id, wait_for_approval: false,
+      allowed_domains: ["example.com"], approval_id: grant.id, wait_for_approval: false,
     });
 
     const events = await readAudit(ctx.home);
@@ -211,12 +212,14 @@ test("approval_mismatch is audited on bound-binding failure", async () => {
       environment: "production", destination_domain: null,
       target_id: null, field_fingerprint: null,
       template_id: null, template_params: null,
+      allowed_domains: ["example.com"],
     });
     ctx.services.approvals.approve(grant.id);
-    // Use the wrong name → mismatched planned_ref.
+    // Use the wrong name → mismatched planned_ref (allowed_domains match so the
+    // ONLY binding difference is the name).
     await call(ctx, "POST", "/v1/secrets/generate", {
       name: "Z", environment: "production", source: "local",
-      approval_id: grant.id, wait_for_approval: false,
+      allowed_domains: ["example.com"], approval_id: grant.id, wait_for_approval: false,
     });
     const events = await readAudit(ctx.home);
     const actions = events.map((e) => e["action"]);

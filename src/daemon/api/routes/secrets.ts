@@ -77,6 +77,10 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       const plannedRef = buildSecretRef(b.source ?? "local", env, b.name);
       const effectiveAllowed = (b.allowed_domains ?? []).map(normalizeDomain);
 
+      if (canonicalEnvironment(env) === "production" && effectiveAllowed.length === 0) {
+        throw new ShuttleError("missing_allow_domain", "Production secrets require at least one allowed domain.");
+      }
+
       const binding: ApprovalBinding = {
         action: "generate",
         ref: null,
@@ -137,6 +141,10 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       const plannedRef = buildSecretRef(b.source, env, b.name);
       const pre = await services.browser.readFocusedFingerprintAndDomain();
       const effectiveAllowed = (b.allowed_domains ?? [pre.domain]).map(normalizeDomain);
+
+      if (canonicalEnvironment(env) === "production" && effectiveAllowed.length === 0) {
+        throw new ShuttleError("missing_allow_domain", "Production secrets require at least one allowed domain.");
+      }
 
       services.blind.assertForDomain(pre.domain);
       enforceDomain(pre.domain, effectiveAllowed, "capture");
