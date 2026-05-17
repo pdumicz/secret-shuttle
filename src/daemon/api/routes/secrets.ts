@@ -42,6 +42,8 @@ interface CompareBody {
   ref: string;
   with?: "focused-field" | "selection";
   domain?: string;
+  approval_id?: string;
+  wait_for_approval?: boolean;
 }
 
 export function registerSecrets(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
@@ -267,7 +269,28 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         throw new ShuttleError("domain_mismatch", `Current domain ${capture.domain} != ${b.domain}.`);
       }
       enforceDomain(capture.domain, secret.allowed_domains, "compare");
-      const matches = fingerprintMatches(capture.value, secret.fingerprint, await services.vault.fingerprintKey());
+
+      const binding: ApprovalBinding = {
+        action: "compare",
+        ref: secret.ref,
+        environment: secret.environment,
+        destination_domain: capture.domain,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: null,
+        template_params: null,
+        allowed_domains: secret.allowed_domains,
+      };
+      await requireApproval({
+        store: services.approvals,
+        binding,
+        daemonPort: daemonPortRef(),
+        ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
+        ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
+      });
+
+      const fpKey = await services.vault.fingerprintKey();
+      const matches = fingerprintMatches(capture.value, secret.fingerprint, fpKey);
       await writeDaemonAudit({ action: "compare", ok: true, ref: secret.ref, environment: secret.environment, domain: capture.domain });
       return {
         matches,

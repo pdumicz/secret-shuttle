@@ -590,3 +590,27 @@ test("inject is refused when the secret has an empty allowed-domains list", asyn
     assert.equal((r.body as { error: { code: string } }).error.code, "domain_not_allowed");
   });
 });
+
+test("compare on a production secret requires approval", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/blind/start", { domain: "stripe.com", reason: "r" });
+    ctx.services.browser = stubBrowser({ domain: "stripe.com", target: "T1", value: "alpha" });
+    const cap = ctx.services.approvals.create({
+      action: "capture", ref: null, planned_ref: "ss://stripe/prod/PK",
+      environment: "production", destination_domain: "stripe.com",
+      target_id: "T1", field_fingerprint: "sha256:T1-stripe.com",
+      template_id: null, template_params: null, allowed_domains: ["stripe.com"],
+    });
+    ctx.services.approvals.approve(cap.id);
+    await call(ctx, "POST", "/v1/secrets/capture", {
+      name: "PK", environment: "production", source: "stripe",
+      allowed_domains: ["stripe.com"], approval_id: cap.id, wait_for_approval: false,
+    });
+    const r = await call(ctx, "POST", "/v1/secrets/compare", {
+      ref: "ss://stripe/prod/PK", wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "approval_required");
+  });
+});
