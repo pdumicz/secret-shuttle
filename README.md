@@ -4,7 +4,7 @@ Let AI agents use secrets without seeing them.
 
 > **Status: 0.1.1 — early prototype. Do not trust this with real production secrets yet.**
 >
-> Secret Shuttle is moving from cooperative blind mode (V0) to enforced Secure Mode V2 (daemon-owned vault, CDP proxy, approval UI). The Secure Mode code lives on this branch but has not yet been released. Until the released build catches up, use Secret Shuttle only with test accounts and throwaway secrets.
+> Secure Mode V2 (daemon-owned vault, CDP proxy, approval UI) has landed on `main`. It has been through several rounds of adversarial security review with fixes, but it has **not** been independently audited or released as a versioned package. Treat it as an early prototype: use only with test accounts and throwaway secrets.
 
 Secret Shuttle is a local bridge that lets coding agents — Claude Code, Codex, Cursor, browser-using agents — capture, generate, store, compare, and inject secrets through browser and CLI workflows. The agent sees only refs like `ss://stripe/prod/STRIPE_WEBHOOK_SECRET`, fingerprints, field metadata, and status — never the raw value.
 
