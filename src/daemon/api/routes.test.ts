@@ -689,8 +689,6 @@ test("inject keeps blind mode ACTIVE if bookkeeping fails AFTER the value is wri
     });
     ctx.services.browser = stubBrowser({ domain: "app.example.com", target: "T1", value: "" });
     // injectFocused SUCCEEDS (value written), but post-write markUsed throws.
-    const realMarkUsed = ctx.services.vault.markUsed.bind(ctx.services.vault);
-    void realMarkUsed;
     ctx.services.vault.markUsed = async () => { throw new Error("disk_failure_after_write"); };
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
       ref: "ss://local/dev/INJ3", domain: "app.example.com", wait_for_approval: false,
@@ -699,5 +697,26 @@ test("inject keeps blind mode ACTIVE if bookkeeping fails AFTER the value is wri
     // CRITICAL: the secret is on the page; blind mode MUST stay active (fail closed).
     const status = await call(ctx, "GET", "/v1/status");
     assert.notEqual((status.body as { blind_mode: unknown }).blind_mode, null);
+  });
+});
+
+test("inject is refused (fail fast) when a blind window is already active", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "INJ4", environment: "development", source: "local",
+      allowed_domains: ["app.example.com"],
+    });
+    ctx.services.browser = stubBrowser({ domain: "app.example.com", target: "T1", value: "" });
+    // A blind window is already active (e.g. a capture in progress).
+    await call(ctx, "POST", "/v1/blind/start", { domain: "app.example.com", reason: "capture-in-progress" });
+    const r = await call(ctx, "POST", "/v1/secrets/inject", {
+      ref: "ss://local/dev/INJ4", domain: "app.example.com", wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "blind_mode_already_active");
+    // The pre-existing blind window must be untouched.
+    const status = await call(ctx, "GET", "/v1/status");
+    assert.equal((status.body as { blind_mode: { domain: string } }).blind_mode.domain, "app.example.com");
   });
 });

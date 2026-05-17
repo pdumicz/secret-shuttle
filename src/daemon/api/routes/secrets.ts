@@ -11,6 +11,7 @@ import { writeDaemonAudit } from "../../audit.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { asObject, reqString } from "../validate.js";
 import { disableObservationDomains } from "../../chrome/internal-ops.js";
+import type { InjectResult } from "../../chrome/internal-ops.js";
 
 interface ListBody { environment?: string; source?: string; }
 interface GenerateBody {
@@ -217,6 +218,13 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       }
       enforceDomain(pre.domain, secret.allowed_domains, "inject");
 
+      if (services.blind.current() !== null) {
+        throw new ShuttleError(
+          "blind_mode_already_active",
+          "Blind mode is already active; run `secret-shuttle blind end` before injecting.",
+        );
+      }
+
       const binding: ApprovalBinding = {
         action: "inject",
         ref: secret.ref,
@@ -244,7 +252,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       }
       services.cdpProxy?.severAgentConnections();
 
-      let result: import("../../chrome/internal-ops.js").InjectResult;
+      let result: InjectResult;
       try {
         const post = await services.browser.readFocusedFingerprintAndDomain();
         if (post.target_id !== pre.target_id || post.field_fingerprint !== pre.field_fingerprint || post.domain !== pre.domain) {
