@@ -575,3 +575,19 @@ test("production template: route-created grant is consumable on retry (no self-m
     assert.notEqual(code2, "approval_mismatch");
   });
 });
+
+test("inject is refused when the secret has an empty allowed-domains list", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Dev secret generated with NO allowed domains → stored [] → not injectable.
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "NOSCOPE", environment: "development", source: "local",
+    });
+    ctx.services.browser = stubBrowser({ domain: "anything.example.com", target: "T1", value: "" });
+    const r = await call(ctx, "POST", "/v1/secrets/inject", {
+      ref: "ss://local/dev/NOSCOPE", wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "domain_not_allowed");
+  });
+});

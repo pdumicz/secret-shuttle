@@ -284,7 +284,12 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
 }
 
 function enforceDomain(current: string, allowed: string[], action: string): void {
-  if (allowed.length === 0) return;
+  if (allowed.length === 0) {
+    throw new ShuttleError(
+      "domain_not_allowed",
+      `Refused to ${action} on ${normalizeDomain(current)}: this secret has no allowed domains. Re-create it with --allow-domain.`,
+    );
+  }
   if (!allowed.some((a) => domainMatches(current, a))) {
     throw new ShuttleError(
       "domain_not_allowed",
