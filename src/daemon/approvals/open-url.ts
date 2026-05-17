@@ -1,6 +1,13 @@
-import { spawn } from "node:child_process";
+import { spawn, type SpawnOptions } from "node:child_process";
+import { buildChildEnv } from "../safe-env.js";
 
-export function openUrl(url: string): void {
+interface SpawnedChild {
+  on(event: "error", listener: (err: Error) => void): unknown;
+  unref(): void;
+}
+type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => SpawnedChild;
+
+export function openUrl(url: string, opts?: { spawnImpl?: SpawnFn }): void {
   if (process.env.SECRET_SHUTTLE_NO_OPEN_URL === "1") {
     return;
   }
@@ -17,7 +24,9 @@ export function openUrl(url: string): void {
     cmd = "xdg-open";
     args = [url];
   }
-  const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+  const doSpawn: SpawnFn =
+    opts?.spawnImpl ?? ((command, cmdArgs, options) => spawn(command, cmdArgs, options));
+  const child = doSpawn(cmd, args, { stdio: "ignore", detached: true, env: buildChildEnv() });
   child.on("error", () => undefined);
   child.unref();
 }
