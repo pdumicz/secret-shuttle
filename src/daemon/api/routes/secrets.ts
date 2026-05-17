@@ -69,6 +69,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
     try {
       const env = canonicalEnvironment(b.environment);
       const plannedRef = buildSecretRef(b.source ?? "local", env, b.name);
+      const effectiveAllowed = b.allowed_domains ?? [];
 
       const binding: ApprovalBinding = {
         action: "generate",
@@ -80,6 +81,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         field_fingerprint: null,
         template_id: null,
         template_params: null,
+        allowed_domains: effectiveAllowed,
       };
       await requireApproval({
         store: services.approvals,
@@ -96,7 +98,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         source: b.source ?? "local",
         value,
         ...(b.description !== undefined ? { description: b.description } : {}),
-        allowedDomains: b.allowed_domains ?? [],
+        allowedDomains: effectiveAllowed,
         ...(b.force !== undefined ? { force: b.force } : {}),
       });
       await writeDaemonAudit({ action: "generate", ok: true, ref: meta.ref, environment: meta.environment });
@@ -128,9 +130,10 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       const env = canonicalEnvironment(b.environment);
       const plannedRef = buildSecretRef(b.source, env, b.name);
       const pre = await services.browser.readFocusedFingerprintAndDomain();
+      const effectiveAllowed = b.allowed_domains ?? [pre.domain];
 
       services.blind.assertForDomain(pre.domain);
-      enforceDomain(pre.domain, b.allowed_domains ?? [pre.domain], "capture");
+      enforceDomain(pre.domain, effectiveAllowed, "capture");
 
       const binding: ApprovalBinding = {
         action: "capture",
@@ -142,6 +145,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         field_fingerprint: pre.field_fingerprint,
         template_id: null,
         template_params: null,
+        allowed_domains: effectiveAllowed,
       };
       await requireApproval({
         store: services.approvals,
@@ -169,7 +173,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         source: b.source,
         value: capture.value,
         ...(b.description !== undefined ? { description: b.description } : {}),
-        allowedDomains: b.allowed_domains ?? [capture.domain],
+        allowedDomains: effectiveAllowed,
         ...(b.force !== undefined ? { force: b.force } : {}),
       });
       await writeDaemonAudit({ action: "capture", ok: true, ref: meta.ref, environment: meta.environment, domain: capture.domain });
@@ -214,6 +218,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         field_fingerprint: pre.field_fingerprint,
         template_id: null,
         template_params: null,
+        allowed_domains: secret.allowed_domains,
       };
       await requireApproval({
         store: services.approvals,

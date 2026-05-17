@@ -21,6 +21,7 @@ export interface ApprovalBinding {
   template_params: Record<string, string> | null;
   template_binary_path?: string | null;
   template_binary_sha256?: string | null;
+  allowed_domains?: string[] | null;
 }
 
 export type ApprovalStatus = "pending" | "granted" | "denied" | "expired" | "used";
@@ -123,7 +124,8 @@ function bindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
     a.template_id === b.template_id &&
     stableStringify(a.template_params) === stableStringify(b.template_params) &&
     (a.template_binary_path ?? null) === (b.template_binary_path ?? null) &&
-    (a.template_binary_sha256 ?? null) === (b.template_binary_sha256 ?? null)
+    (a.template_binary_sha256 ?? null) === (b.template_binary_sha256 ?? null) &&
+    domainSet(a.allowed_domains) === domainSet(b.allowed_domains)
   );
 }
 
@@ -132,4 +134,8 @@ function stableStringify(v: unknown): string {
   const obj = v as Record<string, unknown>;
   const keys = Object.keys(obj).sort();
   return JSON.stringify(Object.fromEntries(keys.map((k) => [k, obj[k]])));
+}
+
+function domainSet(v: string[] | null | undefined): string {
+  return JSON.stringify([...(v ?? [])].sort());
 }

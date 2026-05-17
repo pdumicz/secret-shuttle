@@ -90,3 +90,24 @@ test("template_params order-insensitive matching", () => {
   };
   assert.doesNotThrow(() => s.consume(g.id, swapped));
 });
+
+test("bindings mismatch when allowed_domains differ; order-insensitive when equal", () => {
+  const s = new ApprovalStore({ ttlMs: 60_000 });
+  const base = { ...sample, allowed_domains: ["vercel.com", "stripe.com"] };
+  const g = s.create(base);
+  s.approve(g.id);
+  assert.throws(
+    () => s.consume(g.id, { ...sample, allowed_domains: ["evil.com"] }),
+    (err) => err instanceof ShuttleError && err.code === "approval_mismatch",
+  );
+  const g2 = s.create({ ...sample, allowed_domains: ["a.com", "b.com"] });
+  s.approve(g2.id);
+  assert.doesNotThrow(() => s.consume(g2.id, { ...sample, allowed_domains: ["b.com", "a.com"] }));
+});
+
+test("absent, null, and empty allowed_domains are treated as the same (empty) set", () => {
+  const s = new ApprovalStore({ ttlMs: 60_000 });
+  const g = s.create({ ...sample, allowed_domains: null });
+  s.approve(g.id);
+  assert.doesNotThrow(() => s.consume(g.id, { ...sample })); // sample has no allowed_domains
+});
