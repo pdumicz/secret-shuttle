@@ -623,3 +623,59 @@ test("inject with a non-string ref returns bad_request", async () => {
     assert.equal((r.body as { error: { code: string } }).error.code, "bad_request");
   });
 });
+
+test("successful inject leaves daemon-managed blind mode ACTIVE and severs the proxy", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "INJ", environment: "development", source: "local",
+      allowed_domains: ["app.example.com"],
+    });
+    let severed = false;
+    ctx.services.cdpProxy = {
+      url: "ws://127.0.0.1:0/cdp/fake",
+      severAgentConnections: () => { severed = true; },
+      close: async () => undefined,
+    };
+    ctx.services.browser = stubBrowser({ domain: "app.example.com", target: "T1", value: "" });
+    const r = await call(ctx, "POST", "/v1/secrets/inject", {
+      ref: "ss://local/dev/INJ", domain: "app.example.com", wait_for_approval: false,
+    });
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { injected: boolean }).injected, true);
+    assert.equal((r.body as { blind_mode: boolean }).blind_mode, true);
+    assert.equal(severed, true, "inject must sever agent CDP connections");
+    const status = await call(ctx, "GET", "/v1/status");
+    assert.notEqual((status.body as { blind_mode: unknown }).blind_mode, null);
+  });
+});
+
+test("inject that fails before writing the value auto-resumes (blind mode left OFF)", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "INJ2", environment: "development", source: "local",
+      allowed_domains: ["app.example.com"],
+    });
+    const field = { tag: "input", editable: true };
+    let reads = 0;
+    ctx.services.browser = {
+      available: true,
+      captureFocused: async () => ({ value: "", domain: "app.example.com", target_id: "T1", field, field_fingerprint: "f" }),
+      captureSelection: async () => ({ value: "", domain: "app.example.com", target_id: "T1", field, field_fingerprint: "f" }),
+      injectFocused: async () => ({ domain: "app.example.com", target_id: "T1", field, field_fingerprint: "f" }),
+      readFocusedFingerprintAndDomain: async () => {
+        reads += 1;
+        return { domain: "app.example.com", target_id: reads === 1 ? "T1" : "T-DIFF", field, field_fingerprint: "f" };
+      },
+      currentDomainAndTarget: async () => ({ domain: "app.example.com", target_id: "T1" }),
+    };
+    const r = await call(ctx, "POST", "/v1/secrets/inject", {
+      ref: "ss://local/dev/INJ2", domain: "app.example.com", wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "field_changed");
+    const status = await call(ctx, "GET", "/v1/status");
+    assert.equal((status.body as { blind_mode: unknown }).blind_mode, null);
+  });
+});

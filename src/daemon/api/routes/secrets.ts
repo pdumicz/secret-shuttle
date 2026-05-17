@@ -10,6 +10,7 @@ import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { asObject, reqString } from "../validate.js";
+import { disableObservationDomains } from "../../chrome/internal-ops.js";
 
 interface ListBody { environment?: string; source?: string; }
 interface GenerateBody {
@@ -235,21 +236,38 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
 
-      const post = await services.browser.readFocusedFingerprintAndDomain();
-      if (post.target_id !== pre.target_id || post.field_fingerprint !== pre.field_fingerprint || post.domain !== pre.domain) {
-        throw new ShuttleError("field_changed", "Focused field changed after approval.");
+      // Daemon OWNS the blind window for inject: black out the agent BEFORE the
+      // value can ever reach the page. Mirrors /v1/blind/start.
+      services.blind.start(pre.domain, "inject");
+      if (services.cdp !== null) {
+        await disableObservationDomains(services.cdp).catch(() => undefined);
       }
+      services.cdpProxy?.severAgentConnections();
 
-      const result = await services.browser.injectFocused(secret.value);
-      await services.vault.markUsed(secret.ref);
-      await writeDaemonAudit({ action: "inject", ok: true, ref: secret.ref, environment: secret.environment, domain: result.domain });
-      return {
-        injected: true,
-        secret_ref: secret.ref,
-        browser_domain: result.domain,
-        field: result.field,
-        value_visible_to_agent: false,
-      };
+      try {
+        const post = await services.browser.readFocusedFingerprintAndDomain();
+        if (post.target_id !== pre.target_id || post.field_fingerprint !== pre.field_fingerprint || post.domain !== pre.domain) {
+          throw new ShuttleError("field_changed", "Focused field changed after approval.");
+        }
+        const result = await services.browser.injectFocused(secret.value);
+        await services.vault.markUsed(secret.ref);
+        await writeDaemonAudit({ action: "inject", ok: true, ref: secret.ref, environment: secret.environment, domain: result.domain });
+        return {
+          injected: true,
+          secret_ref: secret.ref,
+          browser_domain: result.domain,
+          field: result.field,
+          blind_mode: true,
+          next: "Secret written with the agent blacked out. Run `secret-shuttle blind end` and approve once the secret is no longer visible to resume observation.",
+          value_visible_to_agent: false,
+        };
+      } catch (innerErr) {
+        // Nothing was written to the page (failure happened before/at injectFocused
+        // resolved with no value on screen) → safe to auto-resume so the user is not
+        // stranded in blind mode for a no-op.
+        services.blind.end();
+        throw innerErr;
+      }
     } catch (err) {
       await writeDaemonAudit({
         action: "inject",
