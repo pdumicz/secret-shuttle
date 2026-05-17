@@ -1,3 +1,6 @@
+# Authoritative tarball-exclusion list. The package.json files[] negations are
+# belt-and-suspenders only (unreliable across npm versions); scripts/check-pack.mjs
+# independently validates the final tarball.
 docs/superpowers/
 **/*.map
 **/*.tsbuildinfo

@@ -2,13 +2,13 @@
 // Fails if the npm tarball would ship internal plans, source maps, or STALE
 // build artifacts (detected via forbidden source markers from removed code).
 import { execSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 const FORBIDDEN_PATHS = [/^docs\/superpowers\//, /\.map$/, /\.tsbuildinfo$/, /\.test\.(js|d\.ts)$/];
 const FORBIDDEN_MARKERS = ["--confirm-production", "remote-debugging-port"];
 
-const raw = execSync("npm pack --dry-run --json", { encoding: "utf8" });
+const raw = execSync("npm pack --dry-run --json --ignore-scripts", { encoding: "utf8" });
 const files = JSON.parse(raw)[0].files.map((f) => f.path.replace(/^package\//, ""));
 
 const badPaths = files.filter((f) => FORBIDDEN_PATHS.some((re) => re.test(f)));
@@ -31,6 +31,10 @@ function walk(dir) {
       }
     }
   }
+}
+if (!existsSync("dist")) {
+  console.error("check-pack: dist/ not found — run npm run build first");
+  process.exit(1);
 }
 walk("dist");
 console.log(`check-pack: OK (${files.length} files, no forbidden paths/markers)`);
