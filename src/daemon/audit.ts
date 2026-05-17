@@ -15,6 +15,7 @@ export interface DaemonAuditEvent {
   ref?: string;
   planned_ref?: string;
   environment?: string;
+  destination_environment?: string;
   domain?: string;
   template_id?: string;
   approval_id?: string;

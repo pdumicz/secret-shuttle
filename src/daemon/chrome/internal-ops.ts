@@ -1,6 +1,7 @@
 // src/daemon/chrome/internal-ops.ts
 import { createHash } from "node:crypto";
 import type { CdpClient } from "./cdp-client.js";
+import { ShuttleError } from "../../shared/errors.js";
 
 const OBSERVATION_DISABLE_METHODS = [
   "Runtime.disable",
@@ -37,13 +38,45 @@ export async function disableObservationDomains(cdp: CdpClient): Promise<void> {
 
 export async function blankAllPages(cdp: CdpClient): Promise<void> {
   const r = await cdp.send<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets");
-  for (const t of r.targetInfos.filter((t) => t.type === "page")) {
-    const { sessionId } = await cdp.send<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true });
+  const pages = r.targetInfos.filter((t) => t.type === "page");
+  const failed: string[] = [];
+  for (const t of pages) {
     try {
-      await cdp.send("Page.navigate", { url: "about:blank" }, sessionId).catch(() => undefined);
-    } finally {
-      await cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+      const { sessionId } = await cdp.send<{ sessionId: string }>(
+        "Target.attachToTarget",
+        { targetId: t.targetId, flatten: true },
+      );
+      try {
+        const nav = await cdp.send<{ errorText?: string }>(
+          "Page.navigate",
+          { url: "about:blank" },
+          sessionId,
+        );
+        if (nav.errorText !== undefined && nav.errorText !== "") {
+          failed.push(t.targetId);
+          continue;
+        }
+        const ev = await cdp.send<{ result: { value?: unknown } }>(
+          "Runtime.evaluate",
+          { expression: "location.href", returnByValue: true },
+          sessionId,
+        );
+        const href = typeof ev.result.value === "string" ? ev.result.value : "";
+        if (!href.startsWith("about:blank")) {
+          failed.push(t.targetId);
+        }
+      } finally {
+        await cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+      }
+    } catch {
+      failed.push(t.targetId);
     }
+  }
+  if (failed.length > 0) {
+    throw new ShuttleError(
+      "blank_failed",
+      `Could not blank ${failed.length} browser page(s); blind mode kept active.`,
+    );
   }
 }
 

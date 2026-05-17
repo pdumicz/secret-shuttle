@@ -79,8 +79,10 @@ export function registerBlind(server: DaemonServer, services: DaemonServices, da
 
       // Approval granted: navigate every visible page to about:blank so any
       // secret on screen is removed BEFORE observation can resume.
+      // Fail closed: if blanking fails, the ShuttleError propagates and
+      // services.blind.end() is never reached — blind mode stays active.
       if (services.cdp !== null) {
-        await blankAllPages(services.cdp).catch(() => undefined);
+        await blankAllPages(services.cdp);
       }
 
       const result = services.blind.end();

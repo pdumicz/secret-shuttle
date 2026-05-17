@@ -33,6 +33,9 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
   server.addRoute("POST", "/v1/templates/run", async (_req, raw) => {
     services.lock.requireKey();
     const b = raw as RunBody;
+    // Hoisted so the catch block can include them in the failure audit record.
+    let effectiveEnv: string | undefined;
+    let destEnv: string | undefined;
     try {
       const tpl = registry.get(b.template_id);
       const secret = await services.vault.getSecret(b.ref);
@@ -46,8 +49,8 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
       // but the template destination is production (e.g. vercel-env-add with
       // environment=production).  The approval_required error must surface before
       // an unsafe_binary_path error when both conditions hold.
-      const destEnv = tpl.destinationEnvironment?.(b.params ?? {});
-      const effectiveEnv =
+      destEnv = tpl.destinationEnvironment?.(b.params ?? {});
+      effectiveEnv =
         secret.environment === "production" || destEnv === "production"
           ? "production"
           : secret.environment;
@@ -109,7 +112,8 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         action: "template_run",
         ok: result.exit_code === 0,
         ref: secret.ref,
-        environment: secret.environment,
+        environment: effectiveEnv,
+        ...(destEnv !== undefined ? { destination_environment: destEnv } : {}),
         template_id: tpl.id,
       });
       return {
@@ -127,6 +131,8 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         ok: false,
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
         ...(b.ref !== undefined ? { ref: b.ref } : {}),
+        ...(effectiveEnv !== undefined ? { environment: effectiveEnv } : {}),
+        ...(destEnv !== undefined ? { destination_environment: destEnv } : {}),
         ...(b.template_id !== undefined ? { template_id: b.template_id } : {}),
       });
       throw err;
