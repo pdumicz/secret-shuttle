@@ -38,6 +38,7 @@ export class Vault {
     await this.write({
       version: 1,
       secrets: [],
+      fingerprint_key: randomBytes(32).toString("base64"),
     });
 
     await writeJsonFileAtomic(paths.configPath, {
