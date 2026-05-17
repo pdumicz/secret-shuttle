@@ -614,3 +614,12 @@ test("compare on a production secret requires approval", async () => {
     assert.equal((r.body as { error: { code: string } }).error.code, "approval_required");
   });
 });
+
+test("inject with a non-string ref returns bad_request", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await call(ctx, "POST", "/v1/secrets/inject", { ref: 123 });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "bad_request");
+  });
+});

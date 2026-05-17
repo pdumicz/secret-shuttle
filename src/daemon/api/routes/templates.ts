@@ -9,6 +9,7 @@ import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { ShuttleError } from "../../../shared/errors.js";
+import { assertSecretActionAllowed } from "../../../policy/policy.js";
 
 const registry = new TemplateRegistry();
 
@@ -39,6 +40,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
     try {
       const tpl = registry.get(b.template_id);
       const secret = await services.vault.getSecret(b.ref);
+      assertSecretActionAllowed(secret, "use_as_stdin");
 
       // Validate template params before creating the approval grant so a human
       // is never prompted for a structurally invalid request.

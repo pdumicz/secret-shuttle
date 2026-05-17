@@ -8,6 +8,8 @@ import { domainMatches, normalizeDomain } from "../../../policy/domain-policy.js
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
+import { assertSecretActionAllowed } from "../../../policy/policy.js";
+import { asObject, reqString } from "../validate.js";
 
 interface ListBody { environment?: string; source?: string; }
 interface GenerateBody {
@@ -200,11 +202,14 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
 
   server.addRoute("POST", "/v1/secrets/inject", async (_req, raw) => {
     services.lock.requireKey();
+    const o = asObject(raw);
     const b = raw as InjectBody;
+    reqString(o, "ref");
     try {
       if (services.browser === null) throw new ShuttleError("browser_not_started", "Run `secret-shuttle browser start` first.");
 
       const secret = await services.vault.getSecret(b.ref);
+      assertSecretActionAllowed(secret, "inject_into_field");
       const pre = await services.browser.readFocusedFingerprintAndDomain();
       if (b.domain !== undefined && !domainMatches(pre.domain, b.domain)) {
         throw new ShuttleError("domain_mismatch", `Current domain ${pre.domain} != ${b.domain}.`);
@@ -263,6 +268,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
     try {
       if (services.browser === null) throw new ShuttleError("browser_not_started", "Run `secret-shuttle browser start` first.");
       const secret = await services.vault.getSecret(b.ref);
+      assertSecretActionAllowed(secret, "compare_fingerprint");
       const capture = b.with === "selection"
         ? await services.browser.captureSelection()
         : await services.browser.captureFocused();
