@@ -76,6 +76,7 @@ test("Stripe→Vercel end-to-end through daemon API with no raw secret in any re
       environment: "production", destination_domain: "dashboard.stripe.com",
       target_id: "T-stripe", field_fingerprint: "sha256:T-stripe-dashboard.stripe.com",
       template_id: null, template_params: null,
+      allowed_domains: ["dashboard.stripe.com", "vercel.com"],
     });
     services.approvals.approve(captureGrant.id);
     const captureOk = await call("POST", "/v1/secrets/capture", {
@@ -104,6 +105,7 @@ test("Stripe→Vercel end-to-end through daemon API with no raw secret in any re
       environment: "production", destination_domain: "vercel.com",
       target_id: "T-vercel", field_fingerprint: "sha256:T-vercel-vercel.com",
       template_id: null, template_params: null,
+      allowed_domains: ["dashboard.stripe.com", "vercel.com"],
     });
     services.approvals.approve(injectGrant.id);
     const injectOk = await call("POST", "/v1/secrets/inject", {
@@ -115,6 +117,25 @@ test("Stripe→Vercel end-to-end through daemon API with no raw secret in any re
     assert.equal(injectOk.status, 200);
     assert.equal((injectOk.body as { injected: boolean }).injected, true);
     assert.equal((injectOk.body as { browser_domain: string }).browser_domain, "vercel.com");
+
+    // Daemon-managed blind window: a successful inject leaves blind mode ACTIVE.
+    const blindAfterInject = await call("GET", "/v1/status");
+    responses.push(blindAfterInject);
+    assert.notEqual((blindAfterInject.body as { blind_mode: unknown }).blind_mode, null);
+
+    // Resume observation via a human-approved blind end (bound to the inject domain).
+    const injectBlindEndGrant = services.approvals.create({
+      action: "blind_end", ref: null, environment: "blind",
+      destination_domain: "vercel.com", target_id: null,
+      field_fingerprint: null, template_id: null, template_params: null,
+    });
+    services.approvals.approve(injectBlindEndGrant.id);
+    const resumed = await call("POST", "/v1/blind/end", { approval_id: injectBlindEndGrant.id, wait_for_approval: false });
+    responses.push(resumed);
+    assert.equal(resumed.status, 200);
+    const blindCleared = await call("GET", "/v1/status");
+    responses.push(blindCleared);
+    assert.equal((blindCleared.body as { blind_mode: unknown }).blind_mode, null);
 
     // 4. The agent should be able to inspect metadata (no value).
     const inspect = await call("POST", "/v1/secrets/inspect", { ref: "ss://stripe/prod/STRIPE_WEBHOOK_SECRET" });
