@@ -198,6 +198,7 @@ test("capture round-trips with pre-issued approval and stubbed browser", async (
       environment: "production", destination_domain: "dashboard.stripe.com",
       target_id: "T1", field_fingerprint: "sha256:T1-dashboard.stripe.com",
       template_id: null, template_params: null,
+      allowed_domains: ["dashboard.stripe.com", "vercel.com"],
     });
     ctx.services.approvals.approve(grant.id);
 
@@ -358,6 +359,7 @@ test("capture rejects when the focused field changes between approval and captur
       environment: "production", destination_domain: "dashboard.stripe.com",
       target_id: "T1", field_fingerprint: "sha256:FIELD_A",
       template_id: null, template_params: null,
+      allowed_domains: ["dashboard.stripe.com"],
     });
     ctx.services.approvals.approve(grant.id);
 
