@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { buildChildEnv } from "../safe-env.js";
 import { ShuttleError } from "../../shared/errors.js";
 import { assertSafeExecutable } from "../safe-executable.js";
 import type { TemplateDefinition } from "./registry.js";
@@ -44,6 +45,7 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
     const child = spawn(resolvedBinary, expandedArgs, {
       shell: false,
       stdio: ["pipe", "ignore", "ignore"],
+      env: buildChildEnv(),
     });
     child.on("error", (err) => reject(new ShuttleError("template_spawn_failed", err.message)));
     child.on("close", (code) => resolve({ template_id: input.template.id, exit_code: code ?? 1 }));

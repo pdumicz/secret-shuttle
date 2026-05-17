@@ -7,7 +7,7 @@ import { registerRoutes } from "./api/router.js";
 import { writeSocketFile, removeSocketFile } from "./socket-file.js";
 import { hasLegacyKeyFile } from "../vault/keychain.js";
 import { writeDaemonAudit } from "./audit.js";
-import { safeDaemonPath } from "./safe-env.js";
+import { safeDaemonPath, scrubDaemonSecretsFromEnv } from "./safe-env.js";
 
 async function main(): Promise<void> {
   if (process.getuid !== undefined && process.getuid() === 0) {
@@ -30,6 +30,8 @@ async function main(): Promise<void> {
   }
 
   const token = process.env.SECRET_SHUTTLE_DAEMON_TOKEN ?? randomBytes(32).toString("base64url");
+  // The token must never reach daemon-spawned children (templates, Chrome).
+  scrubDaemonSecretsFromEnv();
   const services = new DaemonServices();
   const server = new DaemonServer({ token });
   let actualPort = 0;

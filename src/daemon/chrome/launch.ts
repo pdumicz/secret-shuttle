@@ -6,6 +6,7 @@ import { assertSafeExecutable } from "../safe-executable.js";
 import { readDaemonConfig } from "../config.js";
 import { fileExists } from "../../shared/config.js";
 import { spawnChromePipe, type PipeTransport } from "./pipe-transport.js";
+import { buildChildEnv } from "../safe-env.js";
 import { CdpClient } from "./cdp-client.js";
 
 export interface ChromeSession {
@@ -62,7 +63,7 @@ export async function launchChrome(opts: { profile: string }): Promise<ChromeSes
     "--no-first-run",
     "--no-default-browser-check",
     "about:blank",
-  ]);
+  ], { env: buildChildEnv() });
   const cdp = new CdpClient(transport);
   try {
     await Promise.race([

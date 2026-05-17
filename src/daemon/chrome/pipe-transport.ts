@@ -44,12 +44,17 @@ export class PipeTransport extends EventEmitter {
   }
 }
 
-export function spawnChromePipe(chromePath: string, args: string[]): {
+export function spawnChromePipe(
+  chromePath: string,
+  args: string[],
+  opts: { env?: NodeJS.ProcessEnv } = {},
+): {
   child: ChildProcessWithoutNullStreams;
   transport: PipeTransport;
 } {
   const child = spawn(chromePath, [...args, "--remote-debugging-pipe"], {
     stdio: ["ignore", "ignore", "inherit", "pipe", "pipe"],
+    ...(opts.env !== undefined ? { env: opts.env } : {}),
   }) as ChildProcessWithoutNullStreams;
 
   const writeStream = (child.stdio as unknown[])[3] as Writable;
