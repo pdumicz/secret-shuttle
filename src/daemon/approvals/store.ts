@@ -22,6 +22,9 @@ export interface ApprovalBinding {
   template_binary_path?: string | null;
   template_binary_sha256?: string | null;
   allowed_domains?: string[] | null;
+  /** Display-only context for the human approver. NOT part of bindingsMatch. */
+  page_title?: string | null;
+  page_url_host?: string | null;
 }
 
 export type ApprovalStatus = "pending" | "granted" | "denied" | "expired" | "used";

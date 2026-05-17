@@ -152,6 +152,8 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         template_id: null,
         template_params: null,
         allowed_domains: effectiveAllowed,
+        ...(pre.page_title !== undefined ? { page_title: pre.page_title } : {}),
+        ...(pre.page_url_host !== undefined ? { page_url_host: pre.page_url_host } : {}),
       };
       await requireApproval({
         store: services.approvals,
@@ -235,6 +237,8 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         template_id: null,
         template_params: null,
         allowed_domains: secret.allowed_domains,
+        ...(pre.page_title !== undefined ? { page_title: pre.page_title } : {}),
+        ...(pre.page_url_host !== undefined ? { page_url_host: pre.page_url_host } : {}),
       };
       await requireApproval({
         store: services.approvals,

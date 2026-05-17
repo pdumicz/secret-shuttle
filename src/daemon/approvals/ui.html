@@ -27,20 +27,33 @@
       async function load() {
         const r = await fetch(`/ui/approvals/${id}?token=${token}`);
         const g = await r.json();
+        const human = {
+          inject: `Inject secret ${esc(g.ref ?? "")} into the focused field on ${esc(g.destination_domain ?? "?")}`,
+          capture: `Capture a new secret (${esc(g.planned_ref ?? "")}) from ${esc(g.destination_domain ?? "?")}`,
+          generate: `Generate and store a new secret ${esc(g.planned_ref ?? "")} (${esc(g.environment)})`,
+          compare: `Compare the focused field on ${esc(g.destination_domain ?? "?")} against ${esc(g.ref ?? "")}`,
+          template: `Run template ${esc(g.template_id ?? "")} with secret ${esc(g.ref ?? "")}`,
+          blind_end: `Resume browser observation for ${esc(g.destination_domain ?? "?")}`,
+        }[g.action] || `${esc(g.action)}`;
+        const scope = Array.isArray(g.allowed_domains) && g.allowed_domains.length
+          ? g.allowed_domains.map(esc).join(", ") : "(none yet — not injectable)";
         document.getElementById("grant").innerHTML = `
-          <div class="row"><span class="label">Action</span><b>${esc(g.action)}</b></div>
-          <div class="row"><span class="label">Secret</span><b>${esc(g.ref ?? g.planned_ref ?? "(new)")}</b></div>
+          <p style="font-size:1.1rem"><b>${human}</b></p>
           <div class="row"><span class="label">Environment</span><b>${esc(g.environment)}</b></div>
-          ${g.destination_domain ? `<div class="row"><span class="label">Destination</span><b>${esc(g.destination_domain)}</b></div>` : ""}
+          ${g.page_title ? `<div class="row"><span class="label">Page</span><b>${esc(g.page_title)}</b></div>` : ""}
+          ${g.page_url_host ? `<div class="row"><span class="label">URL host</span><code>${esc(g.page_url_host)}</code></div>` : ""}
+          <div class="row"><span class="label">Injectable into</span><b>${scope}</b></div>
           ${g.template_id ? `<div class="row"><span class="label">Template</span><b>${esc(g.template_id)}</b></div>` : ""}
-          ${g.template_binary_path ? `<div class="row"><span class="label">Binary path</span><code>${esc(g.template_binary_path)}</code></div>` : ""}
-          ${g.template_binary_sha256 ? `<div class="row"><span class="label">Binary sha256</span><code>${esc(g.template_binary_sha256)}</code></div>` : ""}
           ${g.template_params ? Object.keys(g.template_params).sort().map((k) =>
-            `<div class="row"><span class="label">param: ${esc(k)}</span><code>${esc(g.template_params[k])}</code></div>`
-          ).join("") : ""}
-          ${g.target_id ? `<div class="row"><span class="label">Browser target</span><code>${esc(g.target_id)}</code></div>` : ""}
-          ${g.field_fingerprint ? `<div class="row"><span class="label">Field fingerprint</span><code>${esc(g.field_fingerprint)}</code></div>` : ""}
-          ${g.action === "blind_end" ? `<div class="row" style="color:#c33"><b>Only approve if the secret is NO LONGER visible on screen. Approving resumes browser observation.</b></div>` : ""}
+            `<div class="row"><span class="label">param: ${esc(k)}</span><code>${esc(g.template_params[k])}</code></div>`).join("") : ""}
+          <details style="margin-top:.5rem">
+            <summary class="label">Technical details</summary>
+            ${g.template_binary_path ? `<div class="row"><span class="label">Binary</span><code>${esc(g.template_binary_path)}</code></div>` : ""}
+            ${g.template_binary_sha256 ? `<div class="row"><span class="label">Binary sha256</span><code>${esc(g.template_binary_sha256)}</code></div>` : ""}
+            ${g.target_id ? `<div class="row"><span class="label">Browser target</span><code>${esc(g.target_id)}</code></div>` : ""}
+            ${g.field_fingerprint ? `<div class="row"><span class="label">Field fingerprint</span><code>${esc(g.field_fingerprint)}</code></div>` : ""}
+          </details>
+          ${g.action === "blind_end" ? `<div class="row" style="color:#c33"><b>Approving navigates open pages to about:blank and resumes observation. Approve only if the secret has been saved/submitted and is no longer visible.</b></div>` : ""}
         `;
         document.getElementById("status").textContent = `Status: ${g.status}`;
       }

@@ -111,3 +111,12 @@ test("absent, null, and empty allowed_domains are treated as the same (empty) se
   s.approve(g.id);
   assert.doesNotThrow(() => s.consume(g.id, { ...sample })); // sample has no allowed_domains
 });
+
+test("display-only fields (page_title/page_url_host) do not affect binding match", () => {
+  const s = new ApprovalStore({ ttlMs: 60_000 });
+  const g = s.create({ ...sample, page_title: "Stripe", page_url_host: "dashboard.stripe.com" });
+  s.approve(g.id);
+  assert.doesNotThrow(() =>
+    s.consume(g.id, { ...sample, page_title: "DIFFERENT", page_url_host: "other" }),
+  );
+});

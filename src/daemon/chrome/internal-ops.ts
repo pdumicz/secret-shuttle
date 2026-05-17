@@ -94,6 +94,8 @@ export interface CaptureResult {
   target_id: string;
   field: FieldDescriptor;
   field_fingerprint: string;
+  page_title?: string;
+  page_url_host?: string;
 }
 
 export interface InjectResult {
@@ -123,9 +125,10 @@ const READ_SCRIPT = `
   const a = document.activeElement;
   const sel = window.getSelection()?.toString() ?? "";
   if (!(a instanceof Element)) return { ok:false, reason:"no_active_element" };
-  if (sel !== "") return { ok:true, value: sel, source:"selection", field: meta(a), domain: location.hostname };
-  if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) return { ok:true, value:a.value, source:"focused-field", field: meta(a), domain: location.hostname };
-  if (a instanceof HTMLElement && a.isContentEditable) return { ok:true, value: a.innerText, source:"focused-field", field: meta(a), domain: location.hostname };
+  const base = { field: meta(a), domain: location.hostname, title: document.title, urlHost: location.host };
+  if (sel !== "") return { ok:true, value: sel, source:"selection", ...base };
+  if (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) return { ok:true, value:a.value, source:"focused-field", ...base };
+  if (a instanceof HTMLElement && a.isContentEditable) return { ok:true, value: a.innerText, source:"focused-field", ...base };
   return { ok:false, reason:"not_editable" };
 })()
 `;
@@ -229,20 +232,35 @@ export class CdpBrowserOps implements BrowserOps {
 
   async readFocusedFingerprintAndDomain(): Promise<Omit<CaptureResult, "value">> {
     const page = await this.pickPage();
-    const r = await this.evaluate<{ ok: boolean; field?: FieldDescriptor; domain?: string }>(page.id, READ_SCRIPT);
+    const r = await this.evaluate<{ ok: boolean; field?: FieldDescriptor; domain?: string; title?: string; urlHost?: string }>(page.id, READ_SCRIPT);
     if (!r.ok || r.field === undefined || r.domain === undefined) throw new Error("focused_field_unavailable");
     const backendNodeId = await this.getFocusedBackendNodeId(page.id);
     const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, backendNodeId, r.field);
-    return { domain: r.domain.toLowerCase(), target_id: page.id, field: r.field, field_fingerprint: fp };
+    return {
+      domain: r.domain.toLowerCase(),
+      target_id: page.id,
+      field: r.field,
+      field_fingerprint: fp,
+      ...(r.title !== undefined ? { page_title: r.title } : {}),
+      ...(r.urlHost !== undefined ? { page_url_host: r.urlHost } : {}),
+    };
   }
 
   async captureFocused(): Promise<CaptureResult> {
     const page = await this.pickPage();
-    const r = await this.evaluate<{ ok: boolean; value?: string; field?: FieldDescriptor; domain?: string; reason?: string }>(page.id, READ_SCRIPT);
+    const r = await this.evaluate<{ ok: boolean; value?: string; field?: FieldDescriptor; domain?: string; reason?: string; title?: string; urlHost?: string }>(page.id, READ_SCRIPT);
     if (!r.ok || r.value === undefined || r.field === undefined || r.domain === undefined) throw new Error(r.reason ?? "focused_field_unavailable");
     const backendNodeId = await this.getFocusedBackendNodeId(page.id);
     const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, backendNodeId, r.field);
-    return { value: r.value, domain: r.domain.toLowerCase(), target_id: page.id, field: r.field, field_fingerprint: fp };
+    return {
+      value: r.value,
+      domain: r.domain.toLowerCase(),
+      target_id: page.id,
+      field: r.field,
+      field_fingerprint: fp,
+      ...(r.title !== undefined ? { page_title: r.title } : {}),
+      ...(r.urlHost !== undefined ? { page_url_host: r.urlHost } : {}),
+    };
   }
 
   async captureSelection(): Promise<CaptureResult> {
