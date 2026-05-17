@@ -35,7 +35,10 @@ There is no daemon endpoint that returns raw secret values.
 Every production-classed action requires a one-shot grant.
 - Daemon-memory only.
 - 2-minute TTL.
-- Bound to action, ref or planned ref, environment, destination domain, browser target id, focused-field fingerprint, template id, and template params.
+- Bound to action, ref or planned ref, environment, allowed domains, destination
+  domain, browser target id, focused-field fingerprint, template id, and template
+  params. (Page title/URL host are shown to the human for context but are not part
+  of the binding match.)
 - Mismatched, expired, reused, or forged grants are refused.
 
 ## Browser Control
@@ -43,6 +46,11 @@ Every production-classed action requires a one-shot grant.
 - The daemon launches Chrome with `--remote-debugging-pipe`. The raw CDP port is never exposed.
 - Agents receive a token-gated WebSocket CDP proxy URL.
 - Blind mode is daemon state. While active, the proxy blocks at minimum:
+- `secrets.inject` is itself a daemon-managed blind window: the daemon enters blind
+  mode, disables observation domains, and severs agent CDP sockets *before* the
+  value reaches the page, then leaves blind mode active until a human-approved
+  `blind end`. Inject never requires the agent to manage blind mode, and refuses
+  (`blind_mode_already_active`) if a blind window is already open.
   - `Page.captureScreenshot`, `Page.captureSnapshot`, `Page.printToPDF`
   - `DOM.getDocument`, `DOM.getOuterHTML`, `DOM.getNodeForLocation`, `DOM.performSearch`, `DOM.querySelector*`, `DOM.describeNode`, `DOMSnapshot.*`
   - `Accessibility.*`
@@ -63,7 +71,8 @@ Generic `use-as-stdin --command "..."` is removed. Templates are the only way to
 
 ## Domain Matching
 
-Exact by default. Wildcards require `*.example.com`. `vercel.com` does not match `evil-vercel.com` or `dashboard.stripe.com`.
+Exact by default. Wildcards require `*.example.com`. An empty allowed-domains list
+means the secret is injectable **nowhere** (fail closed), never everywhere.
 
 ## Local Storage
 
@@ -86,6 +95,13 @@ Secure Mode protects against:
 - Agents observing the browser during blind mode through the proxy.
 - Agents running arbitrary commands with a secret on stdin.
 - Agents bypassing approval with a CLI flag.
+- Agents screenshotting or DOM-reading the value of their own approved injection
+  (inject runs inside a daemon-managed blind window).
+- Agents brute-forcing low-entropy secrets from fingerprints (fingerprints are
+  vault-keyed HMAC, not raw SHA-256) or using `compare` as an unlimited oracle
+  (production `compare` is approval-gated and all `compare` is rate-limited).
+- Daemon-spawned binaries/Chrome reading the daemon bearer token (scrubbed from the
+  daemon process env and never placed in child envs).
 
 Secure Mode does NOT protect against:
 - A user with unrestricted same-user shell or process access. The agent must be sandboxed to the Secret Shuttle CLI and CDP proxy surfaces; if it can read process memory, drive arbitrary GUI windows, or open the approval UI on its own, the local guarantee no longer holds.

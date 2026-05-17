@@ -30,12 +30,17 @@ When a secret becomes visible:
 
 When a secret must be entered:
 
-1. Navigate normally.
-2. Fill non-secret metadata fields.
-3. Focus the secret value field.
-4. Run `secret-shuttle inject --ref ... --domain ...`.
-5. Approve in the daemon window.
-6. Save using non-secret UI signals.
+1. Navigate normally and fill non-secret metadata fields.
+2. Focus the secret value field.
+3. Run `secret-shuttle inject --ref ... --domain ...` and approve in the daemon
+   window. The daemon enters blind mode itself, severs your CDP connection, and
+   writes the value while you are blacked out — you never run `blind start` for
+   inject. (If a blind window is already active, inject refuses with
+   `blind_mode_already_active`; run `secret-shuttle blind end` first.)
+4. Your CDP proxy connection is now closed and blind mode is ACTIVE. Complete any
+   non-observational follow-up.
+5. Run `secret-shuttle blind end` and approve once the secret is saved/submitted
+   and no longer visible. This blanks open pages and resumes observation.
 
 ## Raw CDP URL
 

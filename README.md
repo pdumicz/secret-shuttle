@@ -72,6 +72,11 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 - Passphrase-derived envelope around the vault master key (scrypt + AES-256-GCM)
 - `ss://source/env/name` refs
 - Generate, capture (focused field / selection), inject, compare — all routed through the daemon
+- Inject runs inside a daemon-managed blind window (no manual `blind start`)
+- Vault-keyed HMAC fingerprints; production `compare` is approval-gated + rate-limited
+- Fail-closed domain policy (empty allow-list = injectable nowhere); approvals show the scope
+- `secret-shuttle doctor` health-check (daemon, vault, browser, policy, local files)
+- Daemon bearer token is scrubbed from the daemon and all child process envs
 - Approval UI with one-shot, context-bound grants for production actions
 - Daemon-owned Chrome over `--remote-debugging-pipe`
 - Filtered WebSocket CDP proxy that blocks screenshots, DOM, accessibility, runtime, console, log, and network-body reads during blind mode
@@ -85,6 +90,8 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 - Team vaults, cloud sync, MCP server, browser extension
 - Platform-specific helpers for Stripe, Supabase, Clerk, GitHub Actions, Cloudflare, Railway
 - Signed desktop binaries
+- Secret rotation / import / export workflows
+- Templates beyond `vercel-env-add`
 
 ## Docs
 

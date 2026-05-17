@@ -31,7 +31,11 @@ There is no daemon endpoint that returns raw secret values. `list` and `inspect`
 
 ### Agent takes a screenshot while a secret is visible
 
-Blind mode is daemon state. The agent reaches Chrome only through the filtered CDP proxy. While blind mode is active, `Page.captureScreenshot`, `Page.captureSnapshot`, and `Page.printToPDF` are rejected at the proxy.
+Blind mode is daemon state. For capture, the agent must `blind start` before the
+secret is revealed. For inject, the daemon itself enters blind mode and severs agent
+CDP sockets before the value reaches the page, so the agent cannot screenshot or
+DOM-read the value it caused to be entered. Resuming requires a human-approved
+`blind end` that blanks open pages.
 
 ### Agent inspects DOM, AX tree, console, runtime, or network bodies
 
@@ -60,6 +64,19 @@ There is no such flag in Secure Mode. `--confirm-production` is removed. Approva
 ### Agent receives the raw CDP URL
 
 It does not. `secret-shuttle browser start` returns the proxy URL only.
+
+### Agent brute-forces a secret from its fingerprint
+
+Fingerprints are HMAC-SHA256 under a per-vault random key held only in daemon
+memory (encrypted at rest). The agent cannot precompute a dictionary. `compare` is
+an online oracle only: production `compare` requires human approval and every
+`compare` is per-ref rate-limited.
+
+### Daemon-spawned process reads the bearer token
+
+The daemon deletes `SECRET_SHUTTLE_DAEMON_TOKEN` / `SECRET_SHUTTLE_MASTER_KEY` from
+its own environment after reading them, and spawns Chrome and command templates with
+an explicit minimal env that contains no `SECRET_SHUTTLE_*` variable.
 
 ## Non-Goals
 
