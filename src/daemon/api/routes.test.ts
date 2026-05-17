@@ -722,3 +722,17 @@ test("inject is refused (fail fast) when a blind window is already active", asyn
     assert.equal((status.body as { blind_mode: { domain: string } }).blind_mode.domain, "app.example.com");
   });
 });
+
+test("GET /v1/health reports a structured safety snapshot", async () => {
+  await withDaemon(async (ctx) => {
+    const r = await call(ctx, "GET", "/v1/health");
+    assert.equal(r.status, 200);
+    const h = r.body as Record<string, unknown>;
+    assert.equal(h.unlocked, false);
+    assert.equal(h.browser_started, false);
+    assert.equal(h.proxy_active, false);
+    assert.equal(h.blind_mode, null);
+    assert.equal(typeof h.vault, "object");
+    assert.equal(h.policy_warnings, null); // locked → cannot enumerate
+  });
+});

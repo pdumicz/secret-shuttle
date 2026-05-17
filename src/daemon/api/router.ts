@@ -10,6 +10,7 @@ import { registerApprovals } from "./routes/approvals.js";
 import { registerBrowser } from "./routes/browser.js";
 import { registerTemplates } from "./routes/templates.js";
 import { registerUnlockSession } from "./routes/unlock-session.js";
+import { registerHealth } from "./routes/health.js";
 
 export function registerRoutes(
   server: DaemonServer,
@@ -18,6 +19,7 @@ export function registerRoutes(
 ): void {
   registerUiRoutes(server, services.approvals);
   registerStatus(server, services);
+  registerHealth(server, services);
   registerUnlock(server, services);
   registerUnlockSession(server, services, daemonPortRef);
   registerBlind(server, services, daemonPortRef);

@@ -14,6 +14,7 @@ import { useAsStdinCommand } from "./commands/use-as-stdin.js";
 import { unlockCommand } from "./commands/unlock.js";
 import { templateCommand } from "./commands/template.js";
 import { migrateCommand } from "./commands/migrate.js";
+import { doctorCommand } from "./commands/doctor.js";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
 
 const program = new Command();
@@ -37,6 +38,7 @@ program.addCommand(unlockCommand());
 program.addCommand(templateCommand());
 program.addCommand(daemonCommand());
 program.addCommand(migrateCommand());
+program.addCommand(doctorCommand());
 
 if (process.argv.length <= 2) {
   program.help();
