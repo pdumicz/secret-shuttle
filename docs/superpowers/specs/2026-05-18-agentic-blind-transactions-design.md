@@ -131,9 +131,13 @@ secret-shuttle browser marks
 
 Two marking primitives, both observation-safe (used pre-blind, on non-secret
 controls), both producing the same opaque handle record with `element_kind` derived
-from the captured element (`input`/`textarea`/contenteditable → `field`;
-`button`/`[role=button]`/`input[type=submit|button]` → `button`; `a[href]` → `link`;
-else `other`):
+from the captured element. This mapping is the **single source of truth** and is
+exactly the actionable set `mark pick` normalizes to (§3.3):
+
+- `input`(non-button)/`textarea`/contenteditable → `field`
+- `button`/`input[type=submit|button]`/`[role=button]`/`summary` → `button`
+- `a[href]`/`[role=link]` → `link`
+- else → `other` (not usable for inject or click gating)
 
 - **`mark focused`** — reads `document.activeElement` (the same observation-safe path
   `readFocusedFingerprintAndDomain` already uses). Best for focusable fields.
@@ -155,12 +159,11 @@ else `other`):
     shadow DOM and iframes — it is a compositor-level pick). **Self-or-ancestor
     normalization:** the picked node is often an inner `span`, `svg`/path, or text
     node inside the real control. The daemon walks self→ancestors (bounded depth,
-    not crossing a document/shadow boundary) to the nearest **actionable** element —
-    `button`, `a[href]`, `input[type=submit|button]`, `[role=button]`,
-    `[role=link]`, `summary`, or a form field (`input`(non-button)/`textarea`/
-    contenteditable) — and the **handle is computed from that normalized element**
-    (its backend node, fingerprint, and `element_kind`). If no actionable ancestor
-    is found within the bound, fail closed (no handle). Then it immediately disables
+    not crossing a document/shadow boundary) to the nearest element matching the
+    `field`/`button`/`link` rows of the `element_kind` mapping above (the single
+    source of truth), and the **handle is computed from that normalized element**
+    (its backend node, fingerprint, and `element_kind`). If no such element is found
+    within the bound, fail closed (no handle). Then it immediately disables
     inspect mode (`Overlay.setInspectMode {mode:"none"}`, guaranteed in cleanup on
     pick, timeout, error, or detach).
   - **Fail closed:** if `Overlay`/`DOM` cannot be enabled, the overlay is
@@ -464,17 +467,24 @@ phase the daemon records a baseline over the approved field/container subtree:
 
 - For every candidate-eligible element it records a **hashed** value/state
   fingerprint (never raw) and a safety classification: *safe* = empty, absent, or a
-  `password`-type input with no script-readable value; *readable* = any non-empty
-  script-readable value/text.
-- **Fail closed before blind/reveal** if any in-scope candidate is already
-  *readable* pre-reveal — the value was observable without blind protection; the
-  workflow is unsafe and must be handled manually (no approval, no blind, no
-  capture).
-- After reveal, the chosen candidate must be **newly present or changed from a
-  *safe* baseline** (its value/state fingerprint differs and transitioned
-  safe→non-empty). If nothing transitioned, resolution **fails closed** (we would be
-  capturing stale or label text). The baseline comparison uses the hashed
-  fingerprints only; the post-reveal raw value is read exactly once and stored.
+  `password`-type input with no script-readable value (recognized masked/placeholder
+  states are *safe*); *readable* = any non-empty script-readable value/text.
+- **Preexisting *readable* siblings are allowed and ignored.** A real container
+  legitimately contains labels, helper text, masked placeholders, and static
+  metadata. The baseline is **not** a whole-subtree gate — it does not fail just
+  because some non-chosen element is readable. It is recorded only to judge the one
+  element actually selected after reveal.
+- The gate is **per chosen candidate**, applied after reveal:
+  - the chosen post-reveal candidate must have had a **`safe` baseline** (absent /
+    empty / recognized mask) and must now be **newly present or changed** to a
+    revealed value — *safe → revealed* transition; **else fail closed**.
+  - if the chosen candidate was **already `readable` pre-reveal with the same
+    value** (unchanged), the raw value was observable without blind protection →
+    **fail closed** (manual handling; no auto-capture).
+  - unchanged or no safe→revealed transition for the chosen candidate → **fail
+    closed** (stale/label text).
+- Comparison uses the hashed fingerprints only; the post-reveal raw value is read
+  exactly once and stored.
 
 ### 6.2 Route — `POST /v1/secrets/reveal-capture`
 
@@ -491,8 +501,9 @@ does.
    handle to share it); production requires ≥1 allowed domain; `enforceDomain`.
 2b. **Pre-reveal baseline** (§6.1, daemon-only, observation still safe): record the
    hashed value/state + safety class of every candidate in the approved
-   field/container subtree. **Fail closed now** (no approval, no blind) if any is
-   already *readable*.
+   field/container subtree. Preexisting *readable* siblings (labels, help text,
+   masked placeholders, static metadata) are recorded but **do not** fail this step —
+   the gate is enforced per chosen candidate after reveal (step 8).
 3. Build deterministic binding: `action: "reveal_capture"`, `planned_ref`,
    `environment`, `destination_domain`, `allowed_domains`, `reveal_fingerprint`,
    `capture_mode` (`field` | `container` | `focused-after-reveal`),
@@ -507,10 +518,10 @@ does.
    nothing revealed → `blind.end()` + rethrow, safe).
 7. Click reveal handle.
 8. Resolve the secret element per `capture_mode` with the containment/ambiguity
-   fail-closed rules of §6.1, **and enforce the pre-reveal-baseline gate**: the
-   chosen candidate must have transitioned from a *safe* baseline to newly
-   present/changed (else fail closed — stale/label text). Then read its value
-   internally (daemon-only).
+   fail-closed rules of §6.1, **and enforce the per-chosen-candidate baseline gate**:
+   the chosen candidate must have had a *safe* baseline and now show a
+   *safe→revealed* transition; fail closed if it was already *readable* unchanged or
+   shows no transition (§6.1). Then read its value internally (daemon-only).
 9. `vault.upsertSecret(...)` (value never leaves the daemon).
 10. Click the hide handle if supplied; otherwise blank **all** pages via the existing
     `blankAllPages(cdp)` (fail-closed if any page does not reach `about:blank`),
@@ -785,7 +796,8 @@ agent-reachable:
   `reveal-capture` mode `field` (value never returned to the agent layer).
 - `baselineCandidates(handle): Promise<Baseline>` — pre-blind, daemon-only. Records
   the hashed value/state + safety class of every candidate in the approved
-  field/container subtree (§6.1). Throws fail-closed if any is already *readable*.
+  field/container subtree (§6.1). Preexisting *readable* siblings are recorded, not
+  rejected; the gate is enforced per chosen candidate in `resolveWithinContainer`.
 - `resolveWithinContainer(container, mode, baseline): Promise<{ value: string }>` —
   post-reveal, daemon-only. Enumerates candidate secret holders inside the container
   subtree (or, for `focused-after-reveal`, `document.activeElement`), proves DOM
@@ -837,12 +849,13 @@ existing daemon-wiring + `stubBrowser` approach.
   `focused-after-reveal`); secret-holder predicate rejects a button/link/label and
   `focused-after-reveal` with focus left on the reveal button → fail closed;
   container resolution fail-closed on zero candidates, >1 candidates, and
-  non-contained element; **pre-reveal baseline**: an already-*readable* candidate
-  pre-reveal → fail closed **before** approval/blind (no approval grant created); a
-  candidate unchanged from a safe baseline after reveal → fail closed (stale/label
-  text); a candidate that transitions safe→revealed → captured; hide-handle vs blank
-  fallback; captured value never appears in any response (extend the existing "no raw
-  secret in any response body" assertion).
+  non-contained element; **pre-reveal baseline (per chosen candidate)**: a container
+  with readable label/help/static-metadata siblings still **succeeds** (siblings
+  ignored); the chosen candidate that transitions safe→revealed → captured; the
+  chosen candidate already *readable* unchanged pre-reveal → fail closed; the chosen
+  candidate showing no safe→revealed transition → fail closed (stale/label text);
+  hide-handle vs blank fallback; captured value never appears in any response (extend
+  the existing "no raw secret in any response body" assertion).
 - **Absence proof tests:** present-in-value, present-in-attribute,
   present-in-URL-hash, cross-origin-frame → inconclusive, evaluate-error →
   inconclusive, timeout → inconclusive. (Frame/shadow behaviors driven through the
@@ -934,11 +947,13 @@ existing daemon-wiring + `stubBrowser` approach.
   input is safe, and many SaaS controls require real pointer events / `isTrusted`.
   Occlusion guard: the click point must hit-test to the handle's backend node **or a
   descendant of it** (icon/text buttons render an inner node at the box center).
-- `reveal-capture` records a **pre-reveal daemon-only baseline**: it fails closed
-  before approval/blind if the value is already script-readable (the secret was
-  observable without blind protection), and only captures a candidate that
-  transitioned from a safe masked/empty baseline to newly revealed — never
-  preexisting label/help text.
+- `reveal-capture` records a **pre-reveal daemon-only baseline** but enforces it
+  **per chosen candidate**, not as a whole-subtree gate: readable label/help/
+  static-metadata siblings are recorded and ignored (real containers have them). Only
+  the post-reveal selected candidate is gated — it must show a *safe→revealed*
+  transition; it fails closed if it was already *readable* unchanged pre-reveal (the
+  secret was observable without blind protection) or shows no transition (stale/label
+  text).
 - `reveal-capture` supports three capture modes (`field`, `container`,
   `focused-after-reveal`) because real UIs often create/replace the secret element
   only after reveal. Post-reveal element resolution is **daemon-only** and gated by a
