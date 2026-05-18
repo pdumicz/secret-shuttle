@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import type { CdpClient } from "./cdp-client.js";
 import { ShuttleError } from "../../shared/errors.js";
+import type { ElementKind } from "../browser-handles.js";
 
 const OBSERVATION_DISABLE_METHODS = [
   "Runtime.disable",
@@ -78,6 +79,43 @@ export async function blankAllPages(cdp: CdpClient): Promise<void> {
       `Could not blank ${failed.length} browser page(s); blind mode kept active.`,
     );
   }
+}
+
+export interface ElementKindMeta {
+  tag: string;
+  type?: string;
+  role?: string;
+  href?: boolean;
+  editable: boolean;
+}
+
+const TEXT_INPUT_TYPES = new Set(["", "text", "password", "email", "url", "search", "tel", "number"]);
+
+/**
+ * Single source of truth for element_kind (spec §3.3). Exactly the actionable set
+ * `mark pick` normalizes to. `field` = text-entry/editable only.
+ */
+export function elementKind(meta: ElementKindMeta): ElementKind {
+  const tag = meta.tag.toLowerCase();
+  const type = (meta.type ?? "").toLowerCase();
+  const role = (meta.role ?? "").toLowerCase();
+  if (meta.editable && tag !== "input" && tag !== "textarea") return "field"; // contenteditable
+  if (tag === "textarea") return "field";
+  if (tag === "input" && TEXT_INPUT_TYPES.has(type)) return "field";
+  if (tag === "button" || tag === "summary" || role === "button") return "button";
+  if (tag === "input" && (type === "submit" || type === "button" || type === "image" || type === "reset")) return "button";
+  if ((tag === "a" && meta.href === true) || role === "link") return "link";
+  return "other";
+}
+
+export interface HandleDescriptor {
+  target_id: string;
+  domain: string;
+  page_url_host: string;
+  page_title: string;
+  backend_node_id: number;
+  handle_fingerprint: string;
+  element_kind: ElementKind;
 }
 
 export interface FieldDescriptor {
