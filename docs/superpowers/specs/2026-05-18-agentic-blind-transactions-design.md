@@ -152,15 +152,29 @@ else `other`):
     window-capture handlers) can fire. This is the same browser-level mechanism
     DevTools "Inspect element" uses.
   - On `inspectNodeRequested` the daemon resolves the `backendNodeId` (passes through
-    shadow DOM and iframes — it is a compositor-level pick), computes the handle, and
-    immediately disables inspect mode (`Overlay.setInspectMode {mode:"none"}`,
-    guaranteed in cleanup on pick, timeout, error, or detach).
+    shadow DOM and iframes — it is a compositor-level pick). **Self-or-ancestor
+    normalization:** the picked node is often an inner `span`, `svg`/path, or text
+    node inside the real control. The daemon walks self→ancestors (bounded depth,
+    not crossing a document/shadow boundary) to the nearest **actionable** element —
+    `button`, `a[href]`, `input[type=submit|button]`, `[role=button]`,
+    `[role=link]`, `summary`, or a form field (`input`(non-button)/`textarea`/
+    contenteditable) — and the **handle is computed from that normalized element**
+    (its backend node, fingerprint, and `element_kind`). If no actionable ancestor
+    is found within the bound, fail closed (no handle). Then it immediately disables
+    inspect mode (`Overlay.setInspectMode {mode:"none"}`, guaranteed in cleanup on
+    pick, timeout, error, or detach).
   - **Fail closed:** if `Overlay`/`DOM` cannot be enabled, the overlay is
-    unsupported, or no node is picked within `--timeout-ms` (default 30000, hard cap
-    120000), the operation aborts with **no handle**. No page event is ever
-    dispatched, so there is no activation-before-blind hazard to suppress.
+    unsupported, no actionable element is resolvable, or no node is picked within
+    `--timeout-ms` (default 30000, hard cap 120000), the operation aborts with **no
+    handle**. No page event is ever dispatched, so there is no
+    activation-before-blind hazard to suppress.
   - Only the hashed fingerprint and non-secret metadata are stored — never any value
     or raw DOM text.
+
+`mark pick` blocks the CLI until a pick (or timeout). The pick click must be
+performed **while the command is pending** — see the agentic choreography in §10.1
+(the agent drives the click via its browser tool concurrently; the command is run
+non-blocking/background for that window).
 
 Either primitive is valid **only before** blind mode for that page; marking is
 rejected if a blind window is already active (no observation of a possibly
@@ -441,6 +455,27 @@ control/label, or on any CDP/evaluation error. For `focused-after-reveal` the
 The human approves the container + strategy; the daemon proves containment and
 candidacy before reading. The agent never sees the element or its value.
 
+**Pre-reveal baseline (daemon-only, before blind).** Capturing "the single non-empty
+candidate after reveal" is unsafe on its own: it can silently grab preexisting
+label/help text, or mask the far worse case where the secret's raw value was
+**already DOM-readable before blind mode** (so the agent could have observed it and
+the blind window protected nothing). Therefore, during the pre-blind revalidation
+phase the daemon records a baseline over the approved field/container subtree:
+
+- For every candidate-eligible element it records a **hashed** value/state
+  fingerprint (never raw) and a safety classification: *safe* = empty, absent, or a
+  `password`-type input with no script-readable value; *readable* = any non-empty
+  script-readable value/text.
+- **Fail closed before blind/reveal** if any in-scope candidate is already
+  *readable* pre-reveal — the value was observable without blind protection; the
+  workflow is unsafe and must be handled manually (no approval, no blind, no
+  capture).
+- After reveal, the chosen candidate must be **newly present or changed from a
+  *safe* baseline** (its value/state fingerprint differs and transitioned
+  safe→non-empty). If nothing transitioned, resolution **fails closed** (we would be
+  capturing stale or label text). The baseline comparison uses the hashed
+  fingerprints only; the post-reveal raw value is read exactly once and stored.
+
 ### 6.2 Route — `POST /v1/secrets/reveal-capture`
 
 New approval action `reveal_capture`. Unlike today's `capture` (which requires a
@@ -454,6 +489,10 @@ does.
    `--hide-handle` if supplied (button/link), while observation is safe. Derive
    domain from the reveal handle (and, when present, require the field/container
    handle to share it); production requires ≥1 allowed domain; `enforceDomain`.
+2b. **Pre-reveal baseline** (§6.1, daemon-only, observation still safe): record the
+   hashed value/state + safety class of every candidate in the approved
+   field/container subtree. **Fail closed now** (no approval, no blind) if any is
+   already *readable*.
 3. Build deterministic binding: `action: "reveal_capture"`, `planned_ref`,
    `environment`, `destination_domain`, `allowed_domains`, `reveal_fingerprint`,
    `capture_mode` (`field` | `container` | `focused-after-reveal`),
@@ -468,7 +507,10 @@ does.
    nothing revealed → `blind.end()` + rethrow, safe).
 7. Click reveal handle.
 8. Resolve the secret element per `capture_mode` with the containment/ambiguity
-   fail-closed rules of §6.1, then read its value internally (daemon-only).
+   fail-closed rules of §6.1, **and enforce the pre-reveal-baseline gate**: the
+   chosen candidate must have transitioned from a *safe* baseline to newly
+   present/changed (else fail closed — stale/label text). Then read its value
+   internally (daemon-only).
 9. `vault.upsertSecret(...)` (value never leaves the daemon).
 10. Click the hide handle if supplied; otherwise blank **all** pages via the existing
     `blankAllPages(cdp)` (fail-closed if any page does not reach `about:blank`),
@@ -604,18 +646,21 @@ setting secrets/env — configuration is dashboard/Backend-API only).
 Exact argument vectors and stdin/env-file behavior for the three shipped templates
 must be **verified against each CLI's current `--help` during implementation** (a
 plan task), choosing `stdin` where supported and `tmp_env_file_0600` otherwise; the
-delivery contract is fixed: stdin or `0600` temp env-file only, **never argv**. The
+delivery contract is fixed: the **secret value** reaches the child only via stdin or
+a `0600` temp env-file and **never appears in argv or env** (the random, non-secret
+`--env-file <path>` itself does appear in argv — that is expected and harmless). The
 existing `runTemplate` already enforces stdin delivery, scrubbed `buildChildEnv`,
 binary sha256 in the approval binding, and `destinationEnvironment` in the approval;
 the `tmp_env_file_0600` path is a small additive extension to `runTemplate` (create/
 chmod/write/pass-path/unlink-in-finally) plus new definitions + per-template
 `validateParams`.
 
-Template requirements (restated): secret delivered to the daemon-controlled child
-**only** via stdin or a `0600` daemon-owned temp env-file (never argv); no
-stdout/stderr secret echo (child stdio is `["pipe","ignore","ignore"]`); binary
-sha256 shown in approval; destination environment in the approval binding. All but
-the temp-env-file path are already satisfied by `runTemplate`.
+Template requirements (restated): the **secret value** reaches the daemon-controlled
+child **only** via stdin or a `0600` daemon-owned temp env-file and never appears in
+argv or env (the random temp `--env-file` path may appear in argv); no stdout/stderr
+secret echo (child stdio is `["pipe","ignore","ignore"]`); binary sha256 shown in
+approval; destination environment in the approval binding. All but the temp-env-file
+path are already satisfied by `runTemplate`.
 
 ## 10. Component 5 — Agent Skill + Installers
 
@@ -631,6 +676,16 @@ manual**. **Retire `skills/claude-code/SKILL.md`** (replace with the new path; u
 - `browser mark focused --as <label>` for focusable fields and
   `browser mark pick --as <label>` for buttons/reveal/hide controls, **before**
   blind mode
+- **`mark pick` choreography (agent-driven, concurrent):** `mark pick` blocks until
+  a pick. The **agent itself** (not a human) performs the pick: start
+  `secret-shuttle browser mark pick --as <label>` **non-blocking/in the background**,
+  then immediately use the agent's own browser tool to click the target element
+  (Chrome's inspect overlay highlights it; the click is browser-consumed, no page
+  event fires), then await the command's completion. **Fallback** if the
+  agent/runtime cannot drive browser and terminal **concurrently:** prefer
+  `mark focused` for any focusable control; if the control is not focusable and
+  concurrent control is impossible, the flow cannot be fully agentic for that element
+  — surface this to the human rather than skipping the mark.
 - use `inject-submit` / `reveal-capture` for the secret-bearing transaction
 - never screenshot / DOM-read / read page text / read network bodies / read clipboard
   while blind mode is active (even though the daemon does this internally — the agent
@@ -703,9 +758,10 @@ agent-reachable:
 - `markPick(timeoutMs): Promise<HandleDescriptor>` — enables
   `Overlay.setInspectMode {mode:"searchForNode"}`, awaits one
   `Overlay.inspectNodeRequested` (backend node id; the pick click is browser-consumed
-  and never dispatched to the page), computes the descriptor, and disables inspect
-  mode in guaranteed cleanup. Fail-closed (no handle) if `Overlay`/`DOM` cannot be
-  enabled, overlay unsupported, or timeout (§3.3).
+  and never dispatched to the page), **normalizes self→nearest actionable ancestor**
+  (§3.3) and computes the descriptor from that node, then disables inspect mode in
+  guaranteed cleanup. Fail-closed (no handle) if `Overlay`/`DOM` cannot be enabled,
+  overlay unsupported, no actionable ancestor, or timeout (§3.3).
 - `revalidateHandle(h: BrowserHandle): Promise<void>` — §3.4; throws `ShuttleError`
   fail-closed on any mismatch.
 - `injectIntoBackendNode(h, value): Promise<InjectResult>` — `DOM.focus`
@@ -717,18 +773,27 @@ agent-reachable:
   input is safe: `DOM.scrollIntoViewIfNeeded` → resolve the box via
   `DOM.getContentQuads`/`DOM.getBoxModel` → pick a point inside the visible quad →
   **hit-test that point with `DOM.getNodeForLocation` and require it to resolve to
-  the handle's backend node** (occlusion/overlay guard) → `Input.dispatchMouseEvent`
+  the handle's backend node *or a descendant of it*** (icon/text buttons render an
+  inner `span`/`svg` at the box center, so the hit node is legitimately a child;
+  containment is proven via `a.contains(b)` against the handle node) — this is the
+  occlusion/overlay guard → `Input.dispatchMouseEvent`
   `mouseMoved`→`mousePressed`→`mouseReleased` (button `left`, `clickCount:1`) at the
-  point. Fail-closed on missing/zero-area/off-screen box, hit-test mismatch, or any
-  CDP error. The reveal/hide clicks in §6 use this same primitive.
+  point. Fail-closed on missing/zero-area/off-screen box, hit node **not contained**
+  by the handle node, or any CDP error. The reveal/hide clicks in §6 use this same
+  primitive.
 - `readBackendNodeValue(h): Promise<string>` — daemon-only field read for
   `reveal-capture` mode `field` (value never returned to the agent layer).
-- `resolveWithinContainer(container: BrowserHandle, mode): Promise<{ value: string }>`
-  — post-reveal, daemon-only. Enumerates candidate secret holders inside the
-  container subtree (or, for `focused-after-reveal`, takes `document.activeElement`),
-  proves DOM containment within the approved container backend node, requires exactly
-  one unambiguous candidate, and returns its value. Throws fail-closed on zero/many
-  candidates, containment failure, or any CDP/evaluation error (§6.1).
+- `baselineCandidates(handle): Promise<Baseline>` — pre-blind, daemon-only. Records
+  the hashed value/state + safety class of every candidate in the approved
+  field/container subtree (§6.1). Throws fail-closed if any is already *readable*.
+- `resolveWithinContainer(container, mode, baseline): Promise<{ value: string }>` —
+  post-reveal, daemon-only. Enumerates candidate secret holders inside the container
+  subtree (or, for `focused-after-reveal`, `document.activeElement`), proves DOM
+  containment within the approved container backend node, requires exactly one
+  unambiguous candidate, **and requires it to have transitioned from a *safe*
+  baseline to newly present/changed**, then returns its value. Throws fail-closed on
+  zero/many candidates, containment failure, no safe→revealed transition, or any
+  CDP/evaluation error (§6.1).
 - `proveAbsence(secret: string): Promise<AbsenceProofResult>` — §5; returns
   `{ passed: boolean }` only (reasons are audited internally as enum, never returned
   to the agent).
@@ -757,19 +822,27 @@ existing daemon-wiring + `stubBrowser` approach.
 - **`mark pick` tests:** uses `Overlay.setInspectMode`; the pick produces a backend
   node id via `Overlay.inspectNodeRequested` with **no page event dispatched** (a
   pre-registered window-capture `pointerdown`/`click` handler on the page does
-  **not** fire — proving the listener-ordering hazard is gone); inspect mode is
-  disabled in cleanup on pick/timeout/error; timeout/overlay-unsupported → no handle;
-  produces the same handle record as `mark focused`.
+  **not** fire — proving the listener-ordering hazard is gone); **self-or-ancestor
+  normalization**: picking the inner `span` of a `<button><span>…` and the `<svg>`
+  of an icon-only button both normalize to the `<button>` (correct `element_kind`);
+  picking a non-actionable blank area → no handle; inspect mode disabled in cleanup
+  on pick/timeout/error; timeout/overlay-unsupported → no handle; produces the same
+  handle record as `mark focused`.
 - **`clickBackendNode` trusted-input tests:** uses `Input.dispatchMouseEvent` (not JS
-  `.click()`); scrolls into view; fail-closed when the click point hit-tests to a
-  different backend node (occlusion guard) and on missing/zero-area box.
+  `.click()`); scrolls into view; **passes when the hit node is a descendant of the
+  handle** (icon/text button inner `span`/`svg` at box center); fail-closed when the
+  hit node is **not contained** by the handle node (occlusion guard) and on
+  missing/zero-area box.
 - **`reveal-capture` route tests:** all three capture modes (`field`, `container`,
   `focused-after-reveal`); secret-holder predicate rejects a button/link/label and
   `focused-after-reveal` with focus left on the reveal button → fail closed;
   container resolution fail-closed on zero candidates, >1 candidates, and
-  non-contained element; hide-handle vs blank fallback; captured value never appears
-  in any response (extend the existing "no raw secret in any response body"
-  assertion).
+  non-contained element; **pre-reveal baseline**: an already-*readable* candidate
+  pre-reveal → fail closed **before** approval/blind (no approval grant created); a
+  candidate unchanged from a safe baseline after reveal → fail closed (stale/label
+  text); a candidate that transitions safe→revealed → captured; hide-handle vs blank
+  fallback; captured value never appears in any response (extend the existing "no raw
+  secret in any response body" assertion).
 - **Absence proof tests:** present-in-value, present-in-attribute,
   present-in-URL-hash, cross-origin-frame → inconclusive, evaluate-error →
   inconclusive, timeout → inconclusive. (Frame/shadow behaviors driven through the
@@ -852,11 +925,20 @@ existing daemon-wiring + `stubBrowser` approach.
   browser's own `Overlay.setInspectMode` element picker — the pick click is consumed
   by the browser and **no page event is dispatched**, so an app's earlier-registered
   window-capture handler cannot reveal/submit during marking. (A JS-listener
-  suppression model was rejected for exactly that ordering hazard.)
+  suppression model was rejected for exactly that ordering hazard.) `mark pick`
+  **normalizes** the picked node self→nearest actionable ancestor so inner
+  `span`/`svg`/text picks resolve to the real control; it requires concurrent
+  agent-driven browser+terminal control (§10.1 choreography + fallback).
 - Daemon-driven clicks (submit/reveal/hide) use **trusted CDP `Input` events** at the
   hit-tested element box, not JS `.click()` — they run after blind starts so trusted
   input is safe, and many SaaS controls require real pointer events / `isTrusted`.
-  Occlusion guard: the click point must hit-test back to the handle's backend node.
+  Occlusion guard: the click point must hit-test to the handle's backend node **or a
+  descendant of it** (icon/text buttons render an inner node at the box center).
+- `reveal-capture` records a **pre-reveal daemon-only baseline**: it fails closed
+  before approval/blind if the value is already script-readable (the secret was
+  observable without blind protection), and only captures a candidate that
+  transitioned from a safe masked/empty baseline to newly revealed — never
+  preexisting label/help text.
 - `reveal-capture` supports three capture modes (`field`, `container`,
   `focused-after-reveal`) because real UIs often create/replace the secret element
   only after reveal. Post-reveal element resolution is **daemon-only** and gated by a
