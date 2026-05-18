@@ -3,6 +3,7 @@ import { ApprovalStore } from "./approvals/store.js";
 import { LockedVaultState } from "../vault/locked-state.js";
 import { Vault } from "../vault/vault.js";
 import { DaemonBlindModeState } from "./services-blind.js";
+import { BrowserHandleStore } from "./browser-handles.js";
 import { RateLimiter } from "./rate-limit.js";
 import type { BrowserOps } from "./chrome/internal-ops.js";
 import type { CdpClient } from "./chrome/cdp-client.js";
@@ -64,6 +65,7 @@ export class DaemonServices {
     },
   });
   readonly blind = new DaemonBlindModeState();
+  readonly handles = new BrowserHandleStore();
   readonly compareLimiter = new RateLimiter(5, 60_000);
   readonly unlockSessions = new UnlockSessions();
   browser: BrowserOps | null = null;
