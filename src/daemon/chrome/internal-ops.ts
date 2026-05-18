@@ -308,7 +308,9 @@ export class CdpBrowserOps implements BrowserOps {
   }
 
   // CdpClient.on has no off(); guard with a one-shot flag and a timeout race.
-  private waitForEvent<T>(event: string, timeoutMs: number): Promise<T> {
+  // Filter by sessionId — listeners are keyed only by method, so without this a
+  // pick on a different page target could wrongly resolve this wait.
+  private waitForEvent<T>(event: string, sessionId: string, timeoutMs: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       let done = false;
       const timer = setTimeout(() => {
@@ -316,8 +318,8 @@ export class CdpBrowserOps implements BrowserOps {
         done = true;
         reject(new ShuttleError("mark_pick_timeout", "No element picked before timeout."));
       }, timeoutMs);
-      this.cdp.on(event, (params) => {
-        if (done) return;
+      this.cdp.on(event, (params, sid) => {
+        if (done || sid !== sessionId) return;
         done = true;
         clearTimeout(timer);
         resolve(params as T);
@@ -379,6 +381,8 @@ export class CdpBrowserOps implements BrowserOps {
           objectId: object.objectId,
           functionDeclaration: `function(){
             const TEXT = new Set(["","text","password","email","url","search","tel","number"]);
+            // MUST mirror elementKind() in this file (spec §3.3 single source of truth).
+            // This is a hand-clone because it runs in the page context; keep in lockstep.
             function kind(el){
               const tag = el.tagName.toLowerCase();
               const type = (el.type || "").toLowerCase();
@@ -513,7 +517,7 @@ export class CdpBrowserOps implements BrowserOps {
     try {
       await this.cdp.send("DOM.enable", {}, sessionId);
       await this.cdp.send("Overlay.enable", {}, sessionId);
-      const picked = this.waitForEvent<{ backendNodeId: number }>("Overlay.inspectNodeRequested", timeoutMs);
+      const picked = this.waitForEvent<{ backendNodeId: number }>("Overlay.inspectNodeRequested", sessionId, timeoutMs);
       await this.cdp.send(
         "Overlay.setInspectMode",
         { mode: "searchForNode", highlightConfig: { showInfo: true, contentColor: { r: 111, g: 168, b: 220, a: 0.4 } } },
