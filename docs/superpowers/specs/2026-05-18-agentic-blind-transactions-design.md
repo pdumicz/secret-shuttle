@@ -124,16 +124,33 @@ backend node id. Raw role/name/value is **never** stored or returned — only th
 ### 3.3 CLI
 
 ```
-secret-shuttle browser mark focused --as <label>
+secret-shuttle browser mark focused   --as <label>
+secret-shuttle browser mark next-click --as <label> [--timeout-ms 30000]
 secret-shuttle browser marks
 ```
 
-`mark focused` reads `document.activeElement` (the same observation-safe path
-`readFocusedFingerprintAndDomain` already uses), derives `element_kind`
-(`input`/`textarea`/contenteditable → `field`; `button`/`[role=button]`/`input[type=submit|button]`
-→ `button`; `a[href]` → `link`; else `other`), and stores the handle. It is only
-valid **before** blind mode for that page; marking is rejected if a blind window is
-already active (no observation of a possibly-secret-bearing page).
+Two marking primitives, both observation-safe (used pre-blind, on non-secret
+controls), both producing the same opaque handle record with `element_kind` derived
+from the captured element (`input`/`textarea`/contenteditable → `field`;
+`button`/`[role=button]`/`input[type=submit|button]` → `button`; `a[href]` → `link`;
+else `other`):
+
+- **`mark focused`** — reads `document.activeElement` (the same observation-safe path
+  `readFocusedFingerprintAndDomain` already uses). Best for focusable fields.
+- **`mark next-click`** — solves the "many buttons are not focusable without
+  activating them" problem. The daemon (via its **internal** CDP, not the agent)
+  installs a one-shot capturing-phase pointer/click listener on the page. On the next
+  user click it records the target element (backend node id, fingerprint, kind),
+  then calls `preventDefault()` + `stopImmediatePropagation()` so the click **does
+  not activate** the control (no navigation, no reveal, no submit), removes the
+  listener, and disarms. Bounded by `--timeout-ms` (default 30000, hard cap 120000);
+  on timeout it disarms and fails closed with no handle stored. The listener is
+  guaranteed-removed in a `finally` even on error/detach. Only the hashed fingerprint
+  and non-secret metadata are stored — never any value or raw DOM text.
+
+Either primitive is valid **only before** blind mode for that page; marking is
+rejected if a blind window is already active (no observation of a possibly
+secret-bearing page).
 
 `browser marks` returns, per label, **only**: `label`, `element_kind`, `domain`,
 `page_url_host`, `created_at`, `expires_at`, `valid` (a fresh revalidation boolean).
@@ -316,17 +333,51 @@ and **no inconclusive condition** (§5.3).
 
 ## 6. Component 3 — `reveal-capture`
 
-### 6.1 CLI
+### 6.1 Capture model
+
+Many real UIs **create, replace, or unmask the secret element only after the reveal
+click**, so a pre-reveal `--field-handle` cannot be required in general. The secret
+element often does not exist (or is a different node) until reveal happens. Capture
+therefore supports three modes; exactly one is chosen per invocation and recorded in
+the approval binding so the human approves *where the secret will be read from*:
+
+- **`field`** — `--field-handle <label>`: a field marked before reveal that is stable
+  across reveal (the original spec's model; still supported where it applies, e.g.
+  reveal merely unmasks an existing input).
+- **`container`** — `--container-handle <label>`: a **stable ancestor** marked before
+  reveal (e.g. the modal/card/row that persists). After reveal, the daemon resolves
+  the secret-bearing element **within that container's subtree**, daemon-only.
+- **`focused-after-reveal`** — `--container-handle <label>` plus
+  `--capture focused-after-reveal`: after reveal the daemon reads
+  `document.activeElement`, but **only if** it is a descendant of the approved
+  container (some UIs focus the revealed field).
 
 ```
-secret-shuttle reveal-capture \
-  --name STRIPE_WEBHOOK_SECRET --env production --source stripe \
-  --domain dashboard.stripe.com \
-  --reveal-handle reveal-button \
-  --field-handle secret-field \
-  [--hide-handle hide-button] \
-  --allow-domain dashboard.stripe.com --allow-domain vercel.com
+# unmask-in-place
+secret-shuttle reveal-capture --name STRIPE_WEBHOOK_SECRET --env production \
+  --source stripe --domain dashboard.stripe.com \
+  --reveal-handle reveal-button --field-handle secret-field \
+  [--hide-handle hide-button] --allow-domain dashboard.stripe.com
+
+# element appears after reveal, scoped to a stable container
+secret-shuttle reveal-capture --name STRIPE_WEBHOOK_SECRET --env production \
+  --source stripe --domain dashboard.stripe.com \
+  --reveal-handle reveal-button --container-handle secret-card \
+  [--capture focused-after-reveal] [--hide-handle hide-button] \
+  --allow-domain dashboard.stripe.com
 ```
+
+Post-reveal resolution within a container (daemon-only, observation already blind):
+the daemon enumerates candidate secret holders inside the approved container subtree
+— a single `input`/`textarea` with a non-empty `.value`, a single contenteditable
+with non-empty text, or a single text-bearing element whose content is the freshly
+revealed value. Resolution **fails closed** (stay blind,
+`captured: "unknown"`) if there are **zero or more than one** candidates (ambiguous),
+if the resolved element is **not contained** by the approved container's backend node
+(DOM containment proof via `DOM.describeNode`/`Runtime.callFunctionOn`
+`a.contains(b)`), or on any CDP/evaluation error. The human approves the container +
+strategy; the daemon proves containment before reading. The agent never sees the
+element or its value.
 
 ### 6.2 Route — `POST /v1/secrets/reveal-capture`
 
@@ -335,21 +386,27 @@ pre-existing blind window), `reveal-capture` **owns** its blind window like inje
 does.
 
 1. `requireKey`; require browser; refuse if blind already active.
-2. Revalidate `--reveal-handle` (button/link), `--field-handle` (field), and
+2. Validate inputs: exactly one of `--field-handle` or `--container-handle` (the
+   latter optionally with `--capture focused-after-reveal`). Revalidate
+   `--reveal-handle` (button/link), the chosen field/container handle, and
    `--hide-handle` if supplied (button/link), while observation is safe. Derive
-   domain from the field handle; production requires ≥1 allowed domain;
-   `enforceDomain`.
+   domain from the reveal handle (and, when present, require the field/container
+   handle to share it); production requires ≥1 allowed domain; `enforceDomain`.
 3. Build deterministic binding: `action: "reveal_capture"`, `planned_ref`,
    `environment`, `destination_domain`, `allowed_domains`, `reveal_fingerprint`,
-   `field_fingerprint`, `hide_fingerprint?`, `auto_resume: true`, handle labels +
-   page context (display-only).
+   `capture_mode` (`field` | `container` | `focused-after-reveal`),
+   `field_fingerprint?` (mode `field`), `container_fingerprint?` (modes `container`/
+   `focused-after-reveal`), `hide_fingerprint?`, `auto_resume: true`, handle labels +
+   page context (display-only). `capture_mode`, `container_fingerprint`, and
+   `reveal_fingerprint` are part of `bindingsMatch`.
 4. `requireApproval({ force: true })`.
 5. `blind.start(domain,"reveal_capture")` → `disableObservationDomains` →
    `severAgentConnections`.
-6. Re-revalidate handles (pre-action; failure here = nothing revealed → `blind.end()`
-   + rethrow, safe).
+6. Re-revalidate the reveal + field/container handles (pre-action; failure here =
+   nothing revealed → `blind.end()` + rethrow, safe).
 7. Click reveal handle.
-8. Read the field handle's value internally (daemon-only).
+8. Resolve the secret element per `capture_mode` with the containment/ambiguity
+   fail-closed rules of §6.1, then read its value internally (daemon-only).
 9. `vault.upsertSecret(...)` (value never leaves the daemon).
 10. Click the hide handle if supplied; otherwise blank **all** pages via the existing
     `blankAllPages(cdp)` (fail-closed if any page does not reach `about:blank`),
@@ -377,20 +434,24 @@ or fail-closed:
 ### 6.4 Approval binding & UI (applies to §4 and §6)
 
 `ApprovalBinding` gains optional fields: `submit_fingerprint`, `reveal_fingerprint`,
-`hide_fingerprint`, `success_condition`, `auto_resume`, plus display-only
-`field_handle_label`, `submit_handle_label`, `reveal_handle_label`,
-`hide_handle_label`. All non-display fields are added to `bindingsMatch` (strict
-equality, consistent with the existing function). Display-only fields are excluded
-from matching, like `page_title`/`page_url_host` today.
+`hide_fingerprint`, `container_fingerprint`, `capture_mode`, `success_condition`,
+`auto_resume`, plus display-only `field_handle_label`, `submit_handle_label`,
+`reveal_handle_label`, `hide_handle_label`, `container_handle_label`. All non-display
+fields are added to `bindingsMatch` (strict equality, consistent with the existing
+function). Display-only fields are excluded from matching, like
+`page_title`/`page_url_host` today. (Whether a handle was created via `mark focused`
+or `mark next-click` is **not** part of the binding — only the resulting element's
+fingerprint is.)
 
 `ui.html` `human` map gains:
 
 - `inject_submit`: "Inject secret `<ref>` into **<field label>** on `<domain>`, click
   **<submit label>**, wait for success, and **automatically resume observation only
   if the secret is verified gone**."
-- `reveal_capture`: "Click **<reveal label>** on `<domain>`, capture into
-  `<planned_ref>`, hide it, and **automatically resume observation only if the secret
-  is verified gone**."
+- `reveal_capture`: "Click **<reveal label>** on `<domain>`, capture the revealed
+  secret into `<planned_ref>` (from **<field/container label>**, mode
+  `<capture_mode>`), hide it, and **automatically resume observation only if the
+  secret is verified gone**."
 
 Both render an explicit, prominent line (styled like the existing `blind_end`
 warning): **"Approving authorizes the daemon to auto-resume observation only if the
@@ -440,25 +501,44 @@ exposes it in the process table and **must not** ship as a Secret Shuttle templa
   params: `name`, `repo`, optional `env`/`org`; `destinationEnvironment` from `env`.
 - `cloudflare-secret-put` — `wrangler secret put <NAME>` (reads value from stdin),
   params: `name`, optional `env`.
-- `supabase-edge-secret-set` — `supabase secrets set --env-file /dev/stdin` style
-  (value delivered via stdin as `NAME=VALUE`), params: `name`, `project_ref`.
+- `supabase-edge-secret-set` — `supabase secrets set` reading the secret from a
+  file. **Portability note (P2b):** `--env-file /dev/stdin` is **not portable**
+  (no `/dev/stdin` on Windows, fragile on some shells). The delivery contract for
+  this template is therefore: **either** verified true-stdin support on the target
+  platforms, **or** the new `tmp_env_file_0600` delivery mode (below). Plain
+  `/dev/stdin` must not be relied on.
+
+**`TemplateDefinition.secret_delivery` gains a `"tmp_env_file_0600"` mode.** When a
+CLI only accepts `--env-file <path>` (not true stdin), the daemon: creates a file in
+a private daemon-owned dir with mode `0600`, writes `NAME=VALUE`, passes the path as
+the env-file argument, and **unlinks it in a `finally`** (even on crash/throw),
+scrubbing the buffer. Rationale that this still satisfies the no-argv-leak rule: the
+secret never appears in argv or the process table; it lives only in a short-lived
+`0600` file readable solely by the daemon user, deleted immediately after the child
+exits. This mode is **opt-in per template**, used only where true stdin is
+unavailable, and the temp-file lifetime + permissions are an explicit security
+requirement (and a test).
 
 **Defer with documented rationale** (do **not** ship; record in
 `docs/roadmap.md` / template docs): `railway-variable-set` and `netlify-env-set`
 (value forced onto argv by their CLIs), `clerk-env-set` (no first-party CLI for
 setting secrets/env — configuration is dashboard/Backend-API only).
 
-Exact argument vectors and stdin behavior for the three shipped templates must be
-verified against each CLI's current `--help` during implementation (a plan task), but
-the delivery contract is fixed: stdin/env only, no argv secret. The existing
-`runTemplate` already enforces stdin delivery, scrubbed `buildChildEnv`, binary
-sha256 in the approval binding, and `destinationEnvironment` in the approval — no
-changes to that machinery, only new definitions + per-template `validateParams`.
+Exact argument vectors and stdin/env-file behavior for the three shipped templates
+must be **verified against each CLI's current `--help` during implementation** (a
+plan task), choosing `stdin` where supported and `tmp_env_file_0600` otherwise; the
+delivery contract is fixed: stdin or `0600` temp env-file only, **never argv**. The
+existing `runTemplate` already enforces stdin delivery, scrubbed `buildChildEnv`,
+binary sha256 in the approval binding, and `destinationEnvironment` in the approval;
+the `tmp_env_file_0600` path is a small additive extension to `runTemplate` (create/
+chmod/write/pass-path/unlink-in-finally) plus new definitions + per-template
+`validateParams`.
 
-Template requirements (restated, already satisfied by `runTemplate`): secret via
-stdin only inside the daemon-controlled child; no stdout/stderr secret echo (child
-stdio is `["pipe","ignore","ignore"]`); binary sha256 shown in approval; destination
-environment in the approval binding.
+Template requirements (restated): secret delivered to the daemon-controlled child
+**only** via stdin or a `0600` daemon-owned temp env-file (never argv); no
+stdout/stderr secret echo (child stdio is `["pipe","ignore","ignore"]`); binary
+sha256 shown in approval; destination environment in the approval binding. All but
+the temp-env-file path are already satisfied by `runTemplate`.
 
 ## 10. Component 5 — Agent Skill + Installers
 
@@ -471,7 +551,9 @@ manual**. **Retire `skills/claude-code/SKILL.md`** (replace with the new path; u
 
 - run `secret-shuttle doctor --json` first; start daemon/browser and unlock if needed
 - prefer `template run` over generic browser ops
-- `browser mark focused --as <label>` the relevant elements **before** blind mode
+- `browser mark focused --as <label>` for focusable fields and
+  `browser mark next-click --as <label>` for buttons/reveal/hide controls, **before**
+  blind mode
 - use `inject-submit` / `reveal-capture` for the secret-bearing transaction
 - never screenshot / DOM-read / read page text / read network bodies / read clipboard
   while blind mode is active (even though the daemon does this internally — the agent
@@ -541,6 +623,11 @@ agent-reachable:
   page_url_host, page_title, backend_node_id, handle_fingerprint, element_kind}`
   (reuses `readFocusedFingerprintAndDomain` + `getFocusedBackendNodeId`, adds role/
   accessible-name into the fingerprint seed and `element_kind` derivation).
+- `markNextClick(timeoutMs): Promise<HandleDescriptor>` — installs a one-shot
+  capturing-phase listener via internal CDP; on the next click records the target
+  element, calls `preventDefault()`/`stopImmediatePropagation()` (no activation),
+  removes the listener (guaranteed in `finally`), and returns the same descriptor
+  shape. Times out fail-closed with no handle.
 - `revalidateHandle(h: BrowserHandle): Promise<void>` — §3.4; throws `ShuttleError`
   fail-closed on any mismatch.
 - `injectIntoBackendNode(h, value): Promise<InjectResult>` — `DOM.focus`
@@ -549,7 +636,13 @@ agent-reachable:
 - `clickBackendNode(h): Promise<void>` — resolve node → `Runtime.callFunctionOn`
   `function(){ this.click(); }` on the resolved object id; fail-closed on any error.
 - `readBackendNodeValue(h): Promise<string>` — daemon-only field read for
-  `reveal-capture` (value never returned to the agent layer).
+  `reveal-capture` mode `field` (value never returned to the agent layer).
+- `resolveWithinContainer(container: BrowserHandle, mode): Promise<{ value: string }>`
+  — post-reveal, daemon-only. Enumerates candidate secret holders inside the
+  container subtree (or, for `focused-after-reveal`, takes `document.activeElement`),
+  proves DOM containment within the approved container backend node, requires exactly
+  one unambiguous candidate, and returns its value. Throws fail-closed on zero/many
+  candidates, containment failure, or any CDP/evaluation error (§6.1).
 - `proveAbsence(secret: string): Promise<AbsenceProofResult>` — §5; returns
   `{ passed: boolean }` only (reasons are audited internally as enum, never returned
   to the agent).
@@ -571,9 +664,14 @@ existing daemon-wiring + `stubBrowser` approach.
   stays active + `submitted:"unknown"`; success+proof → `blind_mode:false` and a
   `blind_auto_resume` audit record (distinct from `blind_end`); proof inconclusive →
   stays blind + `manual_recovery_required`.
-- **`reveal-capture` route tests:** symmetric; hide-handle vs blank fallback;
-  captured value never appears in any response (extend the existing "no raw secret in
-  any response body" assertion).
+- **`mark next-click` tests:** the intercepted click is prevented (no
+  activation/navigation); listener removed after capture and on timeout; timeout
+  stores no handle; produces the same handle record as `mark focused`.
+- **`reveal-capture` route tests:** all three capture modes (`field`, `container`,
+  `focused-after-reveal`); container resolution fail-closed on zero candidates, >1
+  candidates, and non-contained element; hide-handle vs blank fallback; captured
+  value never appears in any response (extend the existing "no raw secret in any
+  response body" assertion).
 - **Absence proof tests:** present-in-value, present-in-attribute,
   present-in-URL-hash, cross-origin-frame → inconclusive, evaluate-error →
   inconclusive, timeout → inconclusive. (Frame/shadow behaviors driven through the
@@ -588,17 +686,34 @@ existing daemon-wiring + `stubBrowser` approach.
 - **Negative/security e2e:** extend `stripe-to-vercel.test.ts` (or a sibling) to do
   the full agentic path; assert no raw secret, no observed success text, and no DOM
   snippet appears in any response body.
+- **[P2a] Real-page auto-resume validation gate (manual/scripted, not unit):** on
+  the first supported provider flows — Vercel env-var add (`inject-submit`) and
+  Stripe webhook secret reveal (`reveal-capture`) on the **actual sites** — verify
+  the absence proof reaches `passed` and the daemon auto-resumes. The proof stays
+  fail-closed regardless; this gate measures whether auto-resume *succeeds in
+  practice*. If a target site's structure (e.g. a cross-origin iframe around the
+  field) forces `manual_recovery_required` in the common case, that provider's
+  browser flow is recorded as **best-effort only** and the `template run` path is
+  documented as the primary path for it (skill + README updated accordingly). This
+  is a release gate for Phase 2/3, not a code unit test.
 
 ## 14. Build Order (independently shippable phases)
 
-1. **Handles** — store + `browser mark`/`browser marks` + `BrowserOps.markFocused`/
-   `revalidateHandle` + tests.
+1. **Handles** — store + `browser mark focused`/`mark next-click`/`marks` +
+   `BrowserOps.markFocused`/`markNextClick`/`revalidateHandle` + tests.
 2. **inject-submit** — binding/UI extension, route, `injectIntoBackendNode`/
-   `clickBackendNode`, absence proof, audited auto-resume, tests.
-3. **reveal-capture** — route + `readBackendNodeValue` + hide/blank, tests.
-4. **Templates** — three stdin-safe definitions + validateParams + docs for deferred.
+   `clickBackendNode`, absence proof, audited auto-resume, tests; then the **[P2a]
+   real-page validation gate** for Vercel before declaring the browser flow
+   production (not best-effort).
+3. **reveal-capture** — route + `readBackendNodeValue` + `resolveWithinContainer`
+   (all three capture modes) + hide/blank, tests; then the **[P2a] real-page
+   validation gate** for Stripe.
+4. **Templates** — three stdin/`tmp_env_file_0600`-safe definitions + the
+   `runTemplate` temp-env-file extension + validateParams + docs for deferred.
 5. **Skill + installers + doctor/health** — canonical SKILL.md, retire claude-code
-   skill, installers, `repository` in package.json, README, health/doctor block.
+   skill, installers, `repository` in package.json, README, health/doctor block. The
+   skill/README must state, per provider, whether the browser flow is production or
+   best-effort (template-primary) based on the Phase 2/3 P2a gate outcome.
 
 ## 15. Acceptance Criteria → Where Satisfied
 
@@ -614,6 +729,9 @@ existing daemon-wiring + `stubBrowser` approach.
 - `doctor` reports whether agentic browser flows are available → §11.
 - Skill file is enough for Claude/Copilot/Codex to run the workflow without docs →
   §10.
+- **[P2a] First supported provider browser flows actually auto-resume on the real
+  sites**, or are explicitly recorded as best-effort with `template run` documented
+  as primary → §13 validation gate, §14 phases 2–3, skill/README outcome statement.
 
 ## 16. Decisions & Assumptions
 
@@ -622,7 +740,14 @@ existing daemon-wiring + `stubBrowser` approach.
   auto-resume. (Departs from current inject auto-approving development secrets;
   intentional.)
 - Handles are referenced by **label**; re-marking a label replaces it; label
-  namespace is per browser session; no selector marking in v1.
+  namespace is per browser session; no selector marking in v1. Two marking
+  primitives: `mark focused` (focusable fields) and `mark next-click` (the next click
+  is captured and **prevented**, for non-focusable buttons/reveal/hide controls).
+- `reveal-capture` supports three capture modes (`field`, `container`,
+  `focused-after-reveal`) because real UIs often create/replace the secret element
+  only after reveal. Post-reveal element resolution is **daemon-only** and gated by a
+  DOM-containment proof against the human-approved container plus a strict
+  single-candidate (no ambiguity) rule; anything else fails closed.
 - Auto-resume bypasses `blankAllPages` (the proof already established the page is
   clean and is the desired post-transaction state). `/v1/blind/end` is unchanged.
 - Absence proof matches the **raw** secret only; transformed/derived forms are out of
@@ -630,8 +755,14 @@ existing daemon-wiring + `stubBrowser` approach.
 - Closed shadow roots / canvas are undetectable to page JS (including the agent's);
   the proof's guarantee is scoped to daemon-observable surfaces plus a required
   success condition; uncertainty ⇒ stay blind.
-- Templates: only stdin/env-safe CLIs ship; `railway`/`netlify`/`clerk` deferred with
-  rationale.
+- Templates: only stdin- or `tmp_env_file_0600`-safe CLIs ship;
+  `railway`/`netlify`/`clerk` deferred with rationale. `/dev/stdin` is not assumed
+  portable; a `0600` daemon-owned temp env-file (unlinked in `finally`) is the
+  sanctioned non-stdin delivery and still satisfies no-argv-leak.
+- **[P2a]** The absence proof stays conservatively fail-closed; whether auto-resume
+  *succeeds in practice* on real provider pages is a release gate (§13/§14), and a
+  provider whose pages force manual recovery is shipped as best-effort with templates
+  documented as primary — not a reason to weaken the proof.
 - `package.json` gains a `repository` field; raw skill URL derived from it,
   branch/path overridable.
 - Spec lives under `docs/superpowers/` which `package.json` `files` already excludes
@@ -639,9 +770,11 @@ existing daemon-wiring + `stubBrowser` approach.
 
 ## 17. Out of Scope (v1)
 
-- Selector-based or coordinate-based marking.
+- Selector-based or coordinate-based marking (only `focused` / `next-click`).
 - Proactive (event-driven) handle invalidation beyond validate-on-use + TTL.
 - Templates whose CLI forces the secret onto argv.
 - A generic "submit action" DSL — only "click the marked submit/reveal/hide handle".
+- Multi-element / recursive container resolution heuristics beyond
+  "exactly one unambiguous candidate inside the approved container".
 - Detecting transformed/derived secret forms in the absence proof.
 - Persisting handles across daemon or browser restarts.
