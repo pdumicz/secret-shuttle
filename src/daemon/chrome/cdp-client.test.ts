@@ -36,3 +36,23 @@ test("on() receives method events", async () => {
   t.emit("message", { method: "Target.targetCreated", params: { hello: "world" } });
   assert.deepEqual(received, { hello: "world" });
 });
+
+test("off() removes a listener so later events are not delivered", () => {
+  const t = new FakeTransport();
+  const c = new CdpClient(t);
+  let count = 0;
+  const fn = (): void => { count += 1; };
+  c.on("Target.targetCreated", fn);
+  t.emit("message", { method: "Target.targetCreated", params: {} });
+  c.off("Target.targetCreated", fn);
+  t.emit("message", { method: "Target.targetCreated", params: {} });
+  assert.equal(count, 1);
+});
+
+test("off() is a no-op for an unknown event or unregistered fn", () => {
+  const t = new FakeTransport();
+  const c = new CdpClient(t);
+  assert.doesNotThrow(() => c.off("Nope.event", () => {}));
+  c.on("E", () => {});
+  assert.doesNotThrow(() => c.off("E", () => {}));
+});

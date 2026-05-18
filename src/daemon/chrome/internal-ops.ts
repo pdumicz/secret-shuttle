@@ -307,23 +307,28 @@ export class CdpBrowserOps implements BrowserOps {
     }
   }
 
-  // CdpClient.on has no off(); guard with a one-shot flag and a timeout race.
-  // Filter by sessionId — listeners are keyed only by method, so without this a
-  // pick on a different page target could wrongly resolve this wait.
+  // Filter by sessionId — CdpClient keys listeners only by method, so without
+  // this a pick on a different page target could wrongly resolve this wait.
+  // The listener is removed via cdp.off() on both settle paths so repeated
+  // markPick calls do not accumulate dead listeners over a browser session.
   private waitForEvent<T>(event: string, sessionId: string, timeoutMs: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       let done = false;
-      const timer = setTimeout(() => {
-        if (done) return;
-        done = true;
-        reject(new ShuttleError("mark_pick_timeout", "No element picked before timeout."));
-      }, timeoutMs);
-      this.cdp.on(event, (params, sid) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const listener = (params: unknown, sid?: string): void => {
         if (done || sid !== sessionId) return;
         done = true;
         clearTimeout(timer);
+        this.cdp.off(event, listener);
         resolve(params as T);
-      });
+      };
+      timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        this.cdp.off(event, listener);
+        reject(new ShuttleError("mark_pick_timeout", "No element picked before timeout."));
+      }, timeoutMs);
+      this.cdp.on(event, listener);
     });
   }
 
@@ -511,6 +516,7 @@ export class CdpBrowserOps implements BrowserOps {
     };
   }
 
+  // Precondition: callers clamp timeoutMs; the /v1/browser/mark route enforces the 1s..120s bound.
   async markPick(timeoutMs: number): Promise<HandleDescriptor> {
     const page = await this.pickPage();
     const sessionId = await this.attach(page.id);
@@ -571,6 +577,8 @@ export class CdpBrowserOps implements BrowserOps {
       const loc = await this.evaluate<{ domain: string }>(h.target_id, "({domain: location.hostname})");
       const domain = loc.domain.toLowerCase();
       const kind = elementKind(meta);
+      // Reseed with the STORED backend_node_id by design (spec §3.4): describeBackendNode already
+      // proved it still resolves; a node swap at the same id is caught via meta-derived fp drift.
       const fp = handleFingerprint(domain, h.target_id, h.backend_node_id, meta, kind);
       if (domain !== h.domain || kind !== h.element_kind || fp !== h.handle_fingerprint) {
         throw new ShuttleError("handle_invalid", "Handle no longer matches the marked element.");

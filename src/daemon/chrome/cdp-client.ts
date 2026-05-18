@@ -35,6 +35,13 @@ export class CdpClient {
     this.listeners.set(event, arr);
   }
 
+  off(event: string, fn: (params: unknown, sessionId?: string) => void): void {
+    const arr = this.listeners.get(event);
+    if (arr === undefined) return;
+    const i = arr.indexOf(fn);
+    if (i !== -1) arr.splice(i, 1);
+  }
+
   private onMessage(msg: CdpMessage): void {
     if (typeof msg.id === "number") {
       const p = this.pending.get(msg.id);
