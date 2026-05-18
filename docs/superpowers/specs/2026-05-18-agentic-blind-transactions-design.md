@@ -124,8 +124,8 @@ backend node id. Raw role/name/value is **never** stored or returned — only th
 ### 3.3 CLI
 
 ```
-secret-shuttle browser mark focused   --as <label>
-secret-shuttle browser mark next-click --as <label> [--timeout-ms 30000]
+secret-shuttle browser mark focused --as <label>
+secret-shuttle browser mark pick    --as <label> [--timeout-ms 30000]
 secret-shuttle browser marks
 ```
 
@@ -137,30 +137,28 @@ else `other`):
 
 - **`mark focused`** — reads `document.activeElement` (the same observation-safe path
   `readFocusedFingerprintAndDomain` already uses). Best for focusable fields.
-- **`mark next-click`** — solves the "many buttons are not focusable without
-  activating them" problem. **A `click`-only listener is insufficient:** apps reveal
-  or submit on `pointerdown`/`mousedown`/`pointerup`/`touchstart`/`touchend` or
-  keyboard activation (`keydown` Enter/Space) *before* `click` default handling, so a
-  reveal control could fire **before** blind mode. The model is therefore
-  **whole-activation-gesture suppression**:
-  - The daemon (via its **internal** CDP, not the agent) installs **window-level
-    capture-phase** listeners — which run before any target/app handler — for the
-    entire activation set: `pointerdown, pointerup, mousedown, mouseup, click,
-    dblclick, auxclick, contextmenu, touchstart, touchend, keydown, keypress, keyup`.
-    Every one calls `preventDefault()`, `stopPropagation()`, **and**
-    `stopImmediatePropagation()`, so no app handler ever sees the gesture and the
-    control **cannot activate** (no reveal, no submit, no navigation).
-  - Element identity is derived from the **first** gesture event: for
-    pointer/mouse/touch, the daemon hit-tests the event's viewport coordinates via
-    CDP `DOM.getNodeForLocation` (compositor-level — passes through shadow DOM and
-    iframes, not subject to JS event retargeting); for keyboard activation it uses
-    the currently focused node. The handle is computed from that backend node.
-  - All subsequent events of the gesture remain suppressed until the listeners are
-    **fully removed** (guaranteed cleanup on capture, timeout, error, or detach).
-  - **Fail closed:** if any event in the activation set is non-cancelable, if the
-    capture listeners cannot be installed, or if hit-testing fails, the operation
-    aborts with **no handle** rather than risk activating a reveal/submit control.
-    Bounded by `--timeout-ms` (default 30000, hard cap 120000); timeout → no handle.
+- **`mark pick`** — solves the "many buttons are not focusable without activating
+  them" problem **without dispatching any page event at all**. A JS-listener model
+  (even window capture-phase) is rejected: capture listeners fire in registration
+  order, so an app's *earlier-registered* `window`-capture handler on `pointerdown`
+  could still reveal/submit before the daemon's listener runs. The daemon therefore
+  uses the browser's own element picker, not page events:
+  - The daemon (via its **internal** CDP) enables `Overlay.setInspectMode`
+    `{ mode: "searchForNode", highlightConfig: {...} }`. Chrome highlights the
+    element under the cursor and, on the user's pick click, emits
+    `Overlay.inspectNodeRequested` with a `backendNodeId`. **That pick click is
+    consumed by the browser/overlay layer — it is never dispatched to the page**, so
+    no `pointerdown`/`mousedown`/`click`/keyboard handler (including app
+    window-capture handlers) can fire. This is the same browser-level mechanism
+    DevTools "Inspect element" uses.
+  - On `inspectNodeRequested` the daemon resolves the `backendNodeId` (passes through
+    shadow DOM and iframes — it is a compositor-level pick), computes the handle, and
+    immediately disables inspect mode (`Overlay.setInspectMode {mode:"none"}`,
+    guaranteed in cleanup on pick, timeout, error, or detach).
+  - **Fail closed:** if `Overlay`/`DOM` cannot be enabled, the overlay is
+    unsupported, or no node is picked within `--timeout-ms` (default 30000, hard cap
+    120000), the operation aborts with **no handle**. No page event is ever
+    dispatched, so there is no activation-before-blind hazard to suppress.
   - Only the hashed fingerprint and non-secret metadata are stored — never any value
     or raw DOM text.
 
@@ -312,11 +310,18 @@ and may auto-resume observation. Reusing the existing `inject_into_field`
   thereby allow `inject_submit`. Existing secrets (whose stored `allowed_actions`
   predate this action) are **denied** `inject-submit` until explicitly granted —
   fail-closed, no migration that widens scope.
-- **Default for new secrets:** the default `allowed_actions` set used by
-  `vault.upsertSecret` ([src/vault/vault.ts](../../../src/vault/vault.ts)) is
-  extended to include `inject_submit` so newly created secrets behave like today's
-  defaults (creator opted into the default set). Existing stored records are left
-  exactly as-is (deny).
+- **Default applies to first creation only, not overwrite.** The default
+  `allowed_actions` set used by `vault.upsertSecret`
+  ([src/vault/vault.ts:83](../../../src/vault/vault.ts)) is extended to include
+  `inject_submit` so **newly created** secrets behave like today's defaults. But
+  `upsertSecret` today re-applies the default set whenever `allowedActions` is
+  omitted — **including on overwrite/force rotate**. That is a silent-grant hole: a
+  `generate --force`/rotate of a pre-existing secret would acquire `inject_submit`.
+  **Required change:** on overwrite of an existing record, `upsertSecret` must
+  **preserve the existing `allowed_actions`** when the caller omits `allowedActions`;
+  the extended default set is used **only** when no prior record exists. An explicit
+  caller-supplied `allowedActions` still wins (that is the explicit opt-in path).
+  This is a behavioral change to `upsertSecret` with its own regression test (§13).
 - **Granting it to an existing secret:** via the existing secret-(re)creation/update
   path that sets `allowed_actions`; the exact surface (a `--allow-action` flag vs.
   re-create) is a Phase-2 plan task to confirm against the current CLI, but the
@@ -497,7 +502,7 @@ or fail-closed:
 fields are added to `bindingsMatch` (strict equality, consistent with the existing
 function). Display-only fields are excluded from matching, like
 `page_title`/`page_url_host` today. (Whether a handle was created via `mark focused`
-or `mark next-click` is **not** part of the binding — only the resulting element's
+or `mark pick` is **not** part of the binding — only the resulting element's
 fingerprint is.)
 
 `ui.html` `human` map gains:
@@ -574,7 +579,10 @@ CLI only accepts `--env-file <path>` (not true stdin), the daemon:
    world-readable), filename randomized;
 2. writes the file with mode `0600` (`O_CREAT|O_EXCL`, `mode:0o600`), content
    `NAME=VALUE`;
-3. passes the path as the env-file argument (secret never in argv/process table);
+3. passes **the path** as the `--env-file <path>` argument. The path therefore
+   *does* appear in the child's argv — that is expected and harmless: the path is a
+   random, non-secret temp filename. The **secret value** never appears in argv or
+   the process table (it is only inside the `0600` file);
 4. **unlinks it in a `finally`** and scrubs the buffer.
 
 `finally` covers normal errors/throws but **cannot** cover SIGKILL/OOM/host crash, so
@@ -621,7 +629,7 @@ manual**. **Retire `skills/claude-code/SKILL.md`** (replace with the new path; u
 - run `secret-shuttle doctor --json` first; start daemon/browser and unlock if needed
 - prefer `template run` over generic browser ops
 - `browser mark focused --as <label>` for focusable fields and
-  `browser mark next-click --as <label>` for buttons/reveal/hide controls, **before**
+  `browser mark pick --as <label>` for buttons/reveal/hide controls, **before**
   blind mode
 - use `inject-submit` / `reveal-capture` for the secret-bearing transaction
 - never screenshot / DOM-read / read page text / read network bodies / read clipboard
@@ -692,19 +700,27 @@ agent-reachable:
   page_url_host, page_title, backend_node_id, handle_fingerprint, element_kind}`
   (reuses `readFocusedFingerprintAndDomain` + `getFocusedBackendNodeId`, adds role/
   accessible-name into the fingerprint seed and `element_kind` derivation).
-- `markNextClick(timeoutMs): Promise<HandleDescriptor>` — installs window
-  capture-phase suppressors for the **full activation set** (§3.3), derives identity
-  from the first gesture event via `DOM.getNodeForLocation` (pointer/mouse/touch) or
-  the focused node (keyboard), keeps suppressing until listeners are fully removed
-  (guaranteed cleanup), and returns the same descriptor shape. Fail-closed (no
-  handle) on non-cancelable event, install failure, hit-test failure, or timeout.
+- `markPick(timeoutMs): Promise<HandleDescriptor>` — enables
+  `Overlay.setInspectMode {mode:"searchForNode"}`, awaits one
+  `Overlay.inspectNodeRequested` (backend node id; the pick click is browser-consumed
+  and never dispatched to the page), computes the descriptor, and disables inspect
+  mode in guaranteed cleanup. Fail-closed (no handle) if `Overlay`/`DOM` cannot be
+  enabled, overlay unsupported, or timeout (§3.3).
 - `revalidateHandle(h: BrowserHandle): Promise<void>` — §3.4; throws `ShuttleError`
   fail-closed on any mismatch.
 - `injectIntoBackendNode(h, value): Promise<InjectResult>` — `DOM.focus`
   `{backendNodeId}`, assert `document.activeElement` resolves to the same backend
   node, then the existing `WRITE_SCRIPT` path.
-- `clickBackendNode(h): Promise<void>` — resolve node → `Runtime.callFunctionOn`
-  `function(){ this.click(); }` on the resolved object id; fail-closed on any error.
+- `clickBackendNode(h): Promise<void>` — **trusted browser input**, not JS
+  `.click()` (untrusted synthetic `click` only; many SaaS controls need real pointer
+  events / `isTrusted`). Used only **after blind starts** (agent severed), so trusted
+  input is safe: `DOM.scrollIntoViewIfNeeded` → resolve the box via
+  `DOM.getContentQuads`/`DOM.getBoxModel` → pick a point inside the visible quad →
+  **hit-test that point with `DOM.getNodeForLocation` and require it to resolve to
+  the handle's backend node** (occlusion/overlay guard) → `Input.dispatchMouseEvent`
+  `mouseMoved`→`mousePressed`→`mouseReleased` (button `left`, `clickCount:1`) at the
+  point. Fail-closed on missing/zero-area/off-screen box, hit-test mismatch, or any
+  CDP error. The reveal/hide clicks in §6 use this same primitive.
 - `readBackendNodeValue(h): Promise<string>` — daemon-only field read for
   `reveal-capture` mode `field` (value never returned to the agent layer).
 - `resolveWithinContainer(container: BrowserHandle, mode): Promise<{ value: string }>`
@@ -738,12 +754,15 @@ existing daemon-wiring + `stubBrowser` approach.
   stays active + `submitted:"unknown"`; success+proof → `blind_mode:false` and a
   `blind_auto_resume` audit record (distinct from `blind_end`); proof inconclusive →
   stays blind + `manual_recovery_required`.
-- **`mark next-click` tests:** activation is suppressed for the **whole gesture** —
-  `pointerdown`/`mousedown`/`pointerup`/`touchstart`/`touchend` and keyboard
-  Enter/Space never reach an app handler (not just `click`); a reveal-style handler
-  bound on `pointerdown` does **not** fire; identity derived via hit-test; listeners
-  fully removed after capture and on timeout; timeout/non-cancelable/install-failure
-  → no handle; produces the same handle record as `mark focused`.
+- **`mark pick` tests:** uses `Overlay.setInspectMode`; the pick produces a backend
+  node id via `Overlay.inspectNodeRequested` with **no page event dispatched** (a
+  pre-registered window-capture `pointerdown`/`click` handler on the page does
+  **not** fire — proving the listener-ordering hazard is gone); inspect mode is
+  disabled in cleanup on pick/timeout/error; timeout/overlay-unsupported → no handle;
+  produces the same handle record as `mark focused`.
+- **`clickBackendNode` trusted-input tests:** uses `Input.dispatchMouseEvent` (not JS
+  `.click()`); scrolls into view; fail-closed when the click point hit-tests to a
+  different backend node (occlusion guard) and on missing/zero-area box.
 - **`reveal-capture` route tests:** all three capture modes (`field`, `container`,
   `focused-after-reveal`); secret-holder predicate rejects a button/link/label and
   `focused-after-reveal` with focus left on the reveal button → fail closed;
@@ -760,8 +779,10 @@ existing daemon-wiring + `stubBrowser` approach.
   auto-resume disclosure for both actions.
 - **Templates:** registry lists the three shipped ids; `validateParams` rejects
   malformed params; deferred ids are absent from the registry. **`tmp_env_file_0600`
-  security tests:** temp dir is `0700`, file is `0600`, file path never appears in
-  child argv, file is unlinked after a normal run, and the **startup + periodic
+  security tests:** temp dir is `0700`, file is `0600`, the **secret value** never
+  appears in child argv or env (the `--env-file` path *does* appear and must be a
+  random non-secret name), file is unlinked after a normal run, and the **startup +
+  periodic
   sweep** removes a planted stale temp file (crash-path coverage).
 - **Installers:** idempotent marker replacement (run twice, single block); full-file
   targets overwritten; `print-skill-url` output shape.
@@ -781,8 +802,8 @@ existing daemon-wiring + `stubBrowser` approach.
 
 ## 14. Build Order (independently shippable phases)
 
-1. **Handles** — store + `browser mark focused`/`mark next-click`/`marks` +
-   `BrowserOps.markFocused`/`markNextClick`/`revalidateHandle` + tests.
+1. **Handles** — store + `browser mark focused`/`mark pick`/`marks` +
+   `BrowserOps.markFocused`/`markPick`/`revalidateHandle` + tests.
 2. **inject-submit** — binding/UI extension, route, `injectIntoBackendNode`/
    `clickBackendNode`, absence proof, audited auto-resume, tests; then the **[P2a]
    real-page validation gate** for Vercel before declaring the browser flow
@@ -827,10 +848,15 @@ existing daemon-wiring + `stubBrowser` approach.
   secrets get it via the extended default set (§4.4).
 - Handles are referenced by **label**; re-marking a label replaces it; label
   namespace is per browser session; no selector marking in v1. Two marking
-  primitives: `mark focused` (focusable fields) and `mark next-click`, which
-  suppresses the **entire activation gesture** (pointer/mouse/touch/keyboard) at
-  window capture phase so a reveal/submit control cannot fire during marking;
-  identity comes from a CDP hit-test, not the page event.
+  primitives: `mark focused` (focusable fields) and `mark pick`, which uses the
+  browser's own `Overlay.setInspectMode` element picker — the pick click is consumed
+  by the browser and **no page event is dispatched**, so an app's earlier-registered
+  window-capture handler cannot reveal/submit during marking. (A JS-listener
+  suppression model was rejected for exactly that ordering hazard.)
+- Daemon-driven clicks (submit/reveal/hide) use **trusted CDP `Input` events** at the
+  hit-tested element box, not JS `.click()` — they run after blind starts so trusted
+  input is safe, and many SaaS controls require real pointer events / `isTrusted`.
+  Occlusion guard: the click point must hit-test back to the handle's backend node.
 - `reveal-capture` supports three capture modes (`field`, `container`,
   `focused-after-reveal`) because real UIs often create/replace the secret element
   only after reveal. Post-reveal element resolution is **daemon-only** and gated by a
@@ -860,7 +886,7 @@ existing daemon-wiring + `stubBrowser` approach.
 
 ## 17. Out of Scope (v1)
 
-- Selector-based or coordinate-based marking (only `focused` / `next-click`).
+- Selector-based or coordinate-based marking (only `focused` / `pick`).
 - Proactive (event-driven) handle invalidation beyond validate-on-use + TTL.
 - Templates whose CLI forces the secret onto argv.
 - A generic "submit action" DSL — only "click the marked submit/reveal/hide handle".
