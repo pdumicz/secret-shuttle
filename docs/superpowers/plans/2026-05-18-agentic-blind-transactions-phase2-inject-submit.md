@@ -25,12 +25,14 @@ The spec (§14) defines five independently shippable phases. Phase 1 (Opaque Bro
 - **Modify** `src/vault/types.ts` — add `"inject_submit"` to the `SecretAction` union.
 - **Modify** `src/vault/vault.ts` — extend `DEFAULT_ACTIONS` with `inject_submit`; change `upsertSecret` so an overwrite **preserves the existing `allowed_actions`** when the caller omits them (extended default applies to brand-new records only); an explicit caller-supplied `allowedActions` still wins.
 - **Create** `src/vault/inject-submit-action.test.ts` — `SecretAction` default/overwrite-preserve/legacy-deny unit tests.
-- **Modify** `src/daemon/api/routes/secrets.ts` — accept an optional validated `allowed_actions` in the `generate` route and pass it to `upsertSecret` (the explicit opt-in surface, §4.4); `export` the existing `enforceDomain` so the new route reuses it.
+- **Modify** `src/daemon/approvals/store.ts` — add `"inject_submit"` to the `ApprovalBinding.action` union; add non-display `submit_fingerprint`/`success_condition`/`auto_resume`/`allowed_actions` (added to `bindingsMatch`; `allowed_actions` via the reused `domainSet` stable-set helper) and display-only `field_handle_label`/`submit_handle_label`.
+- **Create** `src/daemon/approvals/binding-inject-submit.test.ts` — `bindingsMatch` new-field unit tests (incl. `allowed_actions` match + order-insensitivity).
+- **Modify** `src/daemon/api/routes/secrets.ts` — validate `allowed_actions` **before** `requireApproval`, carry it on the `generate` `ApprovalBinding`, pass it to `upsertSecret` (the explicit opt-in surface, §4.4); `export` the existing `enforceDomain` so the new route reuses it.
 - **Modify** `src/cli/commands/generate.ts` — add a repeatable `--allow-action <action>` flag (explicit opt-in surface, §4.4).
-- **Modify** `src/daemon/approvals/store.ts` — add `"inject_submit"` to the `ApprovalBinding.action` union; add non-display `submit_fingerprint`/`success_condition`/`auto_resume` (added to `bindingsMatch`) and display-only `field_handle_label`/`submit_handle_label` (excluded from matching).
-- **Create** `src/daemon/approvals/binding-inject-submit.test.ts` — `bindingsMatch` new-field unit tests.
-- **Modify** `src/daemon/approvals/ui.html` — add the `inject_submit` plain-language sentence, the prominent auto-resume disclosure line, the success-condition row, and the submit fingerprint in technical details.
+- **Modify** `src/daemon/approvals/ui-server.ts` — serialize the new grant fields (`submit_fingerprint`/`success_condition`/`allowed_actions`/`field_handle_label`/`submit_handle_label`) so the live UI shows real values (the actual runtime fix; a static-HTML test alone misses this).
+- **Modify** `src/daemon/approvals/ui.html` — add the `inject_submit` plain-language sentence, the prominent auto-resume disclosure line, the success-condition row, the action-scope row, and the submit fingerprint in technical details.
 - **Create** `src/daemon/approvals/ui-inject-submit.test.ts` — asserts `ui.html` contains the new copy.
+- **Create** `src/daemon/approvals/ui-grant-json.test.ts` — runtime test: the `/ui/approvals/:id` JSON serializes the new fields with real values.
 - **Modify** `src/daemon/chrome/internal-ops.ts` — add `BackendNodeRef`/`AbsenceProofResult` types; extend `BrowserOps` + `CdpBrowserOps` with `observeText`, `proveAbsence`, `injectIntoBackendNode`, `clickBackendNode`.
 - **Create** `src/daemon/chrome/absence-proof.test.ts` — scripted-CDP-transport tests for `proveAbsence`/`observeText`.
 - **Create** `src/daemon/chrome/click-backend-node.test.ts` — scripted-CDP-transport tests for `clickBackendNode` (trusted input + occlusion guard) and `injectIntoBackendNode` (focus assertion).
@@ -215,12 +217,188 @@ git commit -m "feat(inject-submit): add inject_submit SecretAction; preserve act
 
 ---
 
-### Task 2: Explicit opt-in surface — `generate` route + CLI `--allow-action`
+### Task 2: Extend `ApprovalBinding` + `bindingsMatch`
 
 **Files:**
-- Modify: `src/daemon/api/routes/secrets.ts:17-27` (`GenerateBody`), `:104-113` (generate `upsertSecret` call), `:361` (`export function enforceDomain`)
+- Modify: `src/daemon/approvals/store.ts:12-28` (`ApprovalBinding`), `:118-133` (`bindingsMatch`)
+- Test: `src/daemon/approvals/binding-inject-submit.test.ts`
+
+> This task precedes the `generate` task because the `generate` approval binding (Task 3) now carries `allowed_actions`, which must exist on `ApprovalBinding` first.
+
+- [ ] **Step 1: Write the failing binding test**
+
+Create `src/daemon/approvals/binding-inject-submit.test.ts`:
+```ts
+import assert from "node:assert/strict";
+import test from "node:test";
+import { ApprovalStore, type ApprovalBinding } from "./store.js";
+
+function base(): ApprovalBinding {
+  return {
+    action: "inject_submit",
+    ref: "ss://stripe/prod/WH",
+    environment: "production",
+    destination_domain: "vercel.com",
+    target_id: "T-1",
+    field_fingerprint: "sha256:field",
+    template_id: null,
+    template_params: null,
+    submit_fingerprint: "sha256:submit",
+    success_condition: "Environment Variable Added",
+    auto_resume: true,
+    field_handle_label: "value-field",
+    submit_handle_label: "submit-button",
+  };
+}
+
+test("a matching inject_submit binding round-trips through create→consume", () => {
+  const store = new ApprovalStore();
+  const g = store.create(base());
+  store.approve(g.id);
+  const used = store.consume(g.id, base());
+  assert.equal(used.status, "used");
+});
+
+test("a different submit_fingerprint is an approval_mismatch", () => {
+  const store = new ApprovalStore();
+  const g = store.create(base());
+  store.approve(g.id);
+  assert.throws(
+    () => store.consume(g.id, { ...base(), submit_fingerprint: "sha256:OTHER" }),
+    (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
+  );
+});
+
+test("a different success_condition is an approval_mismatch", () => {
+  const store = new ApprovalStore();
+  const g = store.create(base());
+  store.approve(g.id);
+  assert.throws(
+    () => store.consume(g.id, { ...base(), success_condition: "Something Else" }),
+    (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
+  );
+});
+
+test("display-only handle labels are NOT part of matching", () => {
+  const store = new ApprovalStore();
+  const g = store.create(base());
+  store.approve(g.id);
+  const used = store.consume(g.id, { ...base(), field_handle_label: "renamed", submit_handle_label: "renamed2" });
+  assert.equal(used.status, "used");
+});
+
+test("allowed_actions is part of matching (approved scope cannot be swapped); order-insensitive", () => {
+  const store = new ApprovalStore();
+  const gen: ApprovalBinding = {
+    action: "generate", ref: null, planned_ref: "ss://local/dev/K", environment: "development",
+    destination_domain: null, target_id: null, field_fingerprint: null,
+    template_id: null, template_params: null, allowed_domains: [],
+    allowed_actions: ["inject_into_field", "inject_submit"],
+  };
+  const g = store.create(gen);
+  store.approve(g.id);
+  // reordered same set still matches (stable-set comparison)
+  const used = store.consume(g.id, { ...gen, allowed_actions: ["inject_submit", "inject_into_field"] });
+  assert.equal(used.status, "used");
+
+  const g2 = store.create(gen);
+  store.approve(g2.id);
+  assert.throws(
+    () => store.consume(g2.id, { ...gen, allowed_actions: ["inject_into_field"] }),
+    (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
+  );
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `npm run build`
+Expected: FAIL to compile — `Type '"inject_submit"' is not assignable` and `Object literal may only specify known properties` for `submit_fingerprint`/`allowed_actions` (`TS2322`/`TS2353`). That is the expected first failure.
+
+- [ ] **Step 3: Extend the binding type and matcher**
+
+In `src/daemon/approvals/store.ts`, replace the `ApprovalBinding` interface (lines 12-28) with:
+```ts
+export interface ApprovalBinding {
+  action: "inject" | "capture" | "generate" | "compare" | "template" | "blind_end" | "inject_submit";
+  ref: string | null;
+  planned_ref?: string | null;
+  environment: string;
+  destination_domain: string | null;
+  target_id: string | null;
+  field_fingerprint: string | null;
+  template_id: string | null;
+  template_params: Record<string, string> | null;
+  template_binary_path?: string | null;
+  template_binary_sha256?: string | null;
+  allowed_domains?: string[] | null;
+  /** Non-display: part of bindingsMatch (strict equality / stable set). */
+  submit_fingerprint?: string | null;
+  success_condition?: string | null;
+  auto_resume?: boolean | null;
+  /** The action scope the human approves (generate). Part of bindingsMatch as a stable set. */
+  allowed_actions?: string[] | null;
+  /** Display-only context for the human approver. NOT part of bindingsMatch. */
+  page_title?: string | null;
+  page_url_host?: string | null;
+  field_handle_label?: string | null;
+  submit_handle_label?: string | null;
+}
+```
+
+In the same file, replace the `bindingsMatch` function (lines 118-133) with:
+```ts
+function bindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
+  return (
+    a.action === b.action &&
+    a.ref === b.ref &&
+    (a.planned_ref ?? null) === (b.planned_ref ?? null) &&
+    a.environment === b.environment &&
+    a.destination_domain === b.destination_domain &&
+    a.target_id === b.target_id &&
+    a.field_fingerprint === b.field_fingerprint &&
+    a.template_id === b.template_id &&
+    stableStringify(a.template_params) === stableStringify(b.template_params) &&
+    (a.template_binary_path ?? null) === (b.template_binary_path ?? null) &&
+    (a.template_binary_sha256 ?? null) === (b.template_binary_sha256 ?? null) &&
+    domainSet(a.allowed_domains) === domainSet(b.allowed_domains) &&
+    domainSet(a.allowed_actions) === domainSet(b.allowed_actions) &&
+    (a.submit_fingerprint ?? null) === (b.submit_fingerprint ?? null) &&
+    (a.success_condition ?? null) === (b.success_condition ?? null) &&
+    (a.auto_resume ?? null) === (b.auto_resume ?? null)
+  );
+}
+```
+
+> `domainSet` (existing helper at `store.ts:142-144`) is a generic "stable sorted JSON of a `string[]`" that already treats `null`/`undefined` as `[]`. Reuse it for `allowed_actions` — no new helper needed. This makes the human-approved action scope un-swappable between approval and creation (TOCTOU-safe), exactly as `allowed_domains` already is.
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/approvals/binding-inject-submit.test.js`
+Expected: PASS — 5 tests pass.
+
+- [ ] **Step 5: Run the full suite (no regressions)**
+
+Run: `npm test`
+Expected: PASS — existing approval/binding tests unaffected (new fields are optional; `domainSet(undefined)` is `"[]"` on both sides for every pre-existing binding).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/daemon/approvals/store.ts src/daemon/approvals/binding-inject-submit.test.ts
+git commit -m "feat(inject-submit): extend ApprovalBinding (submit_fingerprint/success_condition/auto_resume/allowed_actions) + bindingsMatch"
+```
+
+---
+
+### Task 3: Explicit opt-in surface — `generate` route + CLI `--allow-action`
+
+**Files:**
+- Modify: `src/daemon/api/routes/secrets.ts:17-27` (`GenerateBody`), `:72-95` (validate before binding + add `allowed_actions` to the generate binding), `:104-113` (generate `upsertSecret` call), `:361` (`export function enforceDomain`)
 - Modify: `src/cli/commands/generate.ts`
 - Test: `src/daemon/api/generate-allow-action.test.ts`
+
+> §4.4 requires the human to *see* the true action scope and requires invalid input to be rejected **before** an approval is opened. So `allowed_actions` is validated at the top of the route (before `requireApproval`) and carried on the generate `ApprovalBinding` (matched via Task 2's `bindingsMatch`, surfaced by the UI in Task 4).
 
 - [ ] **Step 1: Write the failing route test**
 
@@ -290,6 +468,20 @@ test("generate rejects an unknown action with bad_request", async () => {
   });
 });
 
+test("invalid allowed_actions is rejected BEFORE an approval is opened (production, no-wait)", async () => {
+  await withDaemon(async ({ port }) => {
+    await call(port, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // production + wait_for_approval:false would return approval_required if
+    // validation ran AFTER requireApproval. It must return bad_request instead.
+    const g = await call(port, "POST", "/v1/secrets/generate", {
+      name: "K4", environment: "production", source: "local",
+      allowed_domains: ["example.com"], allowed_actions: ["nope"], wait_for_approval: false,
+    });
+    assert.equal(g.status, 400);
+    assert.equal((g.body as { error: { code: string } }).error.code, "bad_request");
+  });
+});
+
 test("generate without allowed_actions gets the extended default (includes inject_submit)", async () => {
   await withDaemon(async ({ port, services }) => {
     await call(port, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
@@ -303,11 +495,11 @@ test("generate without allowed_actions gets the extended default (includes injec
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/api/generate-allow-action.test.js`
-Expected: FAIL — first test fails (`allowed_actions` ignored; record has the full default set, not `["inject_into_field"]`).
+Expected: FAIL — the first test fails (`allowed_actions` ignored; record has the full default set, not `["inject_into_field"]`) and the "rejected BEFORE approval" test fails (currently no validation at all).
 
-- [ ] **Step 3: Add the validated passthrough + export `enforceDomain`**
+- [ ] **Step 3: Add validation BEFORE approval, the binding field, the passthrough, and export `enforceDomain`**
 
-In `src/daemon/api/routes/secrets.ts`, add `use-as-stdin`-style action validation. First add this constant immediately **above** `export function registerSecrets(` (after the `interface CompareBody {…}` block):
+In `src/daemon/api/routes/secrets.ts`, add this validation helper immediately **above** `export function registerSecrets(` (after the `interface CompareBody {…}` block):
 ```ts
 const SECRET_ACTIONS = new Set([
   "capture_from_page",
@@ -331,7 +523,19 @@ In the same file, extend the `GenerateBody` interface (lines 17-27) by adding on
   allowed_actions?: string[];
 ```
 
-In the generate route, the `upsertSecret` call is `src/daemon/api/routes/secrets.ts:105-113`. Replace that call with:
+In the generate route, immediately **after** the existing `const effectiveAllowed = (b.allowed_domains ?? []).map(normalizeDomain);` line (currently `secrets.ts:78`) and **before** the production-domain check, insert:
+```ts
+      // Validate BEFORE building the binding / requireApproval (§4.4): a bad
+      // action set must fail fast, never after a human has approved.
+      const requestedActions = validatedActions(b.allowed_actions);
+```
+
+In the same route, the generate `binding` object literal is `secrets.ts:84-95`. Add one line immediately **after** its `allowed_domains: effectiveAllowed,` line:
+```ts
+        ...(requestedActions !== undefined ? { allowed_actions: requestedActions } : {}),
+```
+
+In the generate route, the `upsertSecret` call is `secrets.ts:105-113`. Replace that call with:
 ```ts
       const meta = await services.vault.upsertSecret({
         name: b.name,
@@ -340,7 +544,7 @@ In the generate route, the `upsertSecret` call is `src/daemon/api/routes/secrets
         value,
         ...(b.description !== undefined ? { description: b.description } : {}),
         allowedDomains: effectiveAllowed,
-        ...(validatedActions(b.allowed_actions) !== undefined ? { allowedActions: validatedActions(b.allowed_actions) } : {}),
+        ...(requestedActions !== undefined ? { allowedActions: requestedActions } : {}),
         ...(b.force !== undefined ? { force: b.force } : {}),
       });
 ```
@@ -353,11 +557,11 @@ export function enforceDomain(current: string, allowed: string[], action: string
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/api/generate-allow-action.test.js`
-Expected: PASS — 3 tests pass.
+Expected: PASS — 4 tests pass.
 
 - [ ] **Step 5: Add the CLI flag**
 
-In `src/cli/commands/generate.ts`, add `collectRepeated` to the existing import from `./helpers.js` (it is already imported — confirm the import line reads `import { collectRepeated } from "./helpers.js";`; it does). Add the option after the existing `.option("--allow-domain …)` line:
+In `src/cli/commands/generate.ts`, confirm the existing import line reads `import { collectRepeated } from "./helpers.js";` (it does). Add the option after the existing `.option("--allow-domain …)` line:
 ```ts
     .option("--allow-action <action>", "Allowed secret action (repeatable). Omit to use defaults.", collectRepeated, [])
 ```
@@ -376,169 +580,27 @@ Expected: PASS — help lists `--allow-action <action>`; exit code 0.
 - [ ] **Step 7: Run the full suite (no regressions)**
 
 Run: `npm test`
-Expected: PASS — all tests green.
+Expected: PASS — all tests green (the generate binding now carries `allowed_actions`; retry/consume rebuilds it deterministically so `bindingsMatch` still holds).
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add src/daemon/api/routes/secrets.ts src/cli/commands/generate.ts src/daemon/api/generate-allow-action.test.ts
-git commit -m "feat(inject-submit): explicit --allow-action opt-in surface; export enforceDomain"
+git commit -m "feat(inject-submit): explicit --allow-action opt-in (validated pre-approval, on the binding); export enforceDomain"
 ```
 
 ---
 
-### Task 3: Extend `ApprovalBinding` + `bindingsMatch`
+### Task 4: Approval UI — serialize the new fields + `inject_submit` plain language + auto-resume disclosure
 
 **Files:**
-- Modify: `src/daemon/approvals/store.ts:12-28` (`ApprovalBinding`), `:118-133` (`bindingsMatch`)
-- Test: `src/daemon/approvals/binding-inject-submit.test.ts`
+- Modify: `src/daemon/approvals/ui-server.ts:32-50` (the grant→JSON projection — **the actual runtime fix**: without this, `ui.html` reads `undefined` and shows `?`)
+- Modify: `src/daemon/approvals/ui.html:30-37` (the `human` map), `:45` (action-scope row), `:49-56` (success marker + technical details + warning)
+- Test: `src/daemon/approvals/ui-inject-submit.test.ts` (static HTML), `src/daemon/approvals/ui-grant-json.test.ts` (runtime JSON — proves serialization)
 
-- [ ] **Step 1: Write the failing binding test**
+> The static-HTML test alone is insufficient: it passes even if `ui-server.ts` never serializes the new fields, so at runtime the approval UI would silently show `?` for the labels and omit the success marker / submit fingerprint. Both the serializer change **and** a JSON-level test are required.
 
-Create `src/daemon/approvals/binding-inject-submit.test.ts`:
-```ts
-import assert from "node:assert/strict";
-import test from "node:test";
-import { ApprovalStore, type ApprovalBinding } from "./store.js";
-
-function base(): ApprovalBinding {
-  return {
-    action: "inject_submit",
-    ref: "ss://stripe/prod/WH",
-    environment: "production",
-    destination_domain: "vercel.com",
-    target_id: "T-1",
-    field_fingerprint: "sha256:field",
-    template_id: null,
-    template_params: null,
-    submit_fingerprint: "sha256:submit",
-    success_condition: "Environment Variable Added",
-    auto_resume: true,
-    field_handle_label: "value-field",
-    submit_handle_label: "submit-button",
-  };
-}
-
-test("a matching inject_submit binding round-trips through create→consume", () => {
-  const store = new ApprovalStore();
-  const g = store.create(base());
-  store.approve(g.id);
-  const used = store.consume(g.id, base());
-  assert.equal(used.status, "used");
-});
-
-test("a different submit_fingerprint is an approval_mismatch", () => {
-  const store = new ApprovalStore();
-  const g = store.create(base());
-  store.approve(g.id);
-  assert.throws(
-    () => store.consume(g.id, { ...base(), submit_fingerprint: "sha256:OTHER" }),
-    (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
-  );
-});
-
-test("a different success_condition is an approval_mismatch", () => {
-  const store = new ApprovalStore();
-  const g = store.create(base());
-  store.approve(g.id);
-  assert.throws(
-    () => store.consume(g.id, { ...base(), success_condition: "Something Else" }),
-    (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
-  );
-});
-
-test("display-only handle labels are NOT part of matching", () => {
-  const store = new ApprovalStore();
-  const g = store.create(base());
-  store.approve(g.id);
-  const used = store.consume(g.id, { ...base(), field_handle_label: "renamed", submit_handle_label: "renamed2" });
-  assert.equal(used.status, "used");
-});
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `npm run build`
-Expected: FAIL to compile — `Type '"inject_submit"' is not assignable` and `Object literal may only specify known properties` for `submit_fingerprint` (`TS2322`/`TS2353`). That is the expected first failure.
-
-- [ ] **Step 3: Extend the binding type and matcher**
-
-In `src/daemon/approvals/store.ts`, replace the `ApprovalBinding` interface (lines 12-28) with:
-```ts
-export interface ApprovalBinding {
-  action: "inject" | "capture" | "generate" | "compare" | "template" | "blind_end" | "inject_submit";
-  ref: string | null;
-  planned_ref?: string | null;
-  environment: string;
-  destination_domain: string | null;
-  target_id: string | null;
-  field_fingerprint: string | null;
-  template_id: string | null;
-  template_params: Record<string, string> | null;
-  template_binary_path?: string | null;
-  template_binary_sha256?: string | null;
-  allowed_domains?: string[] | null;
-  /** Non-display: part of bindingsMatch (strict equality). */
-  submit_fingerprint?: string | null;
-  success_condition?: string | null;
-  auto_resume?: boolean | null;
-  /** Display-only context for the human approver. NOT part of bindingsMatch. */
-  page_title?: string | null;
-  page_url_host?: string | null;
-  field_handle_label?: string | null;
-  submit_handle_label?: string | null;
-}
-```
-
-In the same file, replace the `bindingsMatch` function (lines 118-133) with:
-```ts
-function bindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
-  return (
-    a.action === b.action &&
-    a.ref === b.ref &&
-    (a.planned_ref ?? null) === (b.planned_ref ?? null) &&
-    a.environment === b.environment &&
-    a.destination_domain === b.destination_domain &&
-    a.target_id === b.target_id &&
-    a.field_fingerprint === b.field_fingerprint &&
-    a.template_id === b.template_id &&
-    stableStringify(a.template_params) === stableStringify(b.template_params) &&
-    (a.template_binary_path ?? null) === (b.template_binary_path ?? null) &&
-    (a.template_binary_sha256 ?? null) === (b.template_binary_sha256 ?? null) &&
-    domainSet(a.allowed_domains) === domainSet(b.allowed_domains) &&
-    (a.submit_fingerprint ?? null) === (b.submit_fingerprint ?? null) &&
-    (a.success_condition ?? null) === (b.success_condition ?? null) &&
-    (a.auto_resume ?? null) === (b.auto_resume ?? null)
-  );
-}
-```
-
-- [ ] **Step 4: Run the test to verify it passes**
-
-Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/approvals/binding-inject-submit.test.js`
-Expected: PASS — 4 tests pass.
-
-- [ ] **Step 5: Run the full suite (no regressions)**
-
-Run: `npm test`
-Expected: PASS — existing approval/binding tests unaffected (new fields are optional and only add equality clauses that are `null === null` for existing bindings).
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/daemon/approvals/store.ts src/daemon/approvals/binding-inject-submit.test.ts
-git commit -m "feat(inject-submit): extend ApprovalBinding (submit_fingerprint/success_condition/auto_resume) + bindingsMatch"
-```
-
----
-
-### Task 4: Approval UI — `inject_submit` plain language + auto-resume disclosure
-
-**Files:**
-- Modify: `src/daemon/approvals/ui.html:30-37` (the `human` map), `:54-56` (technical details + warning)
-- Test: `src/daemon/approvals/ui-inject-submit.test.ts`
-
-- [ ] **Step 1: Write the failing UI-content test**
+- [ ] **Step 1: Write the failing static-HTML test AND the runtime JSON test**
 
 Create `src/daemon/approvals/ui-inject-submit.test.ts`:
 ```ts
@@ -562,26 +624,105 @@ test("ui.html renders the explicit auto-resume disclosure for inject_submit", as
   assert.match(html, /auto-resume observation only if the secret is verified gone/i);
 });
 
-test("ui.html shows the success condition and the submit fingerprint", async () => {
+test("ui.html shows the success condition, the submit fingerprint, and an action-scope row", async () => {
   const html = await readFile(UI, "utf8");
   assert.match(html, /success_condition/);
   assert.match(html, /submit_fingerprint/);
+  assert.match(html, /allowed_actions/);
 });
 ```
 
-> Note: copy `ui.html` into `dist/` is handled by the build (the daemon serves it from source path at runtime; this test reads the **source** `ui.html` next to the compiled test via the same relative layout — `src/daemon/approvals/ui.html`). The test resolves `ui.html` relative to the compiled test file in `dist/daemon/approvals/`, so the build must place `ui.html` there. Confirm in Step 4 that `npm run build` copies it; if it does not, the daemon's existing `ui-server.ts` reveals the canonical path — match it. (Phase-1 `npm run build` already copies `ui.html`; this is verified in Step 4.)
+Create `src/daemon/approvals/ui-grant-json.test.ts`:
+```ts
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { DaemonServer } from "../server.js";
+import { DaemonServices } from "../services.js";
+import { registerRoutes } from "../api/router.js";
 
-- [ ] **Step 2: Run the test to verify it fails**
+async function withDaemon<T>(fn: (ctx: { port: number; services: DaemonServices }) => Promise<T>): Promise<T> {
+  const home = await mkdtemp(path.join(os.tmpdir(), "ss-uij-"));
+  const prev = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  const server = new DaemonServer({ token: "t" });
+  const services = new DaemonServices();
+  let port = 0;
+  registerRoutes(server, services, () => port);
+  ({ port } = await server.listen(0));
+  try {
+    return await fn({ port, services });
+  } finally {
+    await server.close();
+    if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+    else process.env.SECRET_SHUTTLE_HOME = prev;
+    await rm(home, { recursive: true, force: true });
+  }
+}
 
-Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/approvals/ui-inject-submit.test.js`
-Expected: FAIL — `inject_submit:` / disclosure / `success_condition` substrings not present.
+test("the UI grant JSON serializes the inject_submit display + match fields (real values, not ?)", async () => {
+  await withDaemon(async ({ port, services }) => {
+    const g = services.approvals.create({
+      action: "inject_submit", ref: "ss://stripe/prod/WH", environment: "production",
+      destination_domain: "vercel.com", target_id: "T-1", field_fingerprint: "sha256:field",
+      template_id: null, template_params: null, allowed_domains: ["vercel.com"],
+      submit_fingerprint: "sha256:submit", success_condition: "Environment Variable Added",
+      auto_resume: true, field_handle_label: "value-field", submit_handle_label: "submit-btn",
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/ui/approvals/${g.id}?token=${g.ui_token}`);
+    assert.equal(res.status, 200);
+    const j = (await res.json()) as Record<string, unknown>;
+    assert.equal(j.field_handle_label, "value-field");
+    assert.equal(j.submit_handle_label, "submit-btn");
+    assert.equal(j.success_condition, "Environment Variable Added");
+    assert.equal(j.submit_fingerprint, "sha256:submit");
+  });
+});
 
-- [ ] **Step 3: Add the `inject_submit` copy to `ui.html`**
+test("the UI grant JSON serializes allowed_actions for a generate grant", async () => {
+  await withDaemon(async ({ port, services }) => {
+    const g = services.approvals.create({
+      action: "generate", ref: null, planned_ref: "ss://local/dev/K", environment: "development",
+      destination_domain: null, target_id: null, field_fingerprint: null,
+      template_id: null, template_params: null, allowed_domains: [],
+      allowed_actions: ["inject_into_field", "inject_submit"],
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/ui/approvals/${g.id}?token=${g.ui_token}`);
+    const j = (await res.json()) as Record<string, unknown>;
+    assert.deepEqual(j.allowed_actions, ["inject_into_field", "inject_submit"]);
+  });
+});
+```
+
+- [ ] **Step 2: Run both tests to verify they fail**
+
+Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/approvals/ui-inject-submit.test.js dist/daemon/approvals/ui-grant-json.test.js`
+Expected: FAIL — the static test fails on the missing substrings; the JSON test fails because `ui-server.ts` does not yet serialize `field_handle_label`/`submit_handle_label`/`success_condition`/`submit_fingerprint`/`allowed_actions` (those keys are `undefined` in the response).
+
+- [ ] **Step 3: Serialize the new fields in `ui-server.ts`**
+
+In `src/daemon/approvals/ui-server.ts`, the grant JSON projection is lines 32-50. Add these five lines immediately **after** the existing `allowed_domains: grant.allowed_domains ?? null,` line (before `page_title:`):
+```ts
+      submit_fingerprint: grant.submit_fingerprint ?? null,
+      success_condition: grant.success_condition ?? null,
+      allowed_actions: grant.allowed_actions ?? null,
+      field_handle_label: grant.field_handle_label ?? null,
+      submit_handle_label: grant.submit_handle_label ?? null,
+```
+
+- [ ] **Step 4: Add the copy to `ui.html`**
 
 In `src/daemon/approvals/ui.html`, the `human` map is lines 30-37. Replace the `blind_end:` entry line (currently `          blind_end: \`Resume browser observation for ${esc(g.destination_domain ?? "?")}\`,`) with these two lines (adds `inject_submit` before `blind_end`):
 ```js
           inject_submit: `Inject secret ${esc(g.ref ?? "")} into <b>${esc(g.field_handle_label ?? "?")}</b> on ${esc(g.destination_domain ?? "?")}, click <b>${esc(g.submit_handle_label ?? "?")}</b>, wait for success, and automatically resume observation only if the secret is verified gone`,
           blind_end: `Resume browser observation for ${esc(g.destination_domain ?? "?")}`,
+```
+
+In the same file, immediately **after** the existing `Injectable into` row (line 45, the `<div class="row"><span class="label">Injectable into</span><b>${scope}</b></div>` line), add an action-scope row:
+```js
+          ${Array.isArray(g.allowed_actions) && g.allowed_actions.length ? `<div class="row"><span class="label">Action scope</span><b>${g.allowed_actions.map(esc).join(", ")}</b></div>` : ""}
 ```
 
 In the same file, replace the technical-details `<details>` block lines 49-55 (from `<details style="margin-top:.5rem">` through its closing `</details>`) with:
@@ -603,21 +744,21 @@ In the same file, replace the `blind_end` warning line (line 56, `${g.action ===
           ${g.action === "inject_submit" ? `<div class="row" style="color:#c33"><b>Approving authorizes the daemon to auto-resume observation only if the secret is verified gone (success marker observed AND the raw secret absent from every observable surface). If either check does not pass, blind mode stays on.</b></div>` : ""}
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 5: Run both tests to verify they pass**
 
-Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/approvals/ui-inject-submit.test.js`
-Expected: PASS — 3 tests pass. (If the test cannot find `dist/daemon/approvals/ui.html`, inspect `package.json` `build` script / `src/daemon/approvals/ui-server.ts` for the canonical served path and adjust the test's `UI` resolution to that path — the assertion content does not change.)
+Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/approvals/ui-inject-submit.test.js dist/daemon/approvals/ui-grant-json.test.js`
+Expected: PASS — static (3) + JSON (2) tests pass. (If the static test cannot find `dist/daemon/approvals/ui.html`, inspect `package.json` `build` for the `ui.html` copy step / `ui-server.ts` `HTML_PATH` for the canonical path and adjust the test's `UI` resolution — assertion content unchanged. The JSON test does not depend on the file copy.)
 
-- [ ] **Step 5: Run the full suite (no regressions)**
+- [ ] **Step 6: Run the full suite (no regressions)**
 
 Run: `npm test`
 Expected: PASS — all tests green.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/daemon/approvals/ui.html src/daemon/approvals/ui-inject-submit.test.ts
-git commit -m "feat(inject-submit): approval UI plain-language + auto-resume disclosure"
+git add src/daemon/approvals/ui-server.ts src/daemon/approvals/ui.html src/daemon/approvals/ui-inject-submit.test.ts src/daemon/approvals/ui-grant-json.test.ts
+git commit -m "feat(inject-submit): serialize new grant fields in ui-server + approval UI copy/disclosure"
 ```
 
 ---
@@ -637,7 +778,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import { CdpClient, type CdpTransport } from "./cdp-client.js";
-import { CdpBrowserOps } from "./internal-ops.js";
+import { CdpBrowserOps, ABSENCE_SCAN_FN } from "./internal-ops.js";
 
 interface Sent { id?: number; method?: string; params?: Record<string, unknown>; sessionId?: string }
 
@@ -731,6 +872,37 @@ test("observeText ignores matches on a different host", async () => {
   const ops = new CdpBrowserOps(new CdpClient(t));
   assert.equal(await ops.observeText("vercel.com", "Added", 300), false);
 });
+
+test("proveAbsence fails closed PROMPTLY when a CDP call never responds (no route hang)", async () => {
+  // A transport that answers getTargets/attach but never replies to Runtime.evaluate
+  // would hang forever without a bounded send. proveAbsence MUST fail closed within
+  // the per-call bound so the route returns submitted:"unknown" (blind stays active)
+  // instead of hanging the HTTP request indefinitely (§5.3 timeout ⇒ inconclusive).
+  class DeadTransport extends EventEmitter implements CdpTransport {
+    send(msg: Sent): void {
+      if (msg.method === "Target.getTargets") {
+        queueMicrotask(() => this.emit("message", { id: msg.id, result: { targetInfos: [{ targetId: "T-1", type: "page" }] } }));
+        return;
+      }
+      if (msg.method === "Target.attachToTarget") {
+        queueMicrotask(() => this.emit("message", { id: msg.id, result: { sessionId: "S-1" } }));
+        return;
+      }
+      // Runtime.evaluate / detach: never reply → would hang forever unbounded.
+    }
+  }
+  const t = new DeadTransport();
+  const ops = new CdpBrowserOps(new CdpClient(t), 150); // 150ms per-CDP-call bound
+  const started = Date.now();
+  assert.deepEqual(await ops.proveAbsence("whsec_secret"), { passed: false });
+  assert.ok(Date.now() - started < 2_000, "must fail closed promptly, not hang on the dead call");
+});
+
+test("the absence scan fails closed on navigation uncertainty (document not fully loaded)", () => {
+  // The in-page scan runs in the page so it cannot be unit-driven here; assert
+  // structurally that it gates on document.readyState (§5.3 navigation/load-state).
+  assert.match(ABSENCE_SCAN_FN, /readyState/);
+});
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -765,7 +937,8 @@ In `src/daemon/chrome/internal-ops.ts`, add these two module-level constants imm
 // Daemon-only. Runs in the page under the daemon's internal CDP (agent severed).
 // Returns ONLY booleans — never the secret, never where it was found (§5.1/§5.3).
 // "__ABSENCE__" marker lets the scripted test transport route this expression.
-const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
+// Exported so the navigation-uncertainty guard is unit-assertable (Phase-1 pattern).
+export const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
   try {
     if (typeof secret !== "string" || secret === "") return { found:false, inconclusive:true };
     const hit = (s) => typeof s === "string" && s.indexOf(secret) !== -1;
@@ -806,6 +979,9 @@ const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
       }
       return {};
     }
+    // Navigation uncertainty (§5.3): a still-loading document means the page
+    // could be changing under the scan — fail closed.
+    if (document.readyState !== "complete") return { found:false, inconclusive:true };
     const r = scanDoc(document);
     if (r.inconclusive) return { found:false, inconclusive:true };
     return { found: r.hit === true, inconclusive:false };
@@ -820,22 +996,45 @@ const OBSERVE_TEXT_FN = `function(needle){
 }`;
 ```
 
-In the same file, add these two methods to the `CdpBrowserOps` class immediately **after** the existing `async revalidateHandle(...) { … }` method (before the class's closing `}`):
+First, make CDP calls **bounded** so a hung transport cannot hang the route (a never-resolving `cdp.send` would otherwise stall the HTTP request forever instead of failing closed — spec §5.3: timeout ⇒ inconclusive ⇒ stay blind). Change the `CdpBrowserOps` constructor (currently `constructor(private readonly cdp: CdpClient) {}` at `internal-ops.ts:283`) to:
+```ts
+  constructor(private readonly cdp: CdpClient, private readonly cdpCallTimeoutMs = 10_000) {}
+```
+This is backward compatible — every existing `new CdpBrowserOps(session.cdp)` still compiles; the bound is overridden only in tests.
+
+In the same file, add this private helper to `CdpBrowserOps` immediately **after** the existing `private async describeBackendNode(...) { … }` method:
+```ts
+  // Bounded CDP send: rejects after cdpCallTimeoutMs even if the transport never
+  // replies. (The underlying CdpClient.send promise stays pending — harmless: it
+  // is never re-awaited; what matters is the route fails closed, not hangs.)
+  private boundedSend<T>(method: string, params: unknown, sessionId: string | undefined): Promise<T> {
+    return Promise.race<T>([
+      this.cdp.send<T>(method, params, sessionId),
+      new Promise<T>((_resolve, reject) =>
+        setTimeout(() => reject(new ShuttleError("cdp_timeout", `CDP ${method} timed out.`)), this.cdpCallTimeoutMs),
+      ),
+    ]);
+  }
+```
+
+Then add these two methods to the `CdpBrowserOps` class immediately **after** the existing `async revalidateHandle(...) { … }` method (before the class's closing `}`). Every CDP call uses `boundedSend`, and `proveAbsence` also caps total wall-clock so a many-target page set still fails closed in bounded time:
 ```ts
   async proveAbsence(secret: string): Promise<AbsenceProofResult> {
     if (secret === "") return { passed: false };
+    const overallDeadline = Date.now() + this.cdpCallTimeoutMs * 6;
     let targets: { targetInfos: { targetId: string; type: string }[] };
     try {
-      targets = await this.cdp.send<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets");
+      targets = await this.boundedSend<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets", undefined, undefined);
     } catch {
       return { passed: false };
     }
     for (const t of targets.targetInfos.filter((x) => x.type === "page")) {
+      if (Date.now() > overallDeadline) return { passed: false };
       let sessionId = "";
       try {
-        const a = await this.cdp.send<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true });
+        const a = await this.boundedSend<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true }, undefined);
         sessionId = a.sessionId;
-        const r = await this.cdp.send<{ result: { value?: { found?: boolean; inconclusive?: boolean } }; exceptionDetails?: unknown }>(
+        const r = await this.boundedSend<{ result: { value?: { found?: boolean; inconclusive?: boolean } }; exceptionDetails?: unknown }>(
           "Runtime.evaluate",
           { expression: `(${ABSENCE_SCAN_FN})(${JSON.stringify(secret)})`, returnByValue: true, awaitPromise: false },
           sessionId,
@@ -846,7 +1045,7 @@ In the same file, add these two methods to the `CdpBrowserOps` class immediately
       } catch {
         return { passed: false };
       } finally {
-        if (sessionId !== "") await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+        if (sessionId !== "") await this.boundedSend("Target.detachFromTarget", { sessionId }, undefined).catch(() => undefined);
       }
     }
     return { passed: true };
@@ -858,16 +1057,16 @@ In the same file, add these two methods to the `CdpBrowserOps` class immediately
     for (;;) {
       let targets: { targetInfos: { targetId: string; type: string }[] };
       try {
-        targets = await this.cdp.send<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets");
+        targets = await this.boundedSend<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets", undefined, undefined);
       } catch {
         return false;
       }
       for (const t of targets.targetInfos.filter((x) => x.type === "page")) {
         let sessionId = "";
         try {
-          const a = await this.cdp.send<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true });
+          const a = await this.boundedSend<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true }, undefined);
           sessionId = a.sessionId;
-          const r = await this.cdp.send<{ result: { value?: { host?: string; has?: boolean } } }>(
+          const r = await this.boundedSend<{ result: { value?: { host?: string; has?: boolean } } }>(
             "Runtime.evaluate",
             { expression: `(${OBSERVE_TEXT_FN})(${JSON.stringify(text)})`, returnByValue: true, awaitPromise: false },
             sessionId,
@@ -880,7 +1079,7 @@ In the same file, add these two methods to the `CdpBrowserOps` class immediately
         } catch {
           // ignore this target for this poll round
         } finally {
-          if (sessionId !== "") await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+          if (sessionId !== "") await this.boundedSend("Target.detachFromTarget", { sessionId }, undefined).catch(() => undefined);
         }
       }
       if (Date.now() >= deadline) return false;
@@ -912,10 +1111,10 @@ In `src/daemon/api/browser-handles-routes.test.ts`, in `stub`, add immediately a
 - [ ] **Step 6: Run the new test, then the full suite**
 
 Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/chrome/absence-proof.test.js`
-Expected: PASS — 8 tests pass.
+Expected: PASS — 10 tests pass (incl. the hung-transport fail-closed and navigation-uncertainty assertions).
 
 Run: `npm test`
-Expected: PASS — all existing tests green (the three stub fixups satisfy the extended interface).
+Expected: PASS — all existing tests green (the three stub fixups satisfy the extended interface; the new optional constructor arg is backward compatible).
 
 - [ ] **Step 7: Commit**
 
@@ -1545,6 +1744,34 @@ test("refuses if blind mode is already active (no clobber)", async () => {
   });
 });
 
+test("submit handle on a DIFFERENT target is fail-closed (handle_target_mismatch)", async () => {
+  await withDaemon(async ({ port, services }) => {
+    services.browser = stub();
+    await setup(services, port);
+    services.handles.put({
+      label: "submit-btn", target_id: "T-OTHER", domain: "vercel.com", page_url_host: "vercel.com",
+      page_title: "Proj", backend_node_id: 22, handle_fingerprint: "sha256:submit", element_kind: "button",
+    });
+    const r = await call(port, "POST", "/v1/secrets/inject-submit", body());
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "handle_target_mismatch");
+  });
+});
+
+test("submit handle on a DIFFERENT domain is fail-closed (handle_target_mismatch)", async () => {
+  await withDaemon(async ({ port, services }) => {
+    services.browser = stub();
+    await setup(services, port);
+    services.handles.put({
+      label: "submit-btn", target_id: "T-1", domain: "evil.example.com", page_url_host: "evil.example.com",
+      page_title: "Proj", backend_node_id: 22, handle_fingerprint: "sha256:submit", element_kind: "button",
+    });
+    const r = await call(port, "POST", "/v1/secrets/inject-submit", body());
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "handle_target_mismatch");
+  });
+});
+
 function bindingFor(over: Record<string, unknown> = {}) {
   return {
     action: "inject_submit" as const, ref: "ss://stripe/prod/WH", environment: "production",
@@ -1711,6 +1938,16 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
       if (submitHandle.element_kind !== "button" && submitHandle.element_kind !== "link") {
         throw new ShuttleError("handle_kind_mismatch", "submit_handle must be a button or link.");
       }
+      // Fail-closed: the daemon injects into the field handle's target then clicks
+      // the submit handle. The approved binding records ONLY the field target/
+      // domain, so the submit handle MUST be on the same page/target and domain —
+      // otherwise the click could land on a different tab/site than approved.
+      if (submitHandle.target_id !== fieldHandle.target_id || submitHandle.domain !== fieldHandle.domain) {
+        throw new ShuttleError(
+          "handle_target_mismatch",
+          "submit_handle must be on the same page/target and domain as field_handle.",
+        );
+      }
 
       const domain = fieldHandle.domain;
       if (b.domain !== undefined && !domainMatches(domain, b.domain)) {
@@ -1865,7 +2102,7 @@ In the same file, add this line immediately **after** the existing `registerSecr
 - [ ] **Step 5: Run the new test, then the full suite**
 
 Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/api/inject-submit-routes.test.js`
-Expected: PASS — 8 tests pass.
+Expected: PASS — 10 tests pass (incl. the cross-target and cross-domain submit-handle fail-closed cases).
 
 Run: `npm test`
 Expected: PASS — all tests green.
@@ -2149,20 +2386,22 @@ _(record here during Task 11 — e.g. "2026-05-‑‑: Vercel env-var add → su
 
 ## Self-Review (performed against the spec)
 
+> **Review iteration (4 findings patched):** (1) Task 4 now also modifies `ui-server.ts` to serialize the new grant fields + adds a runtime JSON test (the static-HTML test alone would pass while the live UI showed `?`); (2) Task 8 now requires the submit handle to share the field handle's target **and** domain (`handle_target_mismatch`, fail-closed) with cross-target/cross-domain tests; (3) Task 5 now wraps every CDP call in a bounded `boundedSend` (a hung call fails closed instead of hanging the route) and the absence scan gates on `document.readyState` (navigation uncertainty), with a hung-transport test; (4) Task 3 validates `allowed_actions` **before** `requireApproval`, carries it on the generate binding (matched via `bindingsMatch`), and the UI surfaces the action scope — and the `ApprovalBinding` task was reordered before the `generate` task because the generate binding now depends on the new field.
+
 **1. Spec coverage (Phase 2 scope):**
-- §3.4 revalidation-before-use → Task 8 (pre-approval + post-approval-pre-write `revalidateHandle` on both handles; kind gating).
-- §4.1 CLI → Task 9. §4.2 route 14-step flow → Task 8 (lock/browser; refuse-if-blind; `assertSecretActionAllowed("inject_submit")`; revalidate-while-safe + domain enforce; deterministic binding; `requireApproval force:true`; `blind.start`→`disableObservationDomains`→`severAgentConnections`; pre-write re-revalidate fail-closed+safe; inject→click; success wait; absence proof; auto-resume decision; `markUsed`+audit). §4.3 enum-only responses → Task 8 route + Task 10 leak assertion. §4.4 distinct `inject_submit` SecretAction, no implicit grant, overwrite-preserve, explicit opt-in → Tasks 1–2 (+ Task 8 legacy-deny route test).
-- §5 Absence Proof (surfaces, pass condition, fail-closed matrix) → Task 5 `proveAbsence` + tests (present / inconclusive / evaluate-error / empty-secret). §5.4 documented limitation already ships in `threat-model.md` from prior hardening (no Phase-2 doc change required; raw-only match is what `proveAbsence` implements).
-- §6.4 binding/UI additions that apply to §4 (`submit_fingerprint`, `success_condition`, `auto_resume`, display-only labels; UI auto-resume disclosure) → Tasks 3–4. (`reveal_*`/`container_*`/`capture_mode` binding fields are Plan 3 — intentionally not added here; `bindingsMatch` for those lands with Plan 3.)
+- §3.4 revalidation-before-use → Task 8 (pre-approval + post-approval-pre-write `revalidateHandle` on both handles; kind gating; submit-handle same-target/domain fail-closed).
+- §4.1 CLI → Task 9. §4.2 route 14-step flow → Task 8 (lock/browser; refuse-if-blind; `assertSecretActionAllowed("inject_submit")`; revalidate-while-safe + handle_target_mismatch + domain enforce; deterministic binding; `requireApproval force:true`; `blind.start`→`disableObservationDomains`→`severAgentConnections`; pre-write re-revalidate fail-closed+safe; inject→click; success wait; absence proof; auto-resume decision; `markUsed`+audit). §4.3 enum-only responses → Task 8 route + Task 10 leak assertion. §4.4 distinct `inject_submit` SecretAction, no implicit grant, overwrite-preserve, explicit opt-in **validated pre-approval and surfaced to the human** → Task 1 (vault) + Task 3 (route/CLI/binding) + Task 4 (UI scope row) (+ Task 8 legacy-deny route test).
+- §5 Absence Proof (surfaces, pass condition, fail-closed matrix incl. **timeout & navigation uncertainty**) → Task 5 `proveAbsence` (bounded CDP + `document.readyState` guard) + tests (present / inconclusive / evaluate-error / empty-secret / hung-transport-fail-closed / navigation). §5.4 documented limitation already ships in `threat-model.md` from prior hardening (raw-only match is what `proveAbsence` implements).
+- §6.4 binding/UI additions that apply to §4 (`submit_fingerprint`, `success_condition`, `auto_resume`, `allowed_actions`, display-only labels; UI auto-resume disclosure; **`ui-server.ts` serialization**) → Tasks 2 & 4. (`reveal_*`/`container_*`/`capture_mode` binding fields are Plan 3 — intentionally not added here.)
 - §7 separately-audited `autoResumeBlind` (no approval, no `blankAllPages`, distinct `blind_auto_resume` action, `/v1/blind/end` untouched) → Task 7 + Task 8 wiring + Task 8 test asserting no `blind_end` record.
 - §8 audit events `inject_submit` + `blind_auto_resume` → Task 7 vocabulary + Task 8 emissions. (`browser_mark` shipped in Phase 1; `reveal_capture` is Plan 3.)
-- §12 `injectIntoBackendNode` (DOM.focus + activeElement assertion + WRITE_SCRIPT), `clickBackendNode` (trusted Input at hit-tested box; descendant/occlusion guard; fail-closed on no/zero box), `proveAbsence` (`{passed}` only) + the §4.2-step-11 success observer (`observeText`, boolean only) → Tasks 5–6.
-- §13 test slices: `inject_submit` SecretAction (Task 1), route tests incl. force/blind-lifecycle/pre-write-safe/post-write-stays/auto-resume+audit/inconclusive (Task 8), `clickBackendNode` trusted-input + occlusion (Task 6), absence proof present/inconclusive/error (Task 5), approval binding/UI (Tasks 3–4), negative/security e2e (Task 10), [P2a] gate (Task 11).
-- §14 build order phase 2 → this whole plan. §15 acceptance criteria (Vercel add without observing/clicking; stay-blind-if-unproven; no raw secrets; UI plain language; [P2a]) → Tasks 8/5/10/4/11. §16 decisions (always force-approval; distinct SecretAction fail-closed; trusted CDP Input not JS .click(); auto-resume bypasses blank; raw-only proof) → Tasks 1/6/7/8.
+- §12 `injectIntoBackendNode` (DOM.focus + activeElement assertion + WRITE_SCRIPT), `clickBackendNode` (trusted Input at hit-tested box; descendant/occlusion guard; fail-closed on no/zero box), `proveAbsence` (`{passed}` only, bounded) + the §4.2-step-11 success observer (`observeText`, boolean only, bounded) → Tasks 5–6.
+- §13 test slices: `inject_submit` SecretAction (Task 1), route tests incl. force/blind-lifecycle/pre-write-safe/post-write-stays/auto-resume+audit/inconclusive/**cross-target+cross-domain** (Task 8), `clickBackendNode` trusted-input + occlusion (Task 6), absence proof present/inconclusive/error/**hung-transport**/navigation (Task 5), approval binding (Task 2) + UI static+JSON (Task 4), negative/security e2e (Task 10), [P2a] gate (Task 11).
+- §14 build order phase 2 → this whole plan. §15 acceptance criteria → Tasks 8/5/10/4/11. §16 decisions (always force-approval; distinct SecretAction fail-closed; trusted CDP Input not JS .click(); auto-resume bypasses blank; raw-only proof) → Tasks 1/6/7/8.
 
-**2. Placeholder scan:** no TBD/TODO; every code step contains complete code; every command has an expected result. The only non-code step is Task 11 — explicitly a manual release gate (spec §13 [P2a]), with concrete commands and PASS/BEST-EFFORT criteria, not a hand-wave. The `ui.html`→`dist` path uncertainty in Task 4 is bounded with a concrete fallback (inspect `ui-server.ts` for the canonical path) rather than left open.
+**2. Placeholder scan:** no TBD/TODO; every code step contains complete code; every command has an expected result. The only non-code step is Task 11 — explicitly a manual release gate (spec §13 [P2a]), with concrete commands and PASS/BEST-EFFORT criteria. The `ui.html`→`dist` path uncertainty in Task 4 is bounded with a concrete fallback (inspect `ui-server.ts` `HTML_PATH`) and the runtime JSON test does not depend on the file copy at all.
 
-**3. Type consistency:** `SecretAction` (Task 1, +`inject_submit`) ↔ `validatedActions`/`SECRET_ACTIONS` (Task 2) ↔ `assertSecretActionAllowed(secret,"inject_submit")` (Task 8). `ApprovalBinding` new fields `submit_fingerprint`/`success_condition`/`auto_resume`/`field_handle_label`/`submit_handle_label` (Task 3) are exactly the keys the route builds (Task 8) and the UI reads (Task 4) and the binding test asserts (Task 3). `BackendNodeRef { target_id; backend_node_id }`/`AbsenceProofResult { passed }` (Task 5) are the exact shapes `injectIntoBackendNode`/`clickBackendNode` (Task 6) and the route call sites (Task 8) use; `BrowserHandle` (Phase 1) exposes `target_id`/`backend_node_id`/`handle_fingerprint`/`element_kind`/`page_title`/`page_url_host`/`label`/`domain` which the route consumes. `AutoResumeArgs` (Task 7) `success_signal:"text_matched"`/`absence_proof:"passed"` match the route's only auto-resume call (Task 8) and the audit fields added in Task 7. The three `BrowserOps` stubs gain the four methods in the same tasks that extend the interface (Tasks 5–6), so the tree is green at every commit. `enforceDomain` is `export`ed in Task 2 and imported by the route in Task 8.
+**3. Type consistency:** `SecretAction` (Task 1, +`inject_submit`) ↔ `validatedActions`/`SECRET_ACTIONS` (Task 3) ↔ `assertSecretActionAllowed(secret,"inject_submit")` (Task 8). `ApprovalBinding` new fields `submit_fingerprint`/`success_condition`/`auto_resume`/`allowed_actions`/`field_handle_label`/`submit_handle_label` (Task 2) are exactly the keys the generate route (Task 3) and the inject-submit route (Task 8) build, `ui-server.ts` serializes (Task 4), `ui.html` reads (Task 4), and the binding test asserts (Task 2); `allowed_actions` is matched via the reused `domainSet` stable-set helper. `BackendNodeRef { target_id; backend_node_id }`/`AbsenceProofResult { passed }` (Task 5) are the exact shapes `injectIntoBackendNode`/`clickBackendNode` (Task 6) and the route call sites (Task 8) use; `BrowserHandle` (Phase 1) exposes `target_id`/`backend_node_id`/`handle_fingerprint`/`element_kind`/`page_title`/`page_url_host`/`label`/`domain` which the route consumes (incl. the new submit-vs-field `target_id`/`domain` equality check). `CdpBrowserOps`'s new optional `cdpCallTimeoutMs` constructor arg is backward compatible with every existing `new CdpBrowserOps(cdp)`. `AutoResumeArgs` (Task 7) `success_signal:"text_matched"`/`absence_proof:"passed"` match the route's only auto-resume call (Task 8) and the audit fields added in Task 7. The three `BrowserOps` stubs gain the four methods in the same tasks that extend the interface (Tasks 5–6), so the tree is green at every commit. `enforceDomain` is `export`ed in Task 3 and imported by the route in Task 8.
 
 ---
 
