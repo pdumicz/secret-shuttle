@@ -134,10 +134,16 @@ controls), both producing the same opaque handle record with `element_kind` deri
 from the captured element. This mapping is the **single source of truth** and is
 exactly the actionable set `mark pick` normalizes to (§3.3):
 
-- `input`(non-button)/`textarea`/contenteditable → `field`
-- `button`/`input[type=submit|button]`/`[role=button]`/`summary` → `button`
-- `a[href]`/`[role=link]` → `link`
-- else → `other` (not usable for inject or click gating)
+- **`field`** — text-entry/editable targets **only**: `input` whose type is one of
+  `text`/`password`/`email`/`url`/`search`/`tel`/`number` (or has no/unknown type,
+  which defaults to text), **or** `textarea`, **or** a contenteditable element.
+  Explicitly **excluded** (→ `other`): `checkbox`, `radio`, `file`, `range`,
+  `color`, `date`/`datetime-local`/`month`/`week`/`time`, `submit`/`button`/`image`/
+  `reset`, and any non-text input — these are never inject/read targets in v1.
+- **`button`** — `button`/`input[type=submit|button|image|reset]`/`[role=button]`/
+  `summary`.
+- **`link`** — `a[href]`/`[role=link]`.
+- else → `other` (not usable for inject or click gating).
 
 - **`mark focused`** — reads `document.activeElement` (the same observation-safe path
   `readFocusedFingerprintAndDomain` already uses). Best for focusable fields.
@@ -440,23 +446,37 @@ secret-shuttle reveal-capture --name STRIPE_WEBHOOK_SECRET --env production \
 ```
 
 **Secret-holder candidate predicate** (shared by `container` and
-`focused-after-reveal`): an element qualifies **only if** it is an
-`input`(type text/password/etc., not button/submit/checkbox/radio)/`textarea` with a
-non-empty `.value`, **or** a contenteditable with non-empty text, **or** a
-non-interactive text-bearing element with non-empty text; **and** it is **not** a
-`button`, `a[href]`, `[role=button]`, `summary`, `label`, or other interactive
+`focused-after-reveal`): an element qualifies **only if** it is either a
+**`field`-kind element** as defined by the single-source `element_kind` mapping in
+§3.3 (text-entry `input` types / `textarea` / contenteditable — never
+checkbox/radio/file/range/etc.) with a non-empty value/text, **or** a
+non-interactive text-bearing element (e.g. `code`/`span`/`pre`) with non-empty text;
+**and** it is **not** a `button`/`link`-kind element, `label`, or other interactive
 control/label. Buttons, links, and their labels are never candidates.
 
-Post-reveal resolution (daemon-only, observation already blind): the daemon
-enumerates elements inside the approved container subtree that satisfy the predicate
-above. Resolution **fails closed** (stay blind, `captured:"unknown"`) if there are
-**zero or more than one** candidates (ambiguous), if the resolved element is **not
-contained** by the approved container's backend node (DOM containment proof via
-`DOM.describeNode`/`Runtime.callFunctionOn` `a.contains(b)`), if the candidate is a
-control/label, or on any CDP/evaluation error. For `focused-after-reveal` the
-`document.activeElement` must itself pass the predicate and the containment check.
-The human approves the container + strategy; the daemon proves containment and
-candidacy before reading. The agent never sees the element or its value.
+Post-reveal resolution (daemon-only, observation already blind) is computed in this
+order so normal containers with labels/help text are **not** treated as ambiguous:
+
+1. Enumerate elements inside the approved container subtree that satisfy the
+   secret-holder predicate above.
+2. **Filter to transition-eligible candidates:** drop any element that is *unchanged*
+   from its pre-reveal baseline (a preexisting readable label/help/static-metadata
+   sibling, or a still-`safe` element). What remains are only elements that newly
+   appeared or changed due to reveal — i.e. had a *safe* baseline and now show a
+   *safe→revealed* transition.
+3. Require **exactly one** transition-eligible candidate. **Fails closed** (stay
+   blind, `captured:"unknown"`) if there are **zero** (nothing revealed →
+   stale/label text) or **more than one** transition-eligible candidates (genuinely
+   ambiguous), if that element is **not contained** by the approved container's
+   backend node (DOM containment proof via `DOM.describeNode`/`Runtime.callFunctionOn`
+   `a.contains(b)`), if it is a control/label, or on any CDP/evaluation error.
+
+The ambiguity check is over the **transition-eligible** set, not all candidates, so
+readable siblings never cause a false "more than one" rejection. For
+`focused-after-reveal` the `document.activeElement` must itself pass the predicate,
+be transition-eligible (safe→revealed), and pass the containment check. The human
+approves the container + strategy; the daemon proves containment and the
+single-transition before reading. The agent never sees the element or its value.
 
 **Pre-reveal baseline (daemon-only, before blind).** Capturing "the single non-empty
 candidate after reveal" is unsafe on its own: it can silently grab preexisting
@@ -517,11 +537,12 @@ does.
 6. Re-revalidate the reveal + field/container handles (pre-action; failure here =
    nothing revealed → `blind.end()` + rethrow, safe).
 7. Click reveal handle.
-8. Resolve the secret element per `capture_mode` with the containment/ambiguity
-   fail-closed rules of §6.1, **and enforce the per-chosen-candidate baseline gate**:
-   the chosen candidate must have had a *safe* baseline and now show a
-   *safe→revealed* transition; fail closed if it was already *readable* unchanged or
-   shows no transition (§6.1). Then read its value internally (daemon-only).
+8. Resolve the secret element per `capture_mode` using the §6.1 ordered rule:
+   predicate → **filter to transition-eligible candidates (readable siblings
+   dropped)** → require **exactly one** `safe→revealed` candidate → containment
+   proof. Fail closed on zero/many transition-eligible candidates, non-containment,
+   already-readable-unchanged, or any CDP error. Then read its value internally
+   (daemon-only).
 9. `vault.upsertSecret(...)` (value never leaves the daemon).
 10. Click the hide handle if supplied; otherwise blank **all** pages via the existing
     `blankAllPages(cdp)` (fail-closed if any page does not reach `about:blank`),
@@ -799,13 +820,13 @@ agent-reachable:
   field/container subtree (§6.1). Preexisting *readable* siblings are recorded, not
   rejected; the gate is enforced per chosen candidate in `resolveWithinContainer`.
 - `resolveWithinContainer(container, mode, baseline): Promise<{ value: string }>` —
-  post-reveal, daemon-only. Enumerates candidate secret holders inside the container
-  subtree (or, for `focused-after-reveal`, `document.activeElement`), proves DOM
-  containment within the approved container backend node, requires exactly one
-  unambiguous candidate, **and requires it to have transitioned from a *safe*
-  baseline to newly present/changed**, then returns its value. Throws fail-closed on
-  zero/many candidates, containment failure, no safe→revealed transition, or any
-  CDP/evaluation error (§6.1).
+  post-reveal, daemon-only. Enumerates predicate-matching elements in the container
+  subtree (or, for `focused-after-reveal`, `document.activeElement`), **filters to
+  transition-eligible candidates (drops elements unchanged from a readable
+  baseline)**, requires **exactly one** such `safe→revealed` candidate, proves DOM
+  containment within the approved container backend node, then returns its value.
+  Throws fail-closed on zero/many *transition-eligible* candidates, containment
+  failure, already-readable-unchanged, or any CDP/evaluation error (§6.1).
 - `proveAbsence(secret: string): Promise<AbsenceProofResult>` — §5; returns
   `{ passed: boolean }` only (reasons are audited internally as enum, never returned
   to the agent).
@@ -848,12 +869,14 @@ existing daemon-wiring + `stubBrowser` approach.
 - **`reveal-capture` route tests:** all three capture modes (`field`, `container`,
   `focused-after-reveal`); secret-holder predicate rejects a button/link/label and
   `focused-after-reveal` with focus left on the reveal button → fail closed;
-  container resolution fail-closed on zero candidates, >1 candidates, and
-  non-contained element; **pre-reveal baseline (per chosen candidate)**: a container
-  with readable label/help/static-metadata siblings still **succeeds** (siblings
-  ignored); the chosen candidate that transitions safe→revealed → captured; the
-  chosen candidate already *readable* unchanged pre-reveal → fail closed; the chosen
-  candidate showing no safe→revealed transition → fail closed (stale/label text);
+  resolution fail-closed on **zero or >1 transition-eligible** candidates and
+  non-contained element; **transition-eligibility filtering**: a container with
+  readable label/help/static-metadata siblings **plus** one revealed field
+  **succeeds** (siblings dropped before the exactly-one check — they do **not** cause
+  a false ">1" rejection); a container with two simultaneously revealed fields →
+  fail closed (genuinely ambiguous); the chosen candidate already *readable*
+  unchanged pre-reveal → fail closed; the chosen candidate showing no safe→revealed
+  transition → fail closed (stale/label text);
   hide-handle vs blank fallback; captured value never appears in any response (extend
   the existing "no raw secret in any response body" assertion).
 - **Absence proof tests:** present-in-value, present-in-attribute,
@@ -988,6 +1011,7 @@ existing daemon-wiring + `stubBrowser` approach.
 - Templates whose CLI forces the secret onto argv.
 - A generic "submit action" DSL — only "click the marked submit/reveal/hide handle".
 - Multi-element / recursive container resolution heuristics beyond
-  "exactly one unambiguous candidate inside the approved container".
+  "exactly one transition-eligible (safe→revealed) candidate inside the approved
+  container".
 - Detecting transformed/derived secret forms in the absence proof.
 - Persisting handles across daemon or browser restarts.
