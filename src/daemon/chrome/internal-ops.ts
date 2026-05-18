@@ -309,27 +309,46 @@ export class CdpBrowserOps implements BrowserOps {
 
   // Filter by sessionId — CdpClient keys listeners only by method, so without
   // this a pick on a different page target could wrongly resolve this wait.
-  // The listener is removed via cdp.off() on both settle paths so repeated
-  // markPick calls do not accumulate dead listeners over a browser session.
-  private waitForEvent<T>(event: string, sessionId: string, timeoutMs: number): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let done = false;
-      let timer: ReturnType<typeof setTimeout>;
-      const listener = (params: unknown, sid?: string): void => {
+  // Returns a cancelable handle: the listener+timer are torn down on resolve,
+  // timeout, OR cancel(), so a setup failure (e.g. Overlay.setInspectMode
+  // rejecting) cannot leave a pending wait that later rejects unhandled and
+  // leaks a listener/timer until the timeout fires.
+  private waitForEvent<T>(
+    event: string,
+    sessionId: string,
+    timeoutMs: number,
+  ): { promise: Promise<T>; cancel: () => void } {
+    let done = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let listener!: (params: unknown, sid?: string) => void;
+    let rejectFn!: (e: unknown) => void;
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      this.cdp.off(event, listener);
+    };
+    const promise = new Promise<T>((resolve, reject) => {
+      rejectFn = reject;
+      listener = (params: unknown, sid?: string): void => {
         if (done || sid !== sessionId) return;
         done = true;
-        clearTimeout(timer);
-        this.cdp.off(event, listener);
+        cleanup();
         resolve(params as T);
       };
       timer = setTimeout(() => {
         if (done) return;
         done = true;
-        this.cdp.off(event, listener);
+        cleanup();
         reject(new ShuttleError("mark_pick_timeout", "No element picked before timeout."));
       }, timeoutMs);
       this.cdp.on(event, listener);
     });
+    const cancel = (): void => {
+      if (done) return;
+      done = true;
+      cleanup();
+      rejectFn(new ShuttleError("mark_pick_cancelled", "Mark pick was cancelled."));
+    };
+    return { promise, cancel };
   }
 
   private async describeBackendNode(
@@ -380,7 +399,7 @@ export class CdpBrowserOps implements BrowserOps {
       sessionId,
     );
     try {
-      const r = await this.cdp.send<{ result: { value: { found: boolean } }; objectId?: string }>(
+      const r = await this.cdp.send<{ result: { objectId?: string; subtype?: string } }>(
         "Runtime.callFunctionOn",
         {
           objectId: object.objectId,
@@ -412,7 +431,10 @@ export class CdpBrowserOps implements BrowserOps {
         },
         sessionId,
       );
-      const normalizedObjectId = (r as { objectId?: string }).objectId;
+      // Runtime.callFunctionOn returns the remote object under `result` (a
+      // RemoteObject). When the in-page fn returns null (no actionable ancestor)
+      // there is no objectId, so this correctly falls through to fail-closed.
+      const normalizedObjectId = r.result.objectId;
       if (typeof normalizedObjectId !== "string") {
         throw new ShuttleError("mark_pick_no_actionable", "Picked node has no actionable ancestor.");
       }
@@ -520,16 +542,24 @@ export class CdpBrowserOps implements BrowserOps {
   async markPick(timeoutMs: number): Promise<HandleDescriptor> {
     const page = await this.pickPage();
     const sessionId = await this.attach(page.id);
+    // Register the wait BEFORE setInspectMode so the pick event cannot be missed.
+    const wait = this.waitForEvent<{ backendNodeId: number }>(
+      "Overlay.inspectNodeRequested",
+      sessionId,
+      timeoutMs,
+    );
+    // Pre-attach a no-op catch so a cancel()-induced rejection (setup failure
+    // path, where we never await wait.promise) is never an unhandled rejection.
+    void wait.promise.catch(() => undefined);
     try {
       await this.cdp.send("DOM.enable", {}, sessionId);
       await this.cdp.send("Overlay.enable", {}, sessionId);
-      const picked = this.waitForEvent<{ backendNodeId: number }>("Overlay.inspectNodeRequested", sessionId, timeoutMs);
       await this.cdp.send(
         "Overlay.setInspectMode",
         { mode: "searchForNode", highlightConfig: { showInfo: true, contentColor: { r: 111, g: 168, b: 220, a: 0.4 } } },
         sessionId,
       );
-      const ev = await picked;
+      const ev = await wait.promise;
       const actionableBackendNodeId = await this.normalizeToActionable(sessionId, ev.backendNodeId);
       const meta = await this.describeBackendNode(sessionId, actionableBackendNodeId);
       const kind = elementKind(meta);
@@ -550,6 +580,9 @@ export class CdpBrowserOps implements BrowserOps {
         handle_fingerprint: handleFingerprint(domain, page.id, actionableBackendNodeId, meta, kind),
         element_kind: kind,
       };
+    } catch (err) {
+      wait.cancel();
+      throw err;
     } finally {
       await this.cdp.send("Overlay.setInspectMode", { mode: "none" }, sessionId).catch(() => undefined);
       await this.cdp.send("Overlay.disable", {}, sessionId).catch(() => undefined);

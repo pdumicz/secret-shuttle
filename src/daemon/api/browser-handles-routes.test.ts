@@ -99,3 +99,23 @@ test("invalid `how` is a bad request", async () => {
     assert.equal((m.body as { error: { code: string } }).error.code, "bad_request");
   });
 });
+
+test("marks reports valid:false when revalidation fails, with no detail leaked", async () => {
+  await withDaemon(async ({ port, services }) => {
+    const failing: BrowserOps = {
+      ...stub(),
+      revalidateHandle: async () => { throw new Error("handle drifted to another node"); },
+    };
+    services.browser = failing;
+    const m = await call(port, "POST", "/v1/browser/mark", { how: "focused", label: "submit" });
+    assert.equal(m.status, 200);
+    const list = await call(port, "POST", "/v1/browser/marks");
+    assert.equal(list.status, 200);
+    const marks = (list.body as { marks: Record<string, unknown>[] }).marks;
+    assert.equal(marks.length, 1);
+    assert.equal(marks[0]!.valid, false);
+    assert.equal(JSON.stringify(list.body).includes("drifted"), false);
+    assert.deepEqual(Object.keys(marks[0]!).sort(),
+      ["created_at", "domain", "element_kind", "expires_at", "label", "page_url_host", "valid"]);
+  });
+});

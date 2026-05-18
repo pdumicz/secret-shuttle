@@ -65,15 +65,37 @@ export function registerBrowser(server: DaemonServer, services: DaemonServices):
   });
 
   server.addRoute("POST", "/v1/browser/marks", async () => {
-    const marks = services.handles.list().map((h) => ({
-      label: h.label,
-      element_kind: h.element_kind,
-      domain: h.domain,
-      page_url_host: h.page_url_host,
-      created_at: h.created_at,
-      expires_at: h.expires_at,
-      valid: true,
-    }));
+    const browser = services.browser;
+    const marks = await Promise.all(
+      services.handles.list().map(async (h) => {
+        let valid = false;
+        if (browser !== null) {
+          try {
+            await browser.revalidateHandle({
+              target_id: h.target_id,
+              domain: h.domain,
+              backend_node_id: h.backend_node_id,
+              handle_fingerprint: h.handle_fingerprint,
+              element_kind: h.element_kind,
+            });
+            valid = true;
+          } catch {
+            // navigated / detached / drifted / browser gone — fail closed.
+            // Detail is intentionally NOT surfaced to the agent.
+            valid = false;
+          }
+        }
+        return {
+          label: h.label,
+          element_kind: h.element_kind,
+          domain: h.domain,
+          page_url_host: h.page_url_host,
+          created_at: h.created_at,
+          expires_at: h.expires_at,
+          valid,
+        };
+      }),
+    );
     return { marks, value_visible_to_agent: false };
   });
 }
