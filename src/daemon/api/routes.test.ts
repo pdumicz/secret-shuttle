@@ -119,6 +119,15 @@ function stubBrowser(s: { domain: string; target: string; value: string }): Brow
       return rest;
     },
     currentDomainAndTarget: async () => ({ domain: s.domain, target_id: s.target }),
+    markFocused: async () => ({
+      target_id: s.target, domain: s.domain, page_url_host: s.domain,
+      page_title: "stub", backend_node_id: 1, handle_fingerprint: "sha256:stub", element_kind: "field" as const,
+    }),
+    markPick: async () => ({
+      target_id: s.target, domain: s.domain, page_url_host: s.domain,
+      page_title: "stub", backend_node_id: 2, handle_fingerprint: "sha256:stubpick", element_kind: "button" as const,
+    }),
+    revalidateHandle: async () => undefined,
   };
 }
 
@@ -266,6 +275,15 @@ test("inject refuses when target changes after approval (post != pre)", async ()
         return { domain: "dashboard.example.com", target_id: calls === 1 ? "T1" : "T-DIFFERENT", field, field_fingerprint: "f" };
       },
       currentDomainAndTarget: async () => ({ domain: "dashboard.example.com", target_id: "T1" }),
+      markFocused: async () => ({
+        target_id: "T1", domain: "dashboard.example.com", page_url_host: "dashboard.example.com",
+        page_title: "stub", backend_node_id: 1, handle_fingerprint: "sha256:stub", element_kind: "field" as const,
+      }),
+      markPick: async () => ({
+        target_id: "T1", domain: "dashboard.example.com", page_url_host: "dashboard.example.com",
+        page_title: "stub", backend_node_id: 2, handle_fingerprint: "sha256:stubpick", element_kind: "button" as const,
+      }),
+      revalidateHandle: async () => undefined,
     };
 
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
@@ -362,6 +380,15 @@ test("capture rejects when the focused field changes between approval and captur
     ctx.services.browser = {
       available: true,
       currentDomainAndTarget: async () => ({ domain: "dashboard.stripe.com", target_id: "T1" }),
+      markFocused: async () => ({
+        target_id: "T1", domain: "dashboard.stripe.com", page_url_host: "dashboard.stripe.com",
+        page_title: "stub", backend_node_id: 1, handle_fingerprint: "sha256:stub", element_kind: "field" as const,
+      }),
+      markPick: async () => ({
+        target_id: "T1", domain: "dashboard.stripe.com", page_url_host: "dashboard.stripe.com",
+        page_title: "stub", backend_node_id: 2, handle_fingerprint: "sha256:stubpick", element_kind: "button" as const,
+      }),
+      revalidateHandle: async () => undefined,
       readFocusedFingerprintAndDomain: async () => {
         reads += 1;
         return { domain: "dashboard.stripe.com", target_id: "T1", field, field_fingerprint: "sha256:FIELD_A" };
@@ -702,6 +729,15 @@ test("inject that fails before writing the value auto-resumes (blind mode left O
         return { domain: "app.example.com", target_id: reads === 1 ? "T1" : "T-DIFF", field, field_fingerprint: "f" };
       },
       currentDomainAndTarget: async () => ({ domain: "app.example.com", target_id: "T1" }),
+      markFocused: async () => ({
+        target_id: "T1", domain: "app.example.com", page_url_host: "app.example.com",
+        page_title: "stub", backend_node_id: 1, handle_fingerprint: "sha256:stub", element_kind: "field" as const,
+      }),
+      markPick: async () => ({
+        target_id: "T1", domain: "app.example.com", page_url_host: "app.example.com",
+        page_title: "stub", backend_node_id: 2, handle_fingerprint: "sha256:stubpick", element_kind: "button" as const,
+      }),
+      revalidateHandle: async () => undefined,
     };
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
       ref: "ss://local/dev/INJ2", domain: "app.example.com", wait_for_approval: false,

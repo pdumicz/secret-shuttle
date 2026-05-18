@@ -150,6 +150,9 @@ export interface BrowserOps {
   injectFocused(value: string): Promise<InjectResult>;
   readFocusedFingerprintAndDomain(): Promise<Omit<CaptureResult, "value">>;
   currentDomainAndTarget(): Promise<{ domain: string; target_id: string }>;
+  markFocused(): Promise<HandleDescriptor>;
+  markPick(timeoutMs: number): Promise<HandleDescriptor>;
+  revalidateHandle(h: { target_id: string; domain: string; backend_node_id: number; handle_fingerprint: string; element_kind: ElementKind }): Promise<void>;
 }
 
 const READ_SCRIPT = `
@@ -200,8 +203,50 @@ const WRITE_SCRIPT = (value: string) => `
 })(${JSON.stringify(value)})
 `;
 
+const HANDLE_READ_SCRIPT = `
+(() => {
+  const a = document.activeElement;
+  if (!(a instanceof Element)) return { ok:false, reason:"no_active_element" };
+  const i = a instanceof HTMLInputElement ? a : null;
+  const ta = a instanceof HTMLTextAreaElement ? a : null;
+  const editable = a instanceof HTMLElement && a.isContentEditable;
+  return {
+    ok: true,
+    meta: {
+      tag: a.tagName.toLowerCase(),
+      type: i ? i.type : undefined,
+      name: (i && i.name) || (ta && ta.name) || undefined,
+      id: a.id || undefined,
+      editable,
+      role: a.getAttribute("role") || undefined,
+      ariaLabel: a.getAttribute("aria-label") || undefined,
+      href: a.tagName.toLowerCase() === "a" ? a.hasAttribute("href") : false,
+    },
+    domain: location.hostname,
+    title: document.title,
+    urlHost: location.host,
+  };
+})()
+`;
+
 function fieldFingerprint(domain: string, target: string, backendNodeId: number | null, field: FieldDescriptor): string {
   const seed = JSON.stringify({ domain, target, backendNodeId, ...field });
+  return `sha256:${createHash("sha256").update(seed).digest("hex").slice(0, 16)}`;
+}
+
+/**
+ * Handle fingerprint: extends the field fingerprint seed with role + accessible
+ * name + element_kind so revalidation is anchored on more than the backend node.
+ * Never stores/returns raw role/name/value — only this hash.
+ */
+function handleFingerprint(
+  domain: string,
+  target: string,
+  backendNodeId: number | null,
+  meta: { tag: string; type?: string; name?: string; id?: string; editable: boolean; role?: string; ariaLabel?: string },
+  kind: ElementKind,
+): string {
+  const seed = JSON.stringify({ domain, target, backendNodeId, ...meta, kind });
   return `sha256:${createHash("sha256").update(seed).digest("hex").slice(0, 16)}`;
 }
 
@@ -262,6 +307,121 @@ export class CdpBrowserOps implements BrowserOps {
     }
   }
 
+  // CdpClient.on has no off(); guard with a one-shot flag and a timeout race.
+  private waitForEvent<T>(event: string, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        reject(new ShuttleError("mark_pick_timeout", "No element picked before timeout."));
+      }, timeoutMs);
+      this.cdp.on(event, (params) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(params as T);
+      });
+    });
+  }
+
+  private async describeBackendNode(
+    sessionId: string,
+    backendNodeId: number,
+  ): Promise<{ tag: string; type?: string; name?: string; id?: string; editable: boolean; role?: string; ariaLabel?: string; href: boolean }> {
+    const { object } = await this.cdp.send<{ object: { objectId: string } }>(
+      "DOM.resolveNode",
+      { backendNodeId },
+      sessionId,
+    );
+    try {
+      const r = await this.cdp.send<{ result: { value: {
+        tag: string; type?: string; name?: string; id?: string; editable: boolean; role?: string; ariaLabel?: string; href: boolean;
+      } } }>(
+        "Runtime.callFunctionOn",
+        {
+          objectId: object.objectId,
+          returnByValue: true,
+          functionDeclaration: `function(){
+            const i = this instanceof HTMLInputElement ? this : null;
+            const ta = this instanceof HTMLTextAreaElement ? this : null;
+            return {
+              tag: this.tagName.toLowerCase(),
+              type: i ? i.type : undefined,
+              name: (i && i.name) || (ta && ta.name) || undefined,
+              id: this.id || undefined,
+              editable: this instanceof HTMLElement && this.isContentEditable,
+              role: this.getAttribute("role") || undefined,
+              ariaLabel: this.getAttribute("aria-label") || undefined,
+              href: this.tagName.toLowerCase() === "a" ? this.hasAttribute("href") : false,
+            };
+          }`,
+        },
+        sessionId,
+      );
+      return r.result.value;
+    } finally {
+      await this.cdp.send("Runtime.releaseObject", { objectId: object.objectId }, sessionId).catch(() => undefined);
+    }
+  }
+
+  // Walk self -> ancestors to the nearest element whose elementKind is field/button/link.
+  private async normalizeToActionable(sessionId: string, backendNodeId: number): Promise<number> {
+    const { object } = await this.cdp.send<{ object: { objectId: string } }>(
+      "DOM.resolveNode",
+      { backendNodeId },
+      sessionId,
+    );
+    try {
+      const r = await this.cdp.send<{ result: { value: { found: boolean } }; objectId?: string }>(
+        "Runtime.callFunctionOn",
+        {
+          objectId: object.objectId,
+          functionDeclaration: `function(){
+            const TEXT = new Set(["","text","password","email","url","search","tel","number"]);
+            function kind(el){
+              const tag = el.tagName.toLowerCase();
+              const type = (el.type || "").toLowerCase();
+              const role = (el.getAttribute("role") || "").toLowerCase();
+              const editable = el instanceof HTMLElement && el.isContentEditable;
+              if (editable && tag !== "input" && tag !== "textarea") return "field";
+              if (tag === "textarea") return "field";
+              if (tag === "input" && TEXT.has(type)) return "field";
+              if (tag === "button" || tag === "summary" || role === "button") return "button";
+              if (tag === "input" && ["submit","button","image","reset"].includes(type)) return "button";
+              if ((tag === "a" && el.hasAttribute("href")) || role === "link") return "link";
+              return "other";
+            }
+            let el = this, depth = 0;
+            while (el && el.nodeType === 1 && depth < 25) {
+              if (kind(el) !== "other") return el;
+              el = el.parentElement;
+              depth++;
+            }
+            return null;
+          }`,
+        },
+        sessionId,
+      );
+      const normalizedObjectId = (r as { objectId?: string }).objectId;
+      if (typeof normalizedObjectId !== "string") {
+        throw new ShuttleError("mark_pick_no_actionable", "Picked node has no actionable ancestor.");
+      }
+      try {
+        const desc = await this.cdp.send<{ node: { backendNodeId: number } }>(
+          "DOM.describeNode",
+          { objectId: normalizedObjectId },
+          sessionId,
+        );
+        return desc.node.backendNodeId;
+      } finally {
+        await this.cdp.send("Runtime.releaseObject", { objectId: normalizedObjectId }, sessionId).catch(() => undefined);
+      }
+    } finally {
+      await this.cdp.send("Runtime.releaseObject", { objectId: object.objectId }, sessionId).catch(() => undefined);
+    }
+  }
+
   async currentDomainAndTarget(): Promise<{ domain: string; target_id: string }> {
     const page = await this.pickPage();
     const r = await this.evaluate<{ domain: string }>(page.id, "({domain: location.hostname})");
@@ -312,5 +472,107 @@ export class CdpBrowserOps implements BrowserOps {
     const backendNodeId = await this.getFocusedBackendNodeId(page.id);
     const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, backendNodeId, r.field);
     return { domain: r.domain.toLowerCase(), target_id: page.id, field: r.field, field_fingerprint: fp };
+  }
+
+  async markFocused(): Promise<HandleDescriptor> {
+    const page = await this.pickPage();
+    const r = await this.evaluate<{
+      ok: boolean;
+      reason?: string;
+      meta?: { tag: string; type?: string; name?: string; id?: string; editable: boolean; role?: string; ariaLabel?: string; href: boolean };
+      domain?: string;
+      title?: string;
+      urlHost?: string;
+    }>(page.id, HANDLE_READ_SCRIPT);
+    if (!r.ok || r.meta === undefined || r.domain === undefined) {
+      throw new ShuttleError("mark_focused_unavailable", r.reason ?? "No focused element to mark.");
+    }
+    const kind = elementKind(r.meta);
+    if (kind === "other") {
+      throw new ShuttleError("mark_kind_unsupported", "Focused element is not a field/button/link.");
+    }
+    const backendNodeId = await this.getFocusedBackendNodeId(page.id);
+    if (backendNodeId === null) {
+      throw new ShuttleError("mark_focused_unavailable", "Could not resolve the focused element.");
+    }
+    const domain = r.domain.toLowerCase();
+    return {
+      target_id: page.id,
+      domain,
+      page_url_host: r.urlHost ?? domain,
+      page_title: r.title ?? "",
+      backend_node_id: backendNodeId,
+      handle_fingerprint: handleFingerprint(domain, page.id, backendNodeId, r.meta, kind),
+      element_kind: kind,
+    };
+  }
+
+  async markPick(timeoutMs: number): Promise<HandleDescriptor> {
+    const page = await this.pickPage();
+    const sessionId = await this.attach(page.id);
+    try {
+      await this.cdp.send("DOM.enable", {}, sessionId);
+      await this.cdp.send("Overlay.enable", {}, sessionId);
+      const picked = this.waitForEvent<{ backendNodeId: number }>("Overlay.inspectNodeRequested", timeoutMs);
+      await this.cdp.send(
+        "Overlay.setInspectMode",
+        { mode: "searchForNode", highlightConfig: { showInfo: true, contentColor: { r: 111, g: 168, b: 220, a: 0.4 } } },
+        sessionId,
+      );
+      const ev = await picked;
+      const actionableBackendNodeId = await this.normalizeToActionable(sessionId, ev.backendNodeId);
+      const meta = await this.describeBackendNode(sessionId, actionableBackendNodeId);
+      const kind = elementKind(meta);
+      if (kind === "other") {
+        throw new ShuttleError("mark_kind_unsupported", "Picked element is not a field/button/link.");
+      }
+      const loc = await this.evaluate<{ domain: string; title: string; urlHost: string }>(
+        page.id,
+        "({domain: location.hostname, title: document.title, urlHost: location.host})",
+      );
+      const domain = loc.domain.toLowerCase();
+      return {
+        target_id: page.id,
+        domain,
+        page_url_host: loc.urlHost,
+        page_title: loc.title,
+        backend_node_id: actionableBackendNodeId,
+        handle_fingerprint: handleFingerprint(domain, page.id, actionableBackendNodeId, meta, kind),
+        element_kind: kind,
+      };
+    } finally {
+      await this.cdp.send("Overlay.setInspectMode", { mode: "none" }, sessionId).catch(() => undefined);
+      await this.cdp.send("Overlay.disable", {}, sessionId).catch(() => undefined);
+      await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+
+  async revalidateHandle(h: {
+    target_id: string;
+    domain: string;
+    backend_node_id: number;
+    handle_fingerprint: string;
+    element_kind: ElementKind;
+  }): Promise<void> {
+    const sessionId = await this.attach(h.target_id).catch(() => {
+      throw new ShuttleError("handle_invalid", "Handle target is gone (navigation/detach).");
+    });
+    try {
+      let meta: { tag: string; type?: string; name?: string; id?: string; editable: boolean; role?: string; ariaLabel?: string; href: boolean };
+      try {
+        meta = await this.describeBackendNode(sessionId, h.backend_node_id);
+      } catch {
+        throw new ShuttleError("handle_invalid", "Handle element no longer resolvable.");
+      }
+      const loc = await this.evaluate<{ domain: string }>(h.target_id, "({domain: location.hostname})");
+      const domain = loc.domain.toLowerCase();
+      const kind = elementKind(meta);
+      const fp = handleFingerprint(domain, h.target_id, h.backend_node_id, meta, kind);
+      if (domain !== h.domain || kind !== h.element_kind || fp !== h.handle_fingerprint) {
+        throw new ShuttleError("handle_invalid", "Handle no longer matches the marked element.");
+      }
+    } finally {
+      await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
   }
 }

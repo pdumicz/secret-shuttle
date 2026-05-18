@@ -25,6 +25,15 @@ function stubBrowser(state: { domain: string; target: string; value: string }): 
       return rest;
     },
     currentDomainAndTarget: async () => ({ domain: state.domain, target_id: state.target }),
+    markFocused: async () => ({
+      target_id: state.target, domain: state.domain, page_url_host: state.domain,
+      page_title: "stub", backend_node_id: 1, handle_fingerprint: "sha256:stub", element_kind: "field" as const,
+    }),
+    markPick: async () => ({
+      target_id: state.target, domain: state.domain, page_url_host: state.domain,
+      page_title: "stub", backend_node_id: 2, handle_fingerprint: "sha256:stubpick", element_kind: "button" as const,
+    }),
+    revalidateHandle: async () => undefined,
   };
 }
 
