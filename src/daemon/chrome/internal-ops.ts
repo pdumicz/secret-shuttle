@@ -229,6 +229,34 @@ const HANDLE_READ_SCRIPT = `
 })()
 `;
 
+// In-page self→ancestor walk to the nearest actionable element. Exported so the
+// climb logic (incl. the text-node start) is unit-tested directly — it runs in
+// the page so it cannot import elementKind(); it MUST stay in lockstep with
+// elementKind() in this file (spec §3.3 single source of truth).
+export const NORMALIZE_TO_ACTIONABLE_FN = `function(){
+  const TEXT = new Set(["","text","password","email","url","search","tel","number"]);
+  function kind(el){
+    const tag = el.tagName.toLowerCase();
+    const type = (el.type || "").toLowerCase();
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    const editable = el instanceof HTMLElement && el.isContentEditable;
+    if (editable && tag !== "input" && tag !== "textarea") return "field";
+    if (tag === "textarea") return "field";
+    if (tag === "input" && TEXT.has(type)) return "field";
+    if (tag === "button" || tag === "summary" || role === "button") return "button";
+    if (tag === "input" && ["submit","button","image","reset"].includes(type)) return "button";
+    if ((tag === "a" && el.hasAttribute("href")) || role === "link") return "link";
+    return "other";
+  }
+  let el = this.nodeType === 1 ? this : this.parentElement, depth = 0;
+  while (el && el.nodeType === 1 && depth < 25) {
+    if (kind(el) !== "other") return el;
+    el = el.parentElement;
+    depth++;
+  }
+  return null;
+}`;
+
 function fieldFingerprint(domain: string, target: string, backendNodeId: number | null, field: FieldDescriptor): string {
   const seed = JSON.stringify({ domain, target, backendNodeId, ...field });
   return `sha256:${createHash("sha256").update(seed).digest("hex").slice(0, 16)}`;
@@ -403,31 +431,7 @@ export class CdpBrowserOps implements BrowserOps {
         "Runtime.callFunctionOn",
         {
           objectId: object.objectId,
-          functionDeclaration: `function(){
-            const TEXT = new Set(["","text","password","email","url","search","tel","number"]);
-            // MUST mirror elementKind() in this file (spec §3.3 single source of truth).
-            // This is a hand-clone because it runs in the page context; keep in lockstep.
-            function kind(el){
-              const tag = el.tagName.toLowerCase();
-              const type = (el.type || "").toLowerCase();
-              const role = (el.getAttribute("role") || "").toLowerCase();
-              const editable = el instanceof HTMLElement && el.isContentEditable;
-              if (editable && tag !== "input" && tag !== "textarea") return "field";
-              if (tag === "textarea") return "field";
-              if (tag === "input" && TEXT.has(type)) return "field";
-              if (tag === "button" || tag === "summary" || role === "button") return "button";
-              if (tag === "input" && ["submit","button","image","reset"].includes(type)) return "button";
-              if ((tag === "a" && el.hasAttribute("href")) || role === "link") return "link";
-              return "other";
-            }
-            let el = this, depth = 0;
-            while (el && el.nodeType === 1 && depth < 25) {
-              if (kind(el) !== "other") return el;
-              el = el.parentElement;
-              depth++;
-            }
-            return null;
-          }`,
+          functionDeclaration: NORMALIZE_TO_ACTIONABLE_FN,
         },
         sessionId,
       );
