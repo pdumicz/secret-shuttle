@@ -12,13 +12,13 @@ export type SecretAction =
 // deliberately NOT the same concept as vault.ts `DEFAULT_ACTIONS` ("actions
 // granted by default"), which stays an explicit policy list so a future action
 // is never silently default-granted.
-export const ALL_SECRET_ACTIONS: SecretAction[] = [
+export const ALL_SECRET_ACTIONS: readonly SecretAction[] = Object.freeze([
   "capture_from_page",
   "inject_into_field",
   "compare_fingerprint",
   "use_as_stdin",
   "inject_submit",
-];
+]);
 
 export interface SecretRecord {
   id: string;

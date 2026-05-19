@@ -28,11 +28,14 @@ test("a newly created secret gets inject_submit in the extended default action s
       name: "WEBHOOK", environment: "production", source: "stripe",
       value: "whsec_v1", allowedDomains: ["dashboard.stripe.com"],
     });
-    assert.equal(meta.allowed_actions.includes("inject_submit"), true);
+    assert.deepEqual(meta.allowed_actions, [
+      "capture_from_page", "inject_into_field",
+      "compare_fingerprint", "use_as_stdin", "inject_submit",
+    ]);
   });
 });
 
-test("a legacy secret whose stored actions lack inject_submit is NOT implicitly granted it", async () => {
+test("an explicitly-scoped secret persists exactly those actions (no implicit inject_submit grant)", async () => {
   await withVault(async (vault) => {
     await vault.upsertSecret({
       name: "LEGACY", environment: "production", source: "stripe",
