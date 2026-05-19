@@ -7,6 +7,7 @@ import { DaemonServer } from "../server.js";
 import { DaemonServices } from "../services.js";
 import { registerRoutes } from "./router.js";
 import { getShuttlePaths } from "../../shared/config.js";
+import { ShuttleError } from "../../shared/errors.js";
 import type { BrowserOps } from "../chrome/internal-ops.js";
 
 function stub(over: Partial<BrowserOps> = {}): BrowserOps {
@@ -201,7 +202,7 @@ test("pre-write handle revalidation failure (post-approval) ends blind and error
   await withDaemon(async ({ port, services }) => {
     let calls = 0;
     services.browser = stub({
-      revalidateHandle: async () => { calls += 1; if (calls > 2) throw Object.assign(new Error("gone"), { code: "handle_invalid" }); },
+      revalidateHandle: async () => { calls += 1; if (calls > 2) throw new ShuttleError("handle_invalid", "gone"); },
     });
     await setup(services, port);
     const g = services.approvals.create(bindingFor());

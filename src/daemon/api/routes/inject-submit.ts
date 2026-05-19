@@ -125,20 +125,11 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
 
       // Re-revalidate post-approval, pre-write. Failure here = nothing written →
       // safe to end blind and rethrow (mirrors current inject pre-write path).
-      // Normalize any error that carries a .code to a ShuttleError so the server
-      // can return 400 (not 500) and the client sees the right error code.
       try {
         await browser.revalidateHandle(fieldHandle);
         await browser.revalidateHandle(submitHandle);
       } catch (preWriteErr) {
         services.blind.end();
-        if (preWriteErr instanceof ShuttleError) throw preWriteErr;
-        if (preWriteErr instanceof Error) {
-          const errCode = (preWriteErr as unknown as { code?: unknown }).code;
-          if (typeof errCode === "string") {
-            throw new ShuttleError(errCode, preWriteErr.message);
-          }
-        }
         throw preWriteErr;
       }
 
