@@ -7,6 +7,7 @@ import { DaemonServer } from "../server.js";
 import { DaemonServices } from "../services.js";
 import { registerRoutes } from "./router.js";
 import type { BrowserOps, CaptureResult } from "../chrome/internal-ops.js";
+import { DEFAULT_ACTIONS } from "../../vault/vault.js";
 
 async function withDaemon<T>(fn: (ctx: { port: number; token: string; services: DaemonServices }) => Promise<T>): Promise<T> {
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-api-"));
@@ -603,6 +604,7 @@ test("production template: route-created grant is consumable on retry (no self-m
       environment: "production", destination_domain: null, target_id: null,
       field_fingerprint: null, template_id: null, template_params: null,
       allowed_domains: ["example.com"],
+      allowed_actions: [...DEFAULT_ACTIONS],
     });
     ctx.services.approvals.approve(g.id);
     await call(ctx, "POST", "/v1/secrets/generate", {

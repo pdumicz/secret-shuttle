@@ -6,6 +6,7 @@ import test from "node:test";
 import { DaemonServer } from "../server.js";
 import { DaemonServices } from "../services.js";
 import { registerRoutes } from "./router.js";
+import { DEFAULT_ACTIONS } from "../../vault/vault.js";
 
 async function withDaemon<T>(fn: (ctx: { port: number; token: string; services: DaemonServices; home: string }) => Promise<T>): Promise<T> {
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-audit-wiring-"));
@@ -92,6 +93,7 @@ test("approval lifecycle (created, granted, used) is audited; raw values never a
       target_id: null, field_fingerprint: null,
       template_id: null, template_params: null,
       allowed_domains: ["example.com"],
+      allowed_actions: [...DEFAULT_ACTIONS],
     });
     ctx.services.approvals.approve(grant.id);
 
