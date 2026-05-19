@@ -43,6 +43,7 @@ export function registerUiRoutes(server: DaemonServer, store: ApprovalStore): vo
       template_binary_path: grant.template_binary_path ?? null,
       template_binary_sha256: grant.template_binary_sha256 ?? null,
       allowed_domains: grant.allowed_domains ?? null,
+      allowed_actions: grant.allowed_actions ?? null,
       page_title: grant.page_title ?? null,
       page_url_host: grant.page_url_host ?? null,
       status: grant.status,

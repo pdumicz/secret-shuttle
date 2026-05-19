@@ -9,6 +9,8 @@ import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
+import { DEFAULT_ACTIONS } from "../../../vault/vault.js";
+import { ALL_SECRET_ACTIONS, type SecretAction } from "../../../vault/types.js";
 import { asObject, reqString } from "../validate.js";
 import { disableObservationDomains } from "../../chrome/internal-ops.js";
 import type { InjectResult } from "../../chrome/internal-ops.js";
@@ -20,6 +22,7 @@ interface GenerateBody {
   source?: string;
   kind?: string;
   allowed_domains?: string[];
+  allowed_actions?: string[];
   description?: string;
   force?: boolean;
   approval_id?: string;
@@ -50,6 +53,16 @@ interface CompareBody {
   wait_for_approval?: boolean;
 }
 
+const SECRET_ACTIONS = new Set<string>(ALL_SECRET_ACTIONS);
+
+function validatedActions(raw: unknown): SecretAction[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.some((x) => typeof x !== "string" || !SECRET_ACTIONS.has(x))) {
+    throw new ShuttleError("bad_request", "allowed_actions: must be an array of known secret actions");
+  }
+  return raw as SecretAction[];
+}
+
 export function registerSecrets(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/secrets/list", async (_req, raw) => {
     services.lock.requireKey();
@@ -77,6 +90,20 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       const plannedRef = buildSecretRef(b.source ?? "local", env, b.name);
       const effectiveAllowed = (b.allowed_domains ?? []).map(normalizeDomain);
 
+      // Validate BEFORE building the binding / requireApproval (§4.4): a bad
+      // action set must fail fast, never after a human has approved.
+      const requestedActions = validatedActions(b.allowed_actions);
+      // Effective scope shown in the approval == what will actually be stored
+      // (mirrors vault.upsertSecret's own resolution, §4.4): explicit wins; else
+      // preserve an existing record's actions on overwrite; else the default set.
+      let existingActions: SecretAction[] | undefined;
+      try {
+        existingActions = (await services.vault.getSecret(plannedRef)).allowed_actions;
+      } catch {
+        existingActions = undefined;
+      }
+      const effectiveActions = requestedActions ?? existingActions ?? [...DEFAULT_ACTIONS];
+
       if (canonicalEnvironment(env) === "production" && effectiveAllowed.length === 0) {
         throw new ShuttleError("missing_allow_domain", "Production secrets require at least one allowed domain.");
       }
@@ -92,6 +119,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         template_id: null,
         template_params: null,
         allowed_domains: effectiveAllowed,
+        allowed_actions: effectiveActions,
       };
       await requireApproval({
         store: services.approvals,
@@ -109,6 +137,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         value,
         ...(b.description !== undefined ? { description: b.description } : {}),
         allowedDomains: effectiveAllowed,
+        allowedActions: effectiveActions,
         ...(b.force !== undefined ? { force: b.force } : {}),
       });
       await writeDaemonAudit({ action: "generate", ok: true, ref: meta.ref, environment: meta.environment });
@@ -358,7 +387,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
   });
 }
 
-function enforceDomain(current: string, allowed: string[], action: string): void {
+export function enforceDomain(current: string, allowed: string[], action: string): void {
   if (allowed.length === 0) {
     throw new ShuttleError(
       "domain_not_allowed",

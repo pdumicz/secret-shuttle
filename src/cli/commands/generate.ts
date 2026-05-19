@@ -13,6 +13,7 @@ export function generateCommand(): Command {
     .option("--source <source>", "Secret source namespace.", "local")
     .option("--kind <kind>", "Secret kind.", "random_32_bytes")
     .option("--allow-domain <domain>", "Allowed destination domain.", collectRepeated, [])
+    .option("--allow-action <action>", "Allowed secret action (repeatable). Omit to use defaults.", collectRepeated, [])
     .option("--description <description>")
     .option("--force", "Overwrite an existing secret with the same ref.", false)
     .option("--approval-id <id>", "Pre-issued approval id.")
@@ -34,6 +35,8 @@ export function generateCommand(): Command {
         wait_for_approval: options.wait !== false,
       };
       if (domains.length > 0) body.allowed_domains = domains;
+      const actions = options.allowAction as string[];
+      if (actions.length > 0) body.allowed_actions = actions;
       if (options.description !== undefined) body.description = options.description;
       if (options.approvalId !== undefined) body.approval_id = options.approvalId;
       const r = await daemonRequest("POST", "/v1/secrets/generate", body);
