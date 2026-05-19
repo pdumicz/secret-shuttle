@@ -10,7 +10,7 @@ export type ApprovalLifecycleEvent =
   | { kind: "mismatch"; binding: ApprovalBinding; existingGrant: ApprovalGrant };
 
 export interface ApprovalBinding {
-  action: "inject" | "capture" | "generate" | "compare" | "template" | "blind_end" | "inject_submit";
+  action: "inject" | "capture" | "generate" | "compare" | "template" | "blind_end" | "inject_submit" | "reveal_capture";
   ref: string | null;
   planned_ref?: string | null;
   environment: string;
@@ -26,6 +26,10 @@ export interface ApprovalBinding {
   submit_fingerprint?: string | null;
   success_condition?: string | null;
   auto_resume?: boolean | null;
+  reveal_fingerprint?: string | null;
+  hide_fingerprint?: string | null;
+  container_fingerprint?: string | null;
+  capture_mode?: "field" | "container" | "focused-after-reveal" | null;
   /** The action scope the human approves (generate). Part of bindingsMatch as a stable set. */
   allowed_actions?: string[] | null;
   /** Display-only context for the human approver. NOT part of bindingsMatch. */
@@ -33,6 +37,9 @@ export interface ApprovalBinding {
   page_url_host?: string | null;
   field_handle_label?: string | null;
   submit_handle_label?: string | null;
+  reveal_handle_label?: string | null;
+  hide_handle_label?: string | null;
+  container_handle_label?: string | null;
 }
 
 export type ApprovalStatus = "pending" | "granted" | "denied" | "expired" | "used";
@@ -140,7 +147,11 @@ function bindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
     domainSet(a.allowed_actions) === domainSet(b.allowed_actions) &&
     (a.submit_fingerprint ?? null) === (b.submit_fingerprint ?? null) &&
     (a.success_condition ?? null) === (b.success_condition ?? null) &&
-    (a.auto_resume ?? null) === (b.auto_resume ?? null)
+    (a.auto_resume ?? null) === (b.auto_resume ?? null) &&
+    (a.reveal_fingerprint ?? null) === (b.reveal_fingerprint ?? null) &&
+    (a.hide_fingerprint ?? null) === (b.hide_fingerprint ?? null) &&
+    (a.container_fingerprint ?? null) === (b.container_fingerprint ?? null) &&
+    (a.capture_mode ?? null) === (b.capture_mode ?? null)
   );
 }
 
