@@ -7,7 +7,7 @@ import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { asObject, reqString } from "../validate.js";
-import { disableObservationDomains } from "../../chrome/internal-ops.js";
+import { blankAllPages, disableObservationDomains } from "../../chrome/internal-ops.js";
 import { enforceDomain } from "./secrets.js";
 import { autoResumeBlind } from "../../blind-auto-resume.js";
 
@@ -159,6 +159,25 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
           "inject_click_timeout",
         );
       } catch {
+        // Post-write failure (thrown inject/click OR the withDeadline timeout):
+        // the secret may be on the page from a partial inject, and on the
+        // timeout path the orphaned inject/click op may still be RUNNING and
+        // could land the secret AFTER we return — racing the human
+        // manual-recovery attestation (a TOCTOU against /v1/blind/end). Proactively
+        // neutralize the page now with the SAME hardened primitive the human
+        // /v1/blind/end uses (blankAllPages → about:blank): any already-written
+        // secret is removed, and a later orphaned write/click lands on
+        // about:blank / a stale backend node and is inert. Best-effort and
+        // bounded (blankAllPages uses raw cdp.send and can itself hang): its
+        // failure must NOT change the response — blind STAYS active, the
+        // fail-closed 200 is unchanged, and the human /v1/blind/end
+        // (requireApproval + its own blankAllPages) remains the authoritative
+        // recovery. This is additive defense-in-depth that shrinks the
+        // orphan/TOCTOU window; it does NOT end blind or replace manual recovery.
+        if (services.cdp !== null) {
+          const blankMs = Number(process.env.SECRET_SHUTTLE_BLANK_DEADLINE_MS) || 15_000;
+          await withDeadline(blankAllPages(services.cdp), blankMs, "blank_timeout").catch(() => undefined);
+        }
         await services.vault.markUsed(secret.ref).catch(() => undefined);
         await writeDaemonAudit({
           action: "inject_submit", ok: false, ref: secret.ref, environment: secret.environment,

@@ -252,6 +252,57 @@ test("a HUNG inject/click (no throw, never resolves) fails closed within the dea
   }
 });
 
+test("post-write timeout best-effort blanks all pages (orphaned/partial secret-bearing op) — blind STAYS active, fail-closed 200 unchanged", async () => {
+  const prevD = process.env.SECRET_SHUTTLE_INJECT_CLICK_DEADLINE_MS;
+  process.env.SECRET_SHUTTLE_INJECT_CLICK_DEADLINE_MS = "200";
+  try {
+    await withDaemon(async ({ port, services }) => {
+      // Minimal recording fake satisfying ONLY the cdp.send calls blankAllPages
+      // makes: Target.getTargets → one page target; Target.attachToTarget →
+      // sessionId; Page.navigate → no errorText; Runtime.evaluate(location.href)
+      // → "about:blank" (so blankAllPages treats the page as successfully
+      // blanked); Target.detachFromTarget. Records every method called so the
+      // test can assert the neutralization path actually ran. Test-only cast.
+      const calls: { method: string; params?: unknown }[] = [];
+      const fakeCdp = {
+        send(method: string, params?: unknown): Promise<unknown> {
+          calls.push({ method, params });
+          if (method === "Target.getTargets") {
+            return Promise.resolve({ targetInfos: [{ targetId: "T-1", type: "page" }] });
+          }
+          if (method === "Target.attachToTarget") return Promise.resolve({ sessionId: "S" });
+          if (method === "Page.navigate") return Promise.resolve({});
+          if (method === "Runtime.evaluate") return Promise.resolve({ result: { value: "about:blank" } });
+          if (method === "Target.detachFromTarget") return Promise.resolve({});
+          return Promise.resolve({});
+        },
+      };
+      // never-settling click → withDeadline(inject+click) rejects at 200ms →
+      // post-write catch fires (secret may be on the page; orphaned op running).
+      services.browser = stub({ clickBackendNode: () => new Promise<void>(() => {}) });
+      await setup(services, port);
+      services.cdp = fakeCdp as unknown as typeof services.cdp;
+      const g = services.approvals.create(bindingFor());
+      services.approvals.approve(g.id);
+      const started = Date.now();
+      const r = await call(port, "POST", "/v1/secrets/inject-submit", body({ approval_id: g.id }));
+      assert.ok(Date.now() - started < 5_000, "completes well under a few seconds");
+      assert.equal(r.status, 200);
+      assert.equal((r.body as { submitted: unknown }).submitted, "unknown");
+      assert.equal((r.body as { blind_mode: boolean }).blind_mode, true);
+      assert.equal((r.body as { next: string }).next, "manual_recovery_required");
+      assert.notEqual(services.blind.current(), null); // blind STILL active
+      // Neutralization ran: blankAllPages navigated the page to about:blank.
+      const nav = calls.find((c) => c.method === "Page.navigate");
+      assert.notEqual(nav, undefined);
+      assert.deepEqual(nav?.params, { url: "about:blank" });
+    });
+  } finally {
+    if (prevD === undefined) delete process.env.SECRET_SHUTTLE_INJECT_CLICK_DEADLINE_MS;
+    else process.env.SECRET_SHUTTLE_INJECT_CLICK_DEADLINE_MS = prevD;
+  }
+});
+
 test("post-write vault.markUsed failure keeps blind active and returns the fail-closed 200 (not a thrown error)", async () => {
   await withDaemon(async ({ port, services }) => {
     services.browser = stub({ observeText: async () => true, proveAbsence: async () => ({ passed: true }) });
