@@ -4,7 +4,21 @@ export type SecretAction =
   | "capture_from_page"
   | "inject_into_field"
   | "compare_fingerprint"
-  | "use_as_stdin";
+  | "use_as_stdin"
+  | "inject_submit";
+
+// Canonical runtime enumeration of SecretAction. Request validation derives
+// from this (never re-lists actions). NOTE: this is "all known actions" — it is
+// deliberately NOT the same concept as vault.ts `DEFAULT_ACTIONS` ("actions
+// granted by default"), which stays an explicit policy list so a future action
+// is never silently default-granted.
+export const ALL_SECRET_ACTIONS: SecretAction[] = [
+  "capture_from_page",
+  "inject_into_field",
+  "compare_fingerprint",
+  "use_as_stdin",
+  "inject_submit",
+];
 
 export interface SecretRecord {
   id: string;

@@ -13,11 +13,12 @@ import type {
   VaultPlaintext,
 } from "./types.js";
 
-const DEFAULT_ACTIONS: SecretAction[] = [
+export const DEFAULT_ACTIONS: SecretAction[] = [
   "capture_from_page",
   "inject_into_field",
   "compare_fingerprint",
   "use_as_stdin",
+  "inject_submit",
 ];
 
 export class Vault {
@@ -80,7 +81,11 @@ export class Vault {
       last_used_at: existing?.last_used_at ?? null,
       fingerprint: fingerprintSecret(input.value, Buffer.from(plaintext.fingerprint_key as string, "base64")),
       allowed_domains: normalizeDomains(input.allowedDomains),
-      allowed_actions: input.allowedActions ?? DEFAULT_ACTIONS,
+      // Explicit caller-supplied actions win. Otherwise: a brand-new record gets
+      // the extended default set; an OVERWRITE preserves the prior record's
+      // allowed_actions so a force-rotate never silently widens scope (§4.4).
+      allowed_actions:
+        input.allowedActions ?? (existing !== undefined ? [...existing.allowed_actions] : DEFAULT_ACTIONS),
       requires_approval: input.requiresApproval ?? environment === "production",
       classification: environment === "production" ? "production_secret" : "secret",
       value: input.value,
