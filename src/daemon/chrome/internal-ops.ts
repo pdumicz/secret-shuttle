@@ -301,10 +301,13 @@ export const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
         }
         if ((el.tagName === "INPUT" || el.tagName === "TEXTAREA") && hit(el.value)) return { hit:true };
         try { if (el.isContentEditable && hit(el.innerText)) return { hit:true }; } catch (e) {}
+        if ((el.tagName === "SCRIPT" || el.tagName === "STYLE" || el.tagName === "NOSCRIPT") && hit(el.textContent)) return { hit:true };
+        if (el.tagName === "TEMPLATE") { try { if (el.content && hit(el.content.textContent)) return { hit:true }; } catch (e) { return { inconclusive:true }; } }
         if (el.shadowRoot) { for (const c of el.shadowRoot.children) stack.push(c); }
         if (el.children) { for (const c of el.children) stack.push(c); }
       }
       try { if (doc.body && hit(doc.body.innerText)) return { hit:true }; } catch (e) {}
+      try { var de = doc.documentElement; if (de && hit(de.textContent)) return { hit:true }; } catch (e) { return { inconclusive:true }; }
       let frames;
       try { frames = doc.querySelectorAll("iframe,frame"); } catch (e) { return { inconclusive:true }; }
       for (const f of frames) {

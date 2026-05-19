@@ -175,3 +175,132 @@ test("absence scan fails closed when a SAME-ORIGIN FRAME is still loading (per-d
   const loadingFrame = { contentDocument: cleanDoc("loading") };
   assert.deepEqual(runScan(cleanDoc("complete", [loadingFrame])), { found: false, inconclusive: true });
 });
+
+// --- Real ABSENCE_SCAN_FN hit-detection coverage (no stub) -------------------
+// Sibling builder to cleanDoc: a single complete document whose documentElement
+// subtree, body.innerText, documentElement.textContent, location and frames are
+// each independently populable so a test can plant "sek" on exactly one surface
+// and assert the REAL scan returns a positive (top-doc hit ⇒ {found:true}).
+interface ShimNode {
+  tagName?: string;
+  attributes?: { name: string; value: string }[] | null;
+  value?: string;
+  textContent?: string;
+  isContentEditable?: boolean;
+  innerText?: string;
+  shadowRoot?: { children: ShimNode[] } | null;
+  content?: { textContent?: string } | null;
+  children?: ShimNode[];
+}
+interface RichOpts {
+  children?: ShimNode[];
+  bodyInnerText?: string;
+  docElementTextContent?: string;
+  location?: { href?: string; search?: string; hash?: string };
+  frames?: unknown[];
+}
+function richDoc(o: RichOpts = {}): unknown {
+  return {
+    readyState: "complete",
+    defaultView: { location: { href: "", search: "", hash: "", ...(o.location ?? {}) } },
+    documentElement: {
+      tagName: "HTML",
+      attributes: null,
+      shadowRoot: null,
+      children: o.children ?? [],
+      textContent: o.docElementTextContent ?? "",
+    },
+    body: { innerText: o.bodyInnerText ?? "" },
+    querySelectorAll: () => o.frames ?? [],
+  };
+}
+
+test("absence scan hits on an allowlisted element attribute (data-*)", () => {
+  const doc = richDoc({
+    children: [{ tagName: "DIV", attributes: [{ name: "data-x", value: "abc-sek-xyz" }], children: [], shadowRoot: null }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+test("absence scan hits on an INPUT .value", () => {
+  const doc = richDoc({
+    children: [{ tagName: "INPUT", value: "pre sek post", attributes: null, children: [], shadowRoot: null }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+test("absence scan hits on a TEXTAREA .value", () => {
+  const doc = richDoc({
+    children: [{ tagName: "TEXTAREA", value: "line\nsek\nline", attributes: null, children: [], shadowRoot: null }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+test("absence scan hits on an open shadowRoot descendant", () => {
+  const doc = richDoc({
+    children: [{
+      tagName: "MY-HOST",
+      attributes: null,
+      children: [],
+      shadowRoot: { children: [{ tagName: "INPUT", value: "shadow sek here", attributes: null, children: [], shadowRoot: null }] },
+    }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+test("absence scan hits on location.href", () => {
+  assert.deepEqual(runScan(richDoc({ location: { href: "https://x.test/?t=sek" } })), { found: true, inconclusive: false });
+});
+
+test("absence scan hits on location.search", () => {
+  assert.deepEqual(runScan(richDoc({ location: { search: "?token=sek" } })), { found: true, inconclusive: false });
+});
+
+test("absence scan hits on location.hash", () => {
+  assert.deepEqual(runScan(richDoc({ location: { hash: "#sek" } })), { found: true, inconclusive: false });
+});
+
+test("absence scan hits on rendered text via body.innerText", () => {
+  assert.deepEqual(runScan(richDoc({ bodyInnerText: "visible sek text" })), { found: true, inconclusive: false });
+});
+
+test("absence scan hits inside a same-origin frame's contentDocument", () => {
+  const frameDoc = richDoc({
+    children: [{ tagName: "INPUT", value: "in-frame sek", attributes: null, children: [], shadowRoot: null }],
+  });
+  const parent = richDoc({ frames: [{ contentDocument: frameDoc }] });
+  assert.deepEqual(runScan(parent), { found: true, inconclusive: false });
+});
+
+// (g) THE FAIL-OPEN REGRESSION TEST: a <script type="application/json"> SSR
+// hydration blob whose .textContent holds the raw secret. FAILS before the
+// internal-ops change (script-readable non-rendered text was unscanned), PASSES
+// after.
+test("absence scan hits on a <script type=application/json> textContent (SSR hydration blob) [regression: fail-OPEN]", () => {
+  const doc = richDoc({
+    children: [{
+      tagName: "SCRIPT",
+      attributes: [{ name: "type", value: "application/json" }],
+      textContent: '{"props":{"token":"sek"}}',
+      children: [],
+      shadowRoot: null,
+    }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+// (h) display:none / non-rendered light-DOM text: present ONLY in
+// documentElement.textContent, absent from body.innerText.
+test("absence scan hits on non-rendered light-DOM text (documentElement.textContent superset, not body.innerText)", () => {
+  const doc = richDoc({ bodyInnerText: "nothing here", docElementTextContent: "hidden sek node" });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+// (i) a <template> whose .content.textContent holds the secret (inert subtree,
+// not in documentElement.textContent / body.innerText).
+test("absence scan hits on a <template> content.textContent", () => {
+  const doc = richDoc({
+    children: [{ tagName: "TEMPLATE", attributes: null, content: { textContent: "tmpl sek" }, children: [], shadowRoot: null }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
