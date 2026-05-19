@@ -29,16 +29,23 @@ interface El {
   role?: string | null;
   href?: boolean;
   children?: El[];
-  shadowRoot?: { children: El[]; textContent?: string } | null;
+  shadowRoot?: { children: El[]; textContent?: string; innerHTML?: string } | null;
   /** Extra attributes beyond role/href, keyed by attribute name. Used by __attrs-aware shim. */
   __attrs?: Record<string, string>;
   /**
-   * Open shadow root for the §6.1 round-5 shadow-text tests. When set, the
-   * shim's `shadowRoot` is this object (mirrors a real open shadowRoot:
-   * script-readable `.textContent` + element `.children`). Omitted → `shadowRoot`
+   * Open shadow root for the §6.1 round-5/round-6 shadow-fold tests. When set,
+   * the shim's `shadowRoot` is this object (mirrors a real open shadowRoot:
+   * script-readable `.textContent` + script-readable `.innerHTML` (which
+   * SUPERSETS textContent — includes comments and any non-element nodes at any
+   * depth in the shadow tree) + element `.children`). Omitted → `shadowRoot`
    * stays `null` (closed/no shadow), preserving every pre-existing test.
+   *
+   * `innerHTML` is optional in the shape: callers that only need the round-5
+   * textContent fold may omit it (BASELINE_SCAN_FN reads `innerHTML` after the
+   * round-6 fix; `undefined` is non-string and the fn's `typeof === "string"`
+   * guard short-circuits cleanly — strictly monotonic).
    */
-  __shadow?: { children: El[]; textContent: string };
+  __shadow?: { children: El[]; textContent: string; innerHTML?: string };
 }
 // Minimal outerHTML serializer for the shim: <TAG attr="v">children/text</TAG>
 function serializeOuterHTML(e: El): string {
@@ -592,17 +599,29 @@ test("BASELINE_SCAN_FN: a secret as a bare text node directly under an open shad
   // outerHTML does NOT serialize shadow DOM and the DFS only visits shadow
   // ELEMENT children — so a secret living ONLY as a bare text node directly
   // under an open shadowRoot (no element child carries it) was absent from
-  // observable and readableFps: a §6.1 fail-OPEN. host.shadowRoot.textContent
-  // is script-readable, so those bytes WERE observable pre-blind and MUST be
-  // folded into the daemon-only observable blob.
+  // observable and readableFps: a §6.1 fail-OPEN. host.shadowRoot.innerHTML
+  // (post-round-6: superset of textContent) is script-readable, so those bytes
+  // WERE observable pre-blind and MUST be folded into the daemon-only
+  // observable blob.
+  //
+  // round-6 update: BASELINE_SCAN_FN now folds shadowRoot.innerHTML (superset
+  // of textContent — includes comments and any non-element nodes at any depth).
+  // For plain text, innerHTML mirrors textContent (a text node serializes to
+  // its data); supplying both keeps this round-5 guard passing.
   const SECRET = "whsec_SHADOW_BARE_TEXT_NODE_r5";
-  const host = el("div", { __shadow: { children: [], textContent: `prefix ${SECRET} suffix` } });
+  const host = el("div", {
+    __shadow: {
+      children: [],
+      textContent: `prefix ${SECRET} suffix`,
+      innerHTML: `prefix ${SECRET} suffix`,
+    },
+  });
   const bRoot = el("div", { children: [host, el("input", { type: "text", value: "" })] });
   const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
   assert.equal(b.ok, true, "ok must be true");
   assert.ok(typeof b.observable === "string", "observable must be a string");
   assert.ok(b.observable.includes(SECRET),
-    "observable must contain the bare shadow text-node secret (folded shadowRoot.textContent)");
+    "observable must contain the bare shadow text-node secret (folded shadowRoot.innerHTML)");
 });
 
 test("BASELINE_SCAN_FN: a secret in a shadow ELEMENT child is still in observable AND entries (no regression from the shadow-text fold, §6.1 round-5)", () => {
@@ -636,11 +655,67 @@ test("BASELINE_SCAN_FN: an open-shadowRoot textContent that pushes obsLen over O
   // A pathological shadow text node whose length pushes the running obsLen
   // past OBS_CAP (4_000_000) MUST fail closed — symmetric with the outerHTML /
   // readableValue / attribute size bounds. 4_000_001 chars alone overflows.
-  const host = el("div", { __shadow: { children: [], textContent: "y".repeat(4_000_001) } });
+  // NOTE round-6: BASELINE_SCAN_FN now reads `shadowRoot.innerHTML` (not
+  // `.textContent`). The shim's `__shadow.innerHTML` is undefined here →
+  // `typeof !== "string"` short-circuits the fold (no overflow from this host).
+  // This pre-existing test therefore needs `innerHTML` to be explicitly set to
+  // the same overflow string to preserve the original assertion semantics.
+  const host = el("div", { __shadow: { children: [], textContent: "y".repeat(4_000_001), innerHTML: "y".repeat(4_000_001) } });
   const bRoot = el("div", { children: [host, el("input", { type: "text", value: "" })] });
   const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
   assert.equal(b.ok, false, "ok must be false (shadow-text size-bound fail-closed)");
   assert.equal(b.observable, "", "observable must be empty string on shadow overflow");
   assert.deepEqual(b.entries, [], "entries must be [] on ok:false");
   assert.deepEqual(b.readableFps, [], "readableFps must be [] on ok:false");
+});
+
+// ---- NEW §6.1 round-6: open-shadowRoot innerHTML (comment + text) fold ----
+// Round-5 closed the bare-text-node case (shadowRoot.textContent). Round-6
+// closes the comment-node case (shadowRoot.innerHTML) symmetrically with
+// ABSENCE_SCAN_FN, which also switches to .innerHTML. innerHTML SUPERSETS
+// textContent — `textContent ⊂ innerHTML` — so the observable blob strictly
+// grows: strictly more fail-closed. The shadow-comment was script-readable
+// pre-blind (host.shadowRoot.innerHTML / host.shadowRoot.childNodes[*].data)
+// but textContent excludes comment nodes.
+
+test("BASELINE_SCAN_FN: a secret as a shadow-comment-only direct child of an open shadowRoot is folded into observable (§6.1 round-6 symmetric with ABSENCE)", () => {
+  // The ONLY representation of the secret is a comment node directly under the
+  // open shadowRoot. textContent excludes comments → before the round-6 fix,
+  // the observable blob did NOT contain the secret. After: innerHTML includes
+  // `<!-- … -->`, so the secret IS folded into observable.
+  const SECRET = "whsec_SHADOW_COMMENT_ONLY_r6";
+  const host = el("div", {
+    __shadow: {
+      children: [],
+      textContent: "", // textContent EXCLUDES comments — empty here
+      innerHTML: `<!-- ${SECRET} -->`, // innerHTML serializes the comment node
+    },
+  });
+  const bRoot = el("div", { children: [host, el("input", { type: "text", value: "" })] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  assert.ok(typeof b.observable === "string", "observable must be a string");
+  assert.ok(b.observable.includes(SECRET),
+    "observable must contain the shadow-comment-only secret (folded shadowRoot.innerHTML)");
+});
+
+test("BASELINE_SCAN_FN: a secret as plain shadow text is still in observable after the round-6 innerHTML switch (regression: round-5 case preserved)", () => {
+  // Round-5 covered plain text in an open shadowRoot via shadowRoot.textContent.
+  // Round-6 switches BASELINE's fold from .textContent to .innerHTML. innerHTML
+  // is a SUPERSET (textContent ⊂ innerHTML), so plain shadow text must STILL be
+  // covered. This regression guard sets `innerHTML` to the same string as
+  // `textContent` (mirrors real DOM where innerHTML serializes the text node).
+  const SECRET = "whsec_SHADOW_PLAIN_TEXT_round6_regression";
+  const host = el("div", {
+    __shadow: {
+      children: [],
+      textContent: `prefix ${SECRET} suffix`,
+      innerHTML: `prefix ${SECRET} suffix`, // real DOM: a text node serializes to its data in innerHTML
+    },
+  });
+  const bRoot = el("div", { children: [host, el("input", { type: "text", value: "" })] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  assert.ok(b.observable.includes(SECRET),
+    "observable must still contain plain shadow text after the round-6 innerHTML switch (textContent ⊂ innerHTML)");
 });

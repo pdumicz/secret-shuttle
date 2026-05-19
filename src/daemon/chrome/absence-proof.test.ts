@@ -188,11 +188,19 @@ interface ShimNode {
   textContent?: string;
   isContentEditable?: boolean;
   innerText?: string;
-  // Mirrors real DOM: an open shadowRoot exposes BOTH .textContent (concatenated
-  // subtree text — the analog of light-DOM documentElement.textContent) AND
-  // .children (element children, walked for INPUT.value / nested hosts). Closed
-  // shadow roots are null here (correctly out of scope per §5.4).
-  shadowRoot?: { textContent?: string; children: ShimNode[] } | null;
+  // Mirrors real DOM: an open shadowRoot exposes .textContent (concatenated
+  // subtree text — the analog of light-DOM documentElement.textContent), the
+  // SUPERSET .innerHTML (serialized subtree markup — includes comments and any
+  // non-element nodes at any depth in the shadow tree), AND .children (element
+  // children, walked for INPUT.value / nested hosts). Closed shadow roots are
+  // null here (correctly out of scope per §5.4).
+  //
+  // §6.1 round-6: ABSENCE_SCAN_FN now reads `shadowRoot.innerHTML` (not
+  // `.textContent`). innerHTML SUPERSETS textContent — `textContent ⊂
+  // innerHTML` — so the haystack strictly grows: strictly more conservative.
+  // Pre-existing round-5 tests pass `innerHTML` mirroring `textContent` (real
+  // DOM: a plain text node serializes to its data in innerHTML).
+  shadowRoot?: { textContent?: string; innerHTML?: string; children: ShimNode[] } | null;
   content?: { textContent?: string } | null;
   children?: ShimNode[];
 }
@@ -331,6 +339,11 @@ test("absence scan hits on ordinary text in an open-shadow <span> [regression: f
       children: [],
       shadowRoot: {
         textContent: "prefix sek suffix",
+        // round-6: ABSENCE_SCAN_FN reads .innerHTML (superset of .textContent).
+        // For plain text, innerHTML matches the textContent (a text node
+        // serializes to its data); supplying both keeps this regression guard
+        // passing across the round-5 → round-6 switch.
+        innerHTML: "<span>prefix sek suffix</span>",
         children: [{ tagName: "SPAN", attributes: null, textContent: "prefix sek suffix", children: [], shadowRoot: null }],
       },
     }],
@@ -347,7 +360,10 @@ test("absence scan hits on a bare text node in an open shadow root (textContent,
       tagName: "MY-HOST",
       attributes: null,
       children: [],
-      shadowRoot: { textContent: "lone sek text node", children: [] },
+      // round-6: innerHTML serializes the bare text node identically to
+      // textContent for plain text — providing both keeps the round-5 guard
+      // passing across the round-6 switch (.textContent → .innerHTML).
+      shadowRoot: { textContent: "lone sek text node", innerHTML: "lone sek text node", children: [] },
     }],
   });
   assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
@@ -364,12 +380,16 @@ test("absence scan hits on a NESTED open-shadow textContent (host -> shadow -> h
       attributes: null,
       children: [],
       shadowRoot: {
+        // round-6: innerHTML supersets textContent. The outer wrapper
+        // serializes as the inner host's tag (an element); the inner host's
+        // shadow text plants the secret.
         textContent: "outer wrapper, nothing here",
+        innerHTML: "<inner-host></inner-host>",
         children: [{
           tagName: "INNER-HOST",
           attributes: null,
           children: [],
-          shadowRoot: { textContent: "deeply nested sek value", children: [] },
+          shadowRoot: { textContent: "deeply nested sek value", innerHTML: "deeply nested sek value", children: [] },
         }],
       },
     }],
@@ -388,9 +408,44 @@ test("absence scan stays conclusive-clean for an open shadow root with no secret
       children: [],
       shadowRoot: {
         textContent: "perfectly innocuous shadow content",
+        // round-6: innerHTML must also be innocuous to preserve the
+        // monotonicity assertion (no false positive after the .textContent →
+        // .innerHTML switch).
+        innerHTML: "<span>innocuous</span>",
         children: [{ tagName: "SPAN", attributes: null, textContent: "innocuous", children: [], shadowRoot: null }],
       },
     }],
   });
   assert.deepEqual(runScan(doc), { found: false, inconclusive: false });
+});
+
+// --- §6.1 round-6: open-shadow COMMENT-NODE fail-OPEN regression coverage ---
+// Round-5 closed plain text in an open shadowRoot via shadowRoot.textContent.
+// Round-6 closes the SHADOW-COMMENT-NODE case symmetrically with BASELINE_SCAN_FN
+// by switching from .textContent to .innerHTML — textContent excludes comment
+// nodes, but they ARE script-readable via host.shadowRoot.innerHTML /
+// host.shadowRoot.childNodes[*].data. innerHTML SUPERSETS textContent —
+// `textContent ⊂ innerHTML` — so the haystack strictly grows: more fail-closed.
+
+// (n) THE FAIL-OPEN REGRESSION GUARD: secret as a comment node directly under
+// an open shadowRoot, with NO scannable children and NO matching textContent.
+// Reachable only via shadowRoot.innerHTML. FAILS before the round-6
+// internal-ops fix, PASSES after.
+test("absence scan hits on a shadow-comment-only direct child of an open shadowRoot [regression: fail-OPEN, §6.1 round-6 symmetric with BASELINE]", () => {
+  const doc = richDoc({
+    children: [{
+      tagName: "MY-HOST",
+      attributes: null,
+      children: [],
+      shadowRoot: {
+        // textContent EXCLUDES comment nodes — empty, so the round-5 fold
+        // misses the secret. innerHTML serializes the comment, so the round-6
+        // fold catches it.
+        textContent: "",
+        innerHTML: "<!-- sek -->",
+        children: [],
+      },
+    }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
 });

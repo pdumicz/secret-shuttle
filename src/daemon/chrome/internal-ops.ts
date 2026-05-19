@@ -332,12 +332,16 @@ export const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
         if (el.tagName === "TEMPLATE") { try { if (el.content && hit(el.content.textContent)) return { hit:true }; } catch (e) { return { inconclusive:true }; } }
         if (el.shadowRoot) {
           // Open shadow roots are script-readable (incl. by the resumed agent
-          // via host.shadowRoot.textContent). shadowRoot.textContent is the
-          // analog of the light-DOM documentElement.textContent catch-all and
-          // covers ordinary shadow text/spans/divs/text-nodes that the
-          // per-element walk does not. Closed shadow roots are null here →
-          // correctly out of scope per §5.4. Fail closed on any error.
-          try { if (hit(el.shadowRoot.textContent)) return { hit:true }; } catch (e) { return { inconclusive:true }; }
+          // via host.shadowRoot.innerHTML / host.shadowRoot.childNodes[*].data).
+          // shadowRoot.innerHTML serializes the full shadow tree (text +
+          // comments + element markup + attributes at any depth) — strict
+          // SUPERSET of textContent — so it catches ordinary shadow
+          // text/spans/divs/text-nodes that the per-element walk does not AND
+          // shadow-comment-only nodes that textContent excluded (§6.1 round-6,
+          // symmetric with BASELINE_SCAN_FN's innerHTML fold above). Closed
+          // shadow roots are null here → correctly out of scope per §5.4. Fail
+          // closed on any error.
+          try { if (hit(el.shadowRoot.innerHTML)) return { hit:true }; } catch (e) { return { inconclusive:true }; }
           for (const c of el.shadowRoot.children) stack.push(c);
         }
         if (el.children) { for (const c of el.children) stack.push(c); }
@@ -471,13 +475,18 @@ export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
       }
       var childInControl = cur.inControl || selfControl;
       if (el.shadowRoot) {
-        // §6.1: an open shadowRoot is script-readable (host.shadowRoot.textContent),
-        // so bare text nodes directly under it were observable pre-blind. outerHTML
-        // does NOT serialize shadow DOM and the DFS only visits shadow ELEMENT
-        // children, so fold the shadow text into the observable blob too — symmetric
-        // with ABSENCE_SCAN_FN. Size-bounded; any throw → fail closed.
+        // §6.1: an open shadowRoot is script-readable (host.shadowRoot.innerHTML
+        // (includes comments and any non-element nodes at any depth in the
+        // shadow tree)), so bare text nodes AND comment nodes directly under it
+        // were observable pre-blind. outerHTML does NOT serialize shadow DOM
+        // and the DFS only visits shadow ELEMENT children, so fold the shadow
+        // innerHTML into the observable blob too — strict SUPERSET of
+        // textContent (textContent ⊂ innerHTML), so the blob strictly grows.
+        // Closes the shadow-comment-only §6.1 sub-case — symmetric with
+        // ABSENCE_SCAN_FN's innerHTML check below. Size-bounded; any throw →
+        // fail closed.
         try {
-          var st = el.shadowRoot.textContent;
+          var st = el.shadowRoot.innerHTML;
           if (typeof st === "string" && st !== "") {
             obsLen += 1 + st.length;
             if (obsLen > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
