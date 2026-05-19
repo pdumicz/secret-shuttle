@@ -33,6 +33,7 @@
           generate: `Generate and store a new secret ${esc(g.planned_ref ?? "")} (${esc(g.environment)})`,
           compare: `Compare the focused field on ${esc(g.destination_domain ?? "?")} against ${esc(g.ref ?? "")}`,
           template: `Run template ${esc(g.template_id ?? "")} with secret ${esc(g.ref ?? "")}`,
+          inject_submit: `Inject secret ${esc(g.ref ?? "")} into <b>${esc(g.field_handle_label ?? "?")}</b> on ${esc(g.destination_domain ?? "?")}, click <b>${esc(g.submit_handle_label ?? "?")}</b>, wait for success, and automatically resume observation only if the secret is verified gone`,
           blind_end: `Resume browser observation for ${esc(g.destination_domain ?? "?")}`,
         }[g.action] || `${esc(g.action)}`;
         const scope = Array.isArray(g.allowed_domains) && g.allowed_domains.length
@@ -43,17 +44,21 @@
           ${g.page_title ? `<div class="row"><span class="label">Page</span><b>${esc(g.page_title)}</b></div>` : ""}
           ${g.page_url_host ? `<div class="row"><span class="label">URL host</span><code>${esc(g.page_url_host)}</code></div>` : ""}
           <div class="row"><span class="label">Injectable into</span><b>${scope}</b></div>
+          ${Array.isArray(g.allowed_actions) && g.allowed_actions.length ? `<div class="row"><span class="label">Action scope</span><b>${g.allowed_actions.map(esc).join(", ")}</b></div>` : ""}
           ${g.template_id ? `<div class="row"><span class="label">Template</span><b>${esc(g.template_id)}</b></div>` : ""}
           ${g.template_params ? Object.keys(g.template_params).sort().map((k) =>
             `<div class="row"><span class="label">param: ${esc(k)}</span><code>${esc(g.template_params[k])}</code></div>`).join("") : ""}
+          ${g.success_condition ? `<div class="row"><span class="label">Success marker</span><code>${esc(g.success_condition)}</code></div>` : ""}
           <details style="margin-top:.5rem">
             <summary class="label">Technical details</summary>
             ${g.template_binary_path ? `<div class="row"><span class="label">Binary</span><code>${esc(g.template_binary_path)}</code></div>` : ""}
             ${g.template_binary_sha256 ? `<div class="row"><span class="label">Binary sha256</span><code>${esc(g.template_binary_sha256)}</code></div>` : ""}
             ${g.target_id ? `<div class="row"><span class="label">Browser target</span><code>${esc(g.target_id)}</code></div>` : ""}
             ${g.field_fingerprint ? `<div class="row"><span class="label">Field fingerprint</span><code>${esc(g.field_fingerprint)}</code></div>` : ""}
+            ${g.submit_fingerprint ? `<div class="row"><span class="label">Submit fingerprint</span><code>${esc(g.submit_fingerprint)}</code></div>` : ""}
           </details>
           ${g.action === "blind_end" ? `<div class="row" style="color:#c33"><b>Approving navigates open pages to about:blank and resumes observation. Approve only if the secret has been saved/submitted and is no longer visible.</b></div>` : ""}
+          ${g.action === "inject_submit" ? `<div class="row" style="color:#c33"><b>Approving authorizes the daemon to auto-resume observation only if the secret is verified gone (success marker observed AND the raw secret absent from every observable surface). If either check does not pass, blind mode stays on.</b></div>` : ""}
         `;
         document.getElementById("status").textContent = `Status: ${g.status}`;
       }
