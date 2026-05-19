@@ -1210,7 +1210,17 @@ export class CdpBrowserOps implements BrowserOps {
           sessionId,
         );
         const v = r.result.value;
-        if (v === undefined || v.ok !== true || !Array.isArray(v.entries)) {
+        if (
+          v === undefined ||
+          v.ok !== true ||
+          !Array.isArray(v.entries) ||
+          !v.entries.every(
+            (e) =>
+              typeof e.key === "string" &&
+              (e.safety === "safe" || e.safety === "readable") &&
+              typeof e.fp === "string",
+          )
+        ) {
           throw new ShuttleError("reveal_baseline_failed", "Could not baseline the approved subtree.");
         }
         return { entries: v.entries };

@@ -312,3 +312,17 @@ test("resolveWithinContainer fails closed on any CDP error", async () => {
     (e: unknown) => e instanceof ShuttleError,
   );
 });
+
+test("baselineCandidates fails closed (ShuttleError reveal_baseline_failed) when an entry is structurally malformed (daemon trust-boundary guard)", async () => {
+  const t = new RcTransport();
+  // ok:true but an entry violates the {key:string, safety:"safe"|"readable", fp:string} shape.
+  t.baselineResult = {
+    ok: true,
+    entries: [{ key: "k0", safety: "safe", fp: "h0" }, { key: 123, safety: "bogus", fp: null }],
+  } as unknown as RcTransport["baselineResult"];
+  const ops = new CdpBrowserOps(new CdpClient(t));
+  await assert.rejects(
+    () => ops.baselineCandidates({ target_id: "T-1", backend_node_id: 7 }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "reveal_baseline_failed",
+  );
+});
