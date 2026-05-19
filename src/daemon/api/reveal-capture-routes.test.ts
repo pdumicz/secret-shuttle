@@ -29,7 +29,7 @@ function stub(over: Partial<BrowserOps> = {}): BrowserOps {
     injectIntoBackendNode: async () => inj,
     clickBackendNode: async () => undefined,
     readBackendNodeValue: async () => SECRET,
-    baselineCandidates: async () => ({ entries: [] }),
+    baselineCandidates: async () => ({ entries: [], readableFps: [] }),
     resolveWithinContainer: async () => ({ value: SECRET }),
     ...over,
   };
@@ -361,5 +361,30 @@ test("no raw secret appears in any response body (extends the no-leak assertion)
     services.approvals.approve(g.id);
     const r = await call(port, "POST", "/v1/secrets/reveal-capture", containerBody({ approval_id: g.id }));
     assert.equal(JSON.stringify(r.body).includes(SECRET), false);
+  });
+});
+
+test("Finding 2: baseline is taken AFTER blind.start/sever (not before requireApproval) — blind is already active when baselineCandidates runs", async () => {
+  // The baseline must be taken while blind is active (agent severed), not during
+  // the approval window where the agent can still observe the page (§6.1 / Finding 2).
+  await withDaemon(async ({ port, services }) => {
+    let blindStateAtBaselineCall: unknown = undefined;
+    services.browser = stub({
+      baselineCandidates: async () => {
+        // Capture blind.current() at the moment baselineCandidates is called.
+        blindStateAtBaselineCall = services.blind.current();
+        return { entries: [], readableFps: [] };
+      },
+    });
+    await setup(services, port);
+    const g = services.approvals.create(bindingFor());
+    services.approvals.approve(g.id);
+    await call(port, "POST", "/v1/secrets/reveal-capture", containerBody({ approval_id: g.id }));
+    // blind.current() returns the domain string when active, null when not.
+    // It must be non-null when baselineCandidates was called.
+    assert.notEqual(blindStateAtBaselineCall, null,
+      "baselineCandidates must be called AFTER blind.start (blind.current() must be non-null at call time)");
+    assert.notEqual(blindStateAtBaselineCall, undefined,
+      "baselineCandidates must have been called at all");
   });
 });

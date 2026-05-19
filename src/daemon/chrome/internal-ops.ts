@@ -140,6 +140,8 @@ export interface BaselineEntry {
 
 export interface Baseline {
   entries: BaselineEntry[];
+  /** Hashes (djb2) of every element's own readable value anywhere in the approved subtree pre-reveal, regardless of candidacy. Used by RESOLVE_SCAN_FN to detect §6.1 anywhere-observable values. */
+  readableFps: string[];
 }
 
 export interface FieldDescriptor {
@@ -424,21 +426,28 @@ export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
   }
   try {
     var root = this;
-    if (!root || root.nodeType !== 1) return { ok:false, entries:[] };
-    var entries = [], stack = [{ el: root, path: "0" }], n = 0;
+    if (!root || root.nodeType !== 1) return { ok:false, entries:[], readableFps:[] };
+    var entries = [], readableFpsSet = {}, stack = [{ el: root, path: "0", inControl: false }], n = 0;
     while (stack.length) {
       var cur = stack.pop(); var el = cur.el;
       if (!el || el.nodeType !== 1) continue;
-      if (++n > 200000) return { ok:false, entries:[] };
-      if (isCandidate(el)) {
+      if (++n > 200000) return { ok:false, entries:[], readableFps:[] };
+      // Part A: hash EVERY element's own readable value into readableFpsSet (regardless of candidacy or inControl).
+      var rv = readableValue(el);
+      if (rv !== "") readableFpsSet[h(rv)] = 1;
+      // Part B: an element is a candidate only if NOT inside a control subtree.
+      var selfControl = (kind(el) === "button" || kind(el) === "link" || el.tagName.toLowerCase() === "label");
+      if (!cur.inControl && isCandidate(el)) {
         var safe = isSafeState(el);
         entries.push({ key: cur.path, safety: safe ? "safe" : "readable", fp: h(readableValue(el)) });
       }
-      if (el.shadowRoot) { var sc = el.shadowRoot.children; for (var i = 0; i < sc.length; i++) stack.push({ el: sc[i], path: cur.path + ".s" + i }); }
-      if (el.children) { for (var j = 0; j < el.children.length; j++) stack.push({ el: el.children[j], path: cur.path + "." + j }); }
+      var childInControl = cur.inControl || selfControl;
+      if (el.shadowRoot) { var sc = el.shadowRoot.children; for (var i = 0; i < sc.length; i++) stack.push({ el: sc[i], path: cur.path + ".s" + i, inControl: childInControl }); }
+      if (el.children) { for (var j = 0; j < el.children.length; j++) stack.push({ el: el.children[j], path: cur.path + "." + j, inControl: childInControl }); }
     }
-    return { ok:true, entries: entries };
-  } catch (e) { return { ok:false, entries:[] }; }
+    var readableFpsArr = Object.keys(readableFpsSet);
+    return { ok:true, entries: entries, readableFps: readableFpsArr };
+  } catch (e) { return { ok:false, entries:[], readableFps:[] }; }
 }`;
 
 // Daemon-only. `this` = the approved subtree root: the container (modes
@@ -506,19 +515,22 @@ export const RESOLVE_SCAN_FN = `function(baseline, focused){ /* __RESOLVE__ */
     if (!root || root.nodeType !== 1) return null;
     var bmap = {}; var be = (baseline && baseline.entries) || [];
     for (var bi = 0; bi < be.length; bi++) bmap[be[bi].key] = be[bi];
-    var readableFps = {};
-    for (var rk = 0; rk < be.length; rk++) { if (be[rk].safety === "readable") readableFps[be[rk].fp] = 1; }
+    // Part A: build reject set from the comprehensive readableFps list (every element's readable value, not just candidate entries).
+    var readableFps = {}; var rf = (baseline && baseline.readableFps) || []; for (var ri=0; ri<rf.length; ri++) readableFps[rf[ri]] = 1;
     // Enumerate predicate-matching elements with the SAME structural keys as the
     // baseline. The root itself is included (mode field: the field is its own
     // root and sole candidate, so the same per-candidate gate applies to it).
-    var cands = [], stack = [{ el: root, path: "0" }], n = 0;
+    // Part B: carry inControl so control/label subtree descendants are never candidates.
+    var cands = [], stack = [{ el: root, path: "0", inControl: false }], n = 0;
     while (stack.length) {
       var cur = stack.pop(); var el = cur.el;
       if (!el || el.nodeType !== 1) continue;
       if (++n > 200000) return null;
-      if (isCandidate(el)) cands.push({ el: el, path: cur.path });
-      if (el.shadowRoot) { var sc = el.shadowRoot.children; for (var i=0;i<sc.length;i++) stack.push({ el: sc[i], path: cur.path + ".s" + i }); }
-      if (el.children) { for (var j=0;j<el.children.length;j++) stack.push({ el: el.children[j], path: cur.path + "." + j }); }
+      var selfControl = (kind(el) === "button" || kind(el) === "link" || el.tagName.toLowerCase() === "label");
+      if (!cur.inControl && isCandidate(el)) cands.push({ el: el, path: cur.path });
+      var childInControl = cur.inControl || selfControl;
+      if (el.shadowRoot) { var sc = el.shadowRoot.children; for (var i=0;i<sc.length;i++) stack.push({ el: sc[i], path: cur.path + ".s" + i, inControl: childInControl }); }
+      if (el.children) { for (var j=0;j<el.children.length;j++) stack.push({ el: el.children[j], path: cur.path + "." + j, inControl: childInControl }); }
     }
     // focused-after-reveal: the only eligible element is the passed activeElement,
     // and ONLY if it itself passes the predicate.
@@ -1207,7 +1219,7 @@ export class CdpBrowserOps implements BrowserOps {
         sessionId,
       );
       try {
-        const r = await this.cdp.send<{ result: { value: { ok: boolean; entries: { key: string; safety: "safe" | "readable"; fp: string }[] } } }>(
+        const r = await this.cdp.send<{ result: { value: { ok: boolean; entries: { key: string; safety: "safe" | "readable"; fp: string }[]; readableFps: string[] } } }>(
           "Runtime.callFunctionOn",
           { objectId: object.objectId, returnByValue: true, functionDeclaration: BASELINE_SCAN_FN },
           sessionId,
@@ -1222,11 +1234,13 @@ export class CdpBrowserOps implements BrowserOps {
               typeof e.key === "string" &&
               (e.safety === "safe" || e.safety === "readable") &&
               typeof e.fp === "string",
-          )
+          ) ||
+          !Array.isArray(v.readableFps) ||
+          !v.readableFps.every((x) => typeof x === "string")
         ) {
           throw new ShuttleError("reveal_baseline_failed", "Could not baseline the approved subtree.");
         }
-        return { entries: v.entries };
+        return { entries: v.entries, readableFps: v.readableFps };
       } finally {
         await this.cdp.send("Runtime.releaseObject", { objectId: object.objectId }, sessionId).catch(() => undefined);
       }

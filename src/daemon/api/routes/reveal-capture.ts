@@ -8,7 +8,7 @@ import { writeDaemonAudit } from "../../audit.js";
 import { canonicalEnvironment, buildSecretRef } from "../../../shared/refs.js";
 import { asObject, optString, reqString } from "../validate.js";
 import { blankAllPages, disableObservationDomains } from "../../chrome/internal-ops.js";
-import type { Baseline, BackendNodeRef } from "../../chrome/internal-ops.js";
+import type { BackendNodeRef } from "../../chrome/internal-ops.js";
 import { enforceDomain } from "./secrets.js";
 import { autoResumeBlind } from "../../blind-auto-resume.js";
 import type { BrowserHandle } from "../../browser-handles.js";
@@ -128,14 +128,6 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
       }
       enforceDomain(domain, effectiveAllowed, "reveal-capture");
 
-      // 2b. Pre-reveal baseline over the approved field/container subtree
-      // (daemon-only, observation still safe). Readable siblings recorded, not
-      // rejected — gate is per chosen candidate after reveal.
-      const baseline: Baseline = await browser.baselineCandidates({
-        target_id: targetHandle.target_id,
-        backend_node_id: targetHandle.backend_node_id,
-      });
-
       const binding: ApprovalBinding = {
         action: "reveal_capture",
         ref: null,
@@ -198,6 +190,13 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
       try {
         await withDeadline(
           (async () => {
+            // 2b. Post-blind baseline: taken AFTER sever (blind.start + severAgentConnections),
+            // immediately before the reveal click. This ensures the baseline reflects only
+            // what was observable while the agent was severed (Finding 2 / §6.1).
+            const baseline = await browser.baselineCandidates({
+              target_id: targetHandle.target_id,
+              backend_node_id: targetHandle.backend_node_id,
+            });
             const revealRef: BackendNodeRef = { target_id: revealHandle.target_id, backend_node_id: revealHandle.backend_node_id };
             await browser.clickBackendNode(revealRef);
             // ALL THREE modes go through resolveWithinContainer so the §6.1

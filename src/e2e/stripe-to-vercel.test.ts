@@ -39,7 +39,7 @@ function stubBrowser(state: { domain: string; target: string; value: string }): 
     injectIntoBackendNode: async () => ({ domain: state.domain, target_id: state.target, field, field_fingerprint: fingerprint }),
     clickBackendNode: async () => undefined,
     readBackendNodeValue: async () => "stub_value",
-    baselineCandidates: async () => ({ entries: [] }),
+    baselineCandidates: async () => ({ entries: [], readableFps: [] }),
     resolveWithinContainer: async () => ({ value: "stub_value" }),
   };
 }

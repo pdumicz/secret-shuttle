@@ -181,7 +181,7 @@ class RcTransport extends EventEmitter implements CdpTransport {
   fieldValue = "whsec_FIELD_MODE_VALUE";
   // baselineCandidates drives BASELINE_SCAN_FN whose result we inject directly
   // (the scan logic itself is covered by the DOM-shim tests above).
-  baselineResult: { ok: boolean; entries: Baseline["entries"] } = { ok: true, entries: [{ key: "k0", safety: "safe", fp: "h0" }] };
+  baselineResult: { ok: boolean; entries: Baseline["entries"]; readableFps: string[] } = { ok: true, entries: [{ key: "k0", safety: "safe", fp: "h0" }], readableFps: [] };
   // RESOLVE_SCAN_FN now returns the chosen ELEMENT (no returnByValue → a
   // RemoteObject). `resolveYieldsObject:false` simulates the fail-closed
   // null/no-objectId outcome (zero / >1 / already-readable / no-transition).
@@ -247,10 +247,10 @@ test("readBackendNodeValue fails closed (ShuttleError) on any CDP error", async 
 
 test("baselineCandidates returns the hashed/classified Baseline (no raw text leaves)", async () => {
   const t = new RcTransport();
-  t.baselineResult = { ok: true, entries: [{ key: "k0", safety: "safe", fp: "h0" }, { key: "k1", safety: "readable", fp: "h1" }] };
+  t.baselineResult = { ok: true, entries: [{ key: "k0", safety: "safe", fp: "h0" }, { key: "k1", safety: "readable", fp: "h1" }], readableFps: ["aabbccdd"] };
   const ops = new CdpBrowserOps(new CdpClient(t));
   const b = await ops.baselineCandidates({ target_id: "T-1", backend_node_id: 7 });
-  assert.deepEqual(b, { entries: t.baselineResult.entries });
+  assert.deepEqual(b, { entries: t.baselineResult.entries, readableFps: t.baselineResult.readableFps });
 });
 
 test("resolveWithinContainer (container): RemoteObject chosen → describeNode → isDescendantOf passes → ONE value read", async () => {
@@ -263,7 +263,7 @@ test("resolveWithinContainer (container): RemoteObject chosen → describeNode �
   const r = await ops.resolveWithinContainer(
     { target_id: "T-1", backend_node_id: 7 },
     "container",
-    { entries: [{ key: "k0", safety: "safe", fp: "h0" }] },
+    { entries: [{ key: "k0", safety: "safe", fp: "h0" }], readableFps: [] },
   );
   assert.deepEqual(r, { value: "whsec_RESOLVED" });
 });
@@ -277,7 +277,7 @@ test("resolveWithinContainer (field mode): same per-candidate gate path — Remo
   t.containsResult = false;  // contains(self) may be false; the IS-root branch must still pass
   t.fieldValue = "whsec_FIELD_GATED";
   const ops = new CdpBrowserOps(new CdpClient(t));
-  const r = await ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "field", { entries: [] });
+  const r = await ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "field", { entries: [], readableFps: [] });
   assert.deepEqual(r, { value: "whsec_FIELD_GATED" });
 });
 
@@ -286,7 +286,7 @@ test("resolveWithinContainer fails closed when RESOLVE_SCAN_FN yields a null Rem
   t.resolveYieldsObject = false; // subtype:"null" / no objectId → no single safe→revealed candidate
   const ops = new CdpBrowserOps(new CdpClient(t));
   await assert.rejects(
-    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [] }),
+    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [], readableFps: [] }),
     (e: unknown) => e instanceof ShuttleError && e.code === "reveal_no_transition",
   );
 });
@@ -298,7 +298,7 @@ test("resolveWithinContainer fails closed when DOM containment proof is false (c
   t.containsResult = false;    // container.contains(chosen) === false
   const ops = new CdpBrowserOps(new CdpClient(t));
   await assert.rejects(
-    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [] }),
+    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [], readableFps: [] }),
     (e: unknown) => e instanceof ShuttleError && e.code === "reveal_not_contained",
   );
 });
@@ -308,7 +308,7 @@ test("resolveWithinContainer fails closed on any CDP error", async () => {
   t.throwOnEvaluate = true;
   const ops = new CdpBrowserOps(new CdpClient(t));
   await assert.rejects(
-    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [] }),
+    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [], readableFps: [] }),
     (e: unknown) => e instanceof ShuttleError,
   );
 });
@@ -387,4 +387,101 @@ test("baselineCandidates fails closed (ShuttleError reveal_baseline_failed) when
     () => ops.baselineCandidates({ target_id: "T-1", backend_node_id: 7 }),
     (e: unknown) => e instanceof ShuttleError && e.code === "reveal_baseline_failed",
   );
+});
+
+// ---- REGRESSION TESTS: three confirmed security defects (write FIRST per TDD, must fail before fix) ----
+
+test("RESOLVE_SCAN_FN: a value visible in a non-candidate <label> pre-reveal fails closed even though it has no baseline entry (§6.1 anywhere-observable)", () => {
+  // Finding 1: label text is script-readable but not a candidate → no entry in baseline.entries.
+  // Post-reveal a <code> appears with THAT SAME value. Must be fail-closed.
+  const S = "whsec_VISIBLE_IN_LABEL";
+  const bRoot = el("div", { children: [el("label", { __id: "L", textContent: S }), el("input", { __id: "f", type: "text", value: "" })] });
+  const baseline = makeBaseline(bRoot)(bRoot);
+  const postRoot = el("div", { children: [el("label", { __id: "L", textContent: S }), el("code", { __id: "post", textContent: S })] });
+  const r = makeResolve(postRoot)(postRoot, baseline, null);
+  assert.equal(r, null, "label-visible value must be fail-closed post-reveal (§6.1 anywhere-observable)");
+});
+
+test("RESOLVE_SCAN_FN: a value visible in a non-candidate wrapper element (children>0) pre-reveal fails closed", () => {
+  // Finding 1b: a wrapper <div> with children is not a candidate (isCandidate excludes children>0),
+  // so its readable text does not appear in baseline.entries. The value must still block a post-reveal <code>.
+  const S = "whsec_IN_WRAPPER";
+  const bRoot = el("section", { children: [
+    el("div", { __id: "w", children: [el("span", { textContent: "x" })], textContent: S }),
+    el("input", { __id: "f", type: "text", value: "" }),
+  ] });
+  const baseline = makeBaseline(bRoot)(bRoot);
+  const postRoot = el("section", { children: [el("span", { textContent: "x" }), el("code", { __id: "post", textContent: S })] });
+  const r = makeResolve(postRoot)(postRoot, baseline, null);
+  assert.equal(r, null, "wrapper-visible value must be fail-closed post-reveal (§6.1 anywhere-observable)");
+});
+
+test("RESOLVE_SCAN_FN: a text node inside a <button> is never a candidate (control descendants excluded)", () => {
+  // Finding 3: a <span> inside a <button> is currently admitted as a candidate.
+  // Control-subtree descendants must never be candidates regardless of their content.
+  const S = "whsec_IN_BUTTON";
+  const bRoot = el("div", { children: [el("input", { __id: "f", type: "text", value: "" })] });
+  const baseline = makeBaseline(bRoot)(bRoot);
+  const postRoot = el("div", { children: [
+    el("button", { __id: "btn", children: [el("span", { __id: "s", textContent: S })] }),
+    el("input", { __id: "f", type: "text", value: "" }),
+  ] });
+  const r = makeResolve(postRoot)(postRoot, baseline, null);
+  assert.equal(r, null, "span inside button must never be a candidate (control-descendant exclusion)");
+});
+
+test("BASELINE_SCAN_FN: readableFps includes hashes of label/button text (non-candidate readable text), entries does not include them", () => {
+  // Part A: BASELINE_SCAN_FN must emit readableFps for EVERY element, not just candidates.
+  const labelText = "whsec_LABEL_TEXT";
+  const bRoot = el("div", { children: [
+    el("label", { textContent: labelText }),
+    el("button", { textContent: "Reveal" }),
+    el("input", { type: "text", value: "" }),
+  ] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[] };
+  assert.equal(Array.isArray(b.readableFps), true, "readableFps must be an array");
+  // The label and button text must be hashed into readableFps.
+  // h("whsec_LABEL_TEXT") via djb2 - we verify by checking it's non-empty and no raw text leaks.
+  assert.equal(b.readableFps.length > 0, true, "readableFps must contain at least the label/button hashes");
+  // No raw text in the serialised baseline (neither entries nor readableFps)
+  const dump = JSON.stringify(b);
+  assert.equal(dump.includes(labelText), false, "no raw label text must appear in baseline JSON");
+  // entries must NOT contain the label (it's not a candidate)
+  assert.equal(b.entries.some((e: unknown) => JSON.stringify(e).includes(labelText)), false);
+});
+
+// ---- CONTROL TESTS: must remain passing (no legitimate-flow regression) ----
+
+test("CONTROL: legitimate password value:'' → revealed still returns the element (no regression from comprehensive readableFps)", () => {
+  const bRoot = el("div", { children: [el("input", { __id: "pw", type: "password", value: "" })] });
+  const baseline = makeBaseline(bRoot)(bRoot);
+  const postRoot = el("div", { children: [el("input", { __id: "pw", type: "password", value: "whsec_REAL_SECRET" })] });
+  const r = makeResolve(postRoot)(postRoot, baseline, null);
+  assert.notEqual(r, null);
+  assert.equal(r?.__id, "pw");
+});
+
+test("CONTROL: legitimate empty <code> → revealed at the same path still returns the element", () => {
+  const bRoot = el("div", { children: [el("code", { __id: "tok", textContent: "" })] });
+  const baseline = makeBaseline(bRoot)(bRoot);
+  const postRoot = el("div", { children: [el("code", { __id: "tok", textContent: "ghp_REAL_TOKEN_HERE" })] });
+  const r = makeResolve(postRoot)(postRoot, baseline, null);
+  assert.notEqual(r, null);
+  assert.equal(r?.__id, "tok");
+});
+
+test("CONTROL: readable sibling label beside a genuine safe→revealed field — the FIELD is still returned", () => {
+  // The label is readable; its hash appears in readableFps. The revealed field value is NEW (hash not in readableFps).
+  const bRoot = el("div", { children: [
+    el("span", { __id: "lbl", textContent: "API Key" }),
+    el("input", { __id: "fld", type: "text", value: "" }),
+  ] });
+  const baseline = makeBaseline(bRoot)(bRoot);
+  const postRoot = el("div", { children: [
+    el("span", { __id: "lbl", textContent: "API Key" }),
+    el("input", { __id: "fld", type: "text", value: "sk-live-real-api-key-9999" }),
+  ] });
+  const r = makeResolve(postRoot)(postRoot, baseline, null);
+  assert.notEqual(r, null);
+  assert.equal(r?.__id, "fld");
 });
