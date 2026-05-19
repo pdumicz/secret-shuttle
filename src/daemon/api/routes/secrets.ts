@@ -98,7 +98,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       // preserve an existing record's actions on overwrite; else the default set.
       let existingActions: SecretAction[] | undefined;
       try {
-        existingActions = (await services.vault.getSecret(plannedRef)).allowed_actions;
+        existingActions = [...(await services.vault.getSecret(plannedRef)).allowed_actions];
       } catch {
         existingActions = undefined;
       }

@@ -217,8 +217,9 @@ test("approval_mismatch is audited on bound-binding failure", async () => {
       allowed_domains: ["example.com"],
     });
     ctx.services.approvals.approve(grant.id);
-    // Use the wrong name → mismatched planned_ref (allowed_domains match so the
-    // ONLY binding difference is the name).
+    // Wrong name → mismatched planned_ref (also differs on allowed_actions now
+    // that the generate binding carries the effective scope); either difference
+    // triggers approval_mismatch.
     await call(ctx, "POST", "/v1/secrets/generate", {
       name: "Z", environment: "production", source: "local",
       allowed_domains: ["example.com"], approval_id: grant.id, wait_for_approval: false,
