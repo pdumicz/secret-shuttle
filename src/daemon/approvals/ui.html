@@ -33,6 +33,7 @@
           generate: `Generate and store a new secret ${esc(g.planned_ref ?? "")} (${esc(g.environment)})`,
           compare: `Compare the focused field on ${esc(g.destination_domain ?? "?")} against ${esc(g.ref ?? "")}`,
           template: `Run template ${esc(g.template_id ?? "")} with secret ${esc(g.ref ?? "")}`,
+          // NOTE: only the literal <b> tags are static HTML here; every interpolated value MUST stay esc()-wrapped (spliced raw at <p><b>${human}</b></p>).
           inject_submit: `Inject secret ${esc(g.ref ?? "")} into <b>${esc(g.field_handle_label ?? "?")}</b> on ${esc(g.destination_domain ?? "?")}, click <b>${esc(g.submit_handle_label ?? "?")}</b>, wait for success, and automatically resume observation only if the secret is verified gone`,
           blind_end: `Resume browser observation for ${esc(g.destination_domain ?? "?")}`,
         }[g.action] || `${esc(g.action)}`;
