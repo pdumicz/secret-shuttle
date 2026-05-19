@@ -470,7 +470,23 @@ export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
         entries.push({ key: cur.path, safety: safe ? "safe" : "readable", fp: h(readableValue(el)) });
       }
       var childInControl = cur.inControl || selfControl;
-      if (el.shadowRoot) { var sc = el.shadowRoot.children; for (var i = 0; i < sc.length; i++) stack.push({ el: sc[i], path: cur.path + ".s" + i, inControl: childInControl }); }
+      if (el.shadowRoot) {
+        // §6.1: an open shadowRoot is script-readable (host.shadowRoot.textContent),
+        // so bare text nodes directly under it were observable pre-blind. outerHTML
+        // does NOT serialize shadow DOM and the DFS only visits shadow ELEMENT
+        // children, so fold the shadow text into the observable blob too — symmetric
+        // with ABSENCE_SCAN_FN. Size-bounded; any throw → fail closed.
+        try {
+          var st = el.shadowRoot.textContent;
+          if (typeof st === "string" && st !== "") {
+            obsLen += 1 + st.length;
+            if (obsLen > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
+            obsParts.push(st);
+          }
+        } catch (e) { return { ok:false, entries:[], readableFps:[], observable:"" }; }
+        var sc = el.shadowRoot.children;
+        for (var i = 0; i < sc.length; i++) stack.push({ el: sc[i], path: cur.path + ".s" + i, inControl: childInControl });
+      }
       if (el.children) { for (var j = 0; j < el.children.length; j++) stack.push({ el: el.children[j], path: cur.path + "." + j, inControl: childInControl }); }
     }
     var readableFpsArr = Object.keys(readableFpsSet);

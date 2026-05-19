@@ -29,9 +29,16 @@ interface El {
   role?: string | null;
   href?: boolean;
   children?: El[];
-  shadowRoot?: { children: El[] } | null;
+  shadowRoot?: { children: El[]; textContent?: string } | null;
   /** Extra attributes beyond role/href, keyed by attribute name. Used by __attrs-aware shim. */
   __attrs?: Record<string, string>;
+  /**
+   * Open shadow root for the §6.1 round-5 shadow-text tests. When set, the
+   * shim's `shadowRoot` is this object (mirrors a real open shadowRoot:
+   * script-readable `.textContent` + element `.children`). Omitted → `shadowRoot`
+   * stays `null` (closed/no shadow), preserving every pre-existing test.
+   */
+  __shadow?: { children: El[]; textContent: string };
 }
 // Minimal outerHTML serializer for the shim: <TAG attr="v">children/text</TAG>
 function serializeOuterHTML(e: El): string {
@@ -57,7 +64,10 @@ function el(tag: string, props: Partial<El> = {}): El {
     tagName: tag.toUpperCase(),
     nodeType: 1,
     children: [],
-    shadowRoot: null,
+    // §6.1 round-5: an open shadowRoot is script-readable. `__shadow` opts a
+    // host into one; omitted → null (closed/no shadow), exactly as before so
+    // every pre-existing test is byte-unchanged.
+    shadowRoot: props.__shadow ?? null,
     getAttribute(name: string) {
       if (name === "role") return props.role ?? null;
       if (props.__attrs !== undefined && name in props.__attrs) return props.__attrs[name] ?? null;
@@ -572,6 +582,65 @@ test("BASELINE_SCAN_FN: observable is empty string with ok:false when subtree ou
   const b = makeBaseline(hugeRoot)(hugeRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
   assert.equal(b.ok, false, "ok must be false (size-bound fail-closed)");
   assert.equal(b.observable, "", "observable must be empty string on ok:false");
+  assert.deepEqual(b.entries, [], "entries must be [] on ok:false");
+  assert.deepEqual(b.readableFps, [], "readableFps must be [] on ok:false");
+});
+
+// ---- NEW §6.1 round-5: open-shadowRoot bare-text-node observable tests ----
+
+test("BASELINE_SCAN_FN: a secret as a bare text node directly under an open shadowRoot is folded into observable (§6.1 round-5)", () => {
+  // outerHTML does NOT serialize shadow DOM and the DFS only visits shadow
+  // ELEMENT children — so a secret living ONLY as a bare text node directly
+  // under an open shadowRoot (no element child carries it) was absent from
+  // observable and readableFps: a §6.1 fail-OPEN. host.shadowRoot.textContent
+  // is script-readable, so those bytes WERE observable pre-blind and MUST be
+  // folded into the daemon-only observable blob.
+  const SECRET = "whsec_SHADOW_BARE_TEXT_NODE_r5";
+  const host = el("div", { __shadow: { children: [], textContent: `prefix ${SECRET} suffix` } });
+  const bRoot = el("div", { children: [host, el("input", { type: "text", value: "" })] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  assert.ok(typeof b.observable === "string", "observable must be a string");
+  assert.ok(b.observable.includes(SECRET),
+    "observable must contain the bare shadow text-node secret (folded shadowRoot.textContent)");
+});
+
+test("BASELINE_SCAN_FN: a secret in a shadow ELEMENT child is still in observable AND entries (no regression from the shadow-text fold, §6.1 round-5)", () => {
+  // Pre-existing behavior: a candidate ELEMENT inside an open shadowRoot is
+  // walked via the shadow-children DFS — it must still appear in entries, and
+  // its text must still be in observable. The shadow-text fold is strictly
+  // additive and must not disturb the shadow ELEMENT-children path.
+  const SECRET = "whsec_SHADOW_ELEMENT_CHILD_r5";
+  const host = el("div", {
+    __shadow: { children: [el("code", { __id: "shadowcode", textContent: SECRET })], textContent: SECRET },
+  });
+  const bRoot = el("div", { children: [host, el("input", { type: "text", value: "" })] });
+  const b = makeBaseline(bRoot)(bRoot) as {
+    ok: boolean;
+    entries: { key: string; safety: string; fp: string }[];
+    readableFps: string[];
+    observable: string;
+  };
+  assert.equal(b.ok, true, "ok must be true");
+  assert.ok(b.observable.includes(SECRET), "observable must still contain the shadow element child text");
+  // The <code> shadow ELEMENT child is a candidate reached via the shadow DFS;
+  // its entry key must carry a shadow segment (".s") — proves the shadow
+  // children push still produces entries exactly as before.
+  const shadowEntry = b.entries.find((e) => e.key.includes(".s"));
+  assert.ok(shadowEntry !== undefined, "a candidate inside the shadow root must still appear in entries (.s path)");
+  assert.equal(shadowEntry?.safety, "readable", "the non-empty shadow <code> must be classed readable");
+  assert.ok(b.readableFps.length > 0, "readableFps must still be populated for shadow element children");
+});
+
+test("BASELINE_SCAN_FN: an open-shadowRoot textContent that pushes obsLen over OBS_CAP fails closed (ok:false, observable:'', §6.1 round-5)", () => {
+  // A pathological shadow text node whose length pushes the running obsLen
+  // past OBS_CAP (4_000_000) MUST fail closed — symmetric with the outerHTML /
+  // readableValue / attribute size bounds. 4_000_001 chars alone overflows.
+  const host = el("div", { __shadow: { children: [], textContent: "y".repeat(4_000_001) } });
+  const bRoot = el("div", { children: [host, el("input", { type: "text", value: "" })] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, false, "ok must be false (shadow-text size-bound fail-closed)");
+  assert.equal(b.observable, "", "observable must be empty string on shadow overflow");
   assert.deepEqual(b.entries, [], "entries must be [] on ok:false");
   assert.deepEqual(b.readableFps, [], "readableFps must be [] on ok:false");
 });
