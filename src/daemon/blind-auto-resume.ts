@@ -5,7 +5,7 @@ import type { DaemonServices } from "./services.js";
 export interface AutoResumeArgs {
   op: "inject_submit" | "reveal_capture";
   domain: string;
-  success_signal: "text_matched";
+  success_signal: "text_matched" | "secret_captured";
   absence_proof: "passed";
 }
 
@@ -18,7 +18,10 @@ export interface AutoResumeArgs {
  * carries the secret or observed text.
  */
 export async function autoResumeBlind(services: DaemonServices, args: AutoResumeArgs): Promise<void> {
-  if (args.success_signal !== "text_matched" || args.absence_proof !== "passed") {
+  if (
+    (args.success_signal !== "text_matched" && args.success_signal !== "secret_captured") ||
+    args.absence_proof !== "passed"
+  ) {
     throw new ShuttleError(
       "auto_resume_precondition",
       "autoResumeBlind requires success_signal=text_matched AND absence_proof=passed.",
