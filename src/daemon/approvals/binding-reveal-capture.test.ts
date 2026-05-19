@@ -63,6 +63,15 @@ test("a different capture_mode is an approval_mismatch (mode is part of the appr
   );
 });
 
+test("absent vs explicit-null capture_mode both normalize to the same match", () => {
+  const store = new ApprovalStore();
+  const { capture_mode: _cm, ...noMode } = base();
+  const g = store.create(noMode);
+  store.approve(g.id);
+  const used = store.consume(g.id, { ...noMode, capture_mode: null });
+  assert.equal(used.status, "used");
+});
+
 test("a different hide_fingerprint is an approval_mismatch", () => {
   const store = new ApprovalStore();
   const g = store.create(base());
@@ -75,9 +84,7 @@ test("a different hide_fingerprint is an approval_mismatch", () => {
 
 test("absent vs explicit-null hide_fingerprint both normalize to the same match (no-hide-handle case)", () => {
   const store = new ApprovalStore();
-  const noHide: ApprovalBinding = { ...base() };
-  delete (noHide as unknown as Record<string, unknown>).hide_fingerprint;
-  delete (noHide as unknown as Record<string, unknown>).hide_handle_label;
+  const { hide_fingerprint: _h, hide_handle_label: _hl, ...noHide } = base();
   const g = store.create(noHide);
   store.approve(g.id);
   const used = store.consume(g.id, { ...noHide, hide_fingerprint: null });
