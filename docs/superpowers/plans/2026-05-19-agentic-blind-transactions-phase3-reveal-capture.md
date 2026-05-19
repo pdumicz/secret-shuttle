@@ -2460,6 +2460,14 @@ _(record here during Task 8 — e.g. "2026-05-‑‑: Stripe webhook secret reve
 
 ---
 
+## Known Residual (finish-gate review — deferred, non-blocking)
+
+The final adversarial review confirmed Phase-3 closes the §6.1 fail-OPEN (a pre-`readable`, script-observable-before-blind secret with an **unchanged value** that is merely re-wrapped/moved by the reveal click is now fail-closed, via the path-independent value-hash re-anchor in `RESOLVE_SCAN_FN`). One residual is **deliberately out of scope** and accepted:
+
+- **Pre-`readable` element whose value BOTH changes on reveal AND whose DOM path also shifts.** Neither the path-keyed guard (path moved) nor the value-hash re-anchor (value changed) drops it, so it can be captured. This does **not** violate §6.1's core property — the *captured* bytes were never script-observable before blind mode (only a *different*, earlier value was); only the spec's extra conservatism ("drop any candidate whose baseline was `readable`, changed OR unchanged") is not fully enforced for this combined case. No realistic reveal flow (masked/empty field or empty node → secret) reaches it, because those baselines are `safe`, not `readable`. Tracked as optional future hardening (a path-independent identity anchor for the changed-`readable` case); it is not a merge blocker and there is no known pre-observable-secret capture through it.
+
+---
+
 ## Execution Handoff
 
 Plan complete and saved to `docs/superpowers/plans/2026-05-19-agentic-blind-transactions-phase3-reveal-capture.md`. This document fully specifies **Phase 3 (`reveal-capture`)**; Plans 4–5 are generated from the same spec once Phase 3 merges. The [P2a] Stripe gate (Task 8) is a manual release gate that does not block merging Tasks 1–7; its outcome (PASS/BEST-EFFORT) is recorded in "## [P2a] Gate outcome" and feeds Plan 5's per-provider production-vs-best-effort statement (alongside the Phase-2 Vercel [P2a] outcome).

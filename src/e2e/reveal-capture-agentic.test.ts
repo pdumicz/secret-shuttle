@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { getShuttlePaths } from "../shared/config.js";
 import { DaemonServer } from "../daemon/server.js";
 import { DaemonServices } from "../daemon/services.js";
 import { registerRoutes } from "../daemon/api/router.js";
@@ -100,6 +101,8 @@ test("agentic reveal-capture end-to-end leaks neither the raw secret in any resp
       const s = JSON.stringify(resp.body);
       assert.equal(s.includes(SECRET), false, `raw secret leaked: ${s}`);
     }
+    const auditLog = await readFile(getShuttlePaths(home).auditLogPath, "utf8");
+    assert.equal(auditLog.includes(SECRET), false, "raw secret leaked into the on-disk audit log");
   } finally {
     await server.close();
     if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
