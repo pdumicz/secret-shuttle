@@ -184,7 +184,7 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
           proofPassed = false;
         }
       }
-      await services.vault.markUsed(secret.ref);
+      await services.vault.markUsed(secret.ref).catch(() => undefined);
 
       if (successObserved && proofPassed) {
         // T7-M1 (Task-7 review carry-forward): autoResumeBlind throws BEFORE it

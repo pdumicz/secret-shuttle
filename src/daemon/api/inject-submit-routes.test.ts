@@ -252,6 +252,64 @@ test("a HUNG inject/click (no throw, never resolves) fails closed within the dea
   }
 });
 
+test("post-write vault.markUsed failure keeps blind active and returns the fail-closed 200 (not a thrown error)", async () => {
+  await withDaemon(async ({ port, services }) => {
+    services.browser = stub({ observeText: async () => true, proveAbsence: async () => ({ passed: true }) });
+    await setup(services, port);
+    // Make markUsed reject AFTER a successful inject+click. The transaction
+    // landed; a bookkeeping failure must NOT 4xx/throw — it must stay the
+    // fail-closed 200 with blind ACTIVE (secret may be on the page).
+    const realMarkUsed = services.vault.markUsed.bind(services.vault);
+    let n = 0;
+    services.vault.markUsed = (async (ref: string) => {
+      n += 1;
+      throw Object.assign(new Error("disk full"), { code: "EIO" });
+      // (unreached) return realMarkUsed(ref);
+    }) as typeof services.vault.markUsed;
+    void realMarkUsed;
+    const g = services.approvals.create(bindingFor());
+    services.approvals.approve(g.id);
+    const r = await call(port, "POST", "/v1/secrets/inject-submit", body({ approval_id: g.id }));
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { submitted: unknown }).submitted, true);
+    assert.equal((r.body as { blind_mode: boolean }).blind_mode, false);
+    assert.equal(services.blind.current(), null); // auto-resumed: provably safe
+    assert.ok(n >= 1, "markUsed was invoked");
+  });
+});
+
+test("observeText:false (success marker never seen) → fail-closed 200, stays blind, no blind_auto_resume audit", async () => {
+  await withDaemon(async ({ port, services, home }) => {
+    services.browser = stub({ observeText: async () => false, proveAbsence: async () => ({ passed: true }) });
+    await setup(services, port);
+    const g = services.approvals.create(bindingFor());
+    services.approvals.approve(g.id);
+    const r = await call(port, "POST", "/v1/secrets/inject-submit", body({ approval_id: g.id }));
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { submitted: unknown }).submitted, "unknown");
+    assert.equal((r.body as { blind_mode: boolean }).blind_mode, true);
+    assert.equal((r.body as { next: string }).next, "manual_recovery_required");
+    assert.notEqual(services.blind.current(), null);
+    const log = await readFile(getShuttlePaths(home).auditLogPath, "utf8");
+    assert.equal(log.includes('"blind_auto_resume"'), false);
+  });
+});
+
+test("field_handle pointing at a non-field is fail-closed (handle_kind_mismatch)", async () => {
+  await withDaemon(async ({ port, services }) => {
+    services.browser = stub();
+    await setup(services, port);
+    // Re-mark value-field as a BUTTON (wrong kind for a field handle).
+    services.handles.put({
+      label: "value-field", target_id: "T-1", domain: "vercel.com", page_url_host: "vercel.com",
+      page_title: "Proj", backend_node_id: 11, handle_fingerprint: "sha256:field", element_kind: "button",
+    });
+    const r = await call(port, "POST", "/v1/secrets/inject-submit", body());
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "handle_kind_mismatch");
+  });
+});
+
 test("no raw secret and no observed text appears in any response", async () => {
   await withDaemon(async ({ port, services }) => {
     services.browser = stub();
