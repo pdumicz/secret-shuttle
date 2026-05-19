@@ -10,7 +10,7 @@ export type ApprovalLifecycleEvent =
   | { kind: "mismatch"; binding: ApprovalBinding; existingGrant: ApprovalGrant };
 
 export interface ApprovalBinding {
-  action: "inject" | "capture" | "generate" | "compare" | "template" | "blind_end";
+  action: "inject" | "capture" | "generate" | "compare" | "template" | "blind_end" | "inject_submit";
   ref: string | null;
   planned_ref?: string | null;
   environment: string;
@@ -22,9 +22,17 @@ export interface ApprovalBinding {
   template_binary_path?: string | null;
   template_binary_sha256?: string | null;
   allowed_domains?: string[] | null;
+  /** Non-display: part of bindingsMatch (strict equality / stable set). */
+  submit_fingerprint?: string | null;
+  success_condition?: string | null;
+  auto_resume?: boolean | null;
+  /** The action scope the human approves (generate). Part of bindingsMatch as a stable set. */
+  allowed_actions?: string[] | null;
   /** Display-only context for the human approver. NOT part of bindingsMatch. */
   page_title?: string | null;
   page_url_host?: string | null;
+  field_handle_label?: string | null;
+  submit_handle_label?: string | null;
 }
 
 export type ApprovalStatus = "pending" | "granted" | "denied" | "expired" | "used";
@@ -128,7 +136,11 @@ function bindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
     stableStringify(a.template_params) === stableStringify(b.template_params) &&
     (a.template_binary_path ?? null) === (b.template_binary_path ?? null) &&
     (a.template_binary_sha256 ?? null) === (b.template_binary_sha256 ?? null) &&
-    domainSet(a.allowed_domains) === domainSet(b.allowed_domains)
+    domainSet(a.allowed_domains) === domainSet(b.allowed_domains) &&
+    domainSet(a.allowed_actions) === domainSet(b.allowed_actions) &&
+    (a.submit_fingerprint ?? null) === (b.submit_fingerprint ?? null) &&
+    (a.success_condition ?? null) === (b.success_condition ?? null) &&
+    (a.auto_resume ?? null) === (b.auto_resume ?? null)
   );
 }
 
