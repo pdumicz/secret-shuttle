@@ -34,6 +34,8 @@ function stubBrowser(state: { domain: string; target: string; value: string }): 
       page_title: "stub", backend_node_id: 2, handle_fingerprint: "sha256:stubpick", element_kind: "button" as const,
     }),
     revalidateHandle: async () => undefined,
+    observeText: async () => true,
+    proveAbsence: async () => ({ passed: true }),
   };
 }
 

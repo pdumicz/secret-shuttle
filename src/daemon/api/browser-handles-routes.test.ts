@@ -24,6 +24,8 @@ function stub(desc: Partial<HandleDescriptor> = {}): BrowserOps {
     markFocused: async () => base,
     markPick: async () => ({ ...base, backend_node_id: 9, element_kind: "field" }),
     revalidateHandle: async () => undefined,
+    observeText: async () => true,
+    proveAbsence: async () => ({ passed: true }),
   };
 }
 

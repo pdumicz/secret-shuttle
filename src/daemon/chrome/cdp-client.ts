@@ -29,6 +29,33 @@ export class CdpClient {
     });
   }
 
+  sendWithTimeout<T = unknown>(
+    method: string,
+    params: unknown,
+    sessionId: string | undefined,
+    timeoutMs: number,
+  ): Promise<T> {
+    const id = this.nextId++;
+    const msg: CdpMessage = {
+      id,
+      method,
+      ...(params !== undefined ? { params } : {}),
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    };
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) {
+          reject(new Error(`CDP ${method} timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v as T); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+      this.transport.send(msg);
+    });
+  }
+
   on(event: string, fn: (params: unknown, sessionId?: string) => void): void {
     const arr = this.listeners.get(event) ?? [];
     arr.push(fn);

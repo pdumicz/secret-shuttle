@@ -118,6 +118,15 @@ export interface HandleDescriptor {
   element_kind: ElementKind;
 }
 
+export interface BackendNodeRef {
+  target_id: string;
+  backend_node_id: number;
+}
+
+export interface AbsenceProofResult {
+  passed: boolean;
+}
+
 export interface FieldDescriptor {
   tag: string;
   type?: string;
@@ -153,6 +162,8 @@ export interface BrowserOps {
   markFocused(): Promise<HandleDescriptor>;
   markPick(timeoutMs: number): Promise<HandleDescriptor>;
   revalidateHandle(h: { target_id: string; domain: string; backend_node_id: number; handle_fingerprint: string; element_kind: ElementKind }): Promise<void>;
+  observeText(domain: string, text: string, timeoutMs: number): Promise<boolean>;
+  proveAbsence(secret: string): Promise<AbsenceProofResult>;
 }
 
 const READ_SCRIPT = `
@@ -257,6 +268,68 @@ export const NORMALIZE_TO_ACTIONABLE_FN = `function(){
   return null;
 }`;
 
+// Daemon-only. Runs in the page under the daemon's internal CDP (agent severed).
+// Returns ONLY booleans — never the secret, never where it was found (§5.1/§5.3).
+// "__ABSENCE__" marker lets the scripted test transport route this expression.
+// Exported so the navigation-uncertainty guard is unit-assertable (Phase-1 pattern).
+export const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
+  try {
+    if (typeof secret !== "string" || secret === "") return { found:false, inconclusive:true };
+    const hit = (s) => typeof s === "string" && s.indexOf(secret) !== -1;
+    function scanDoc(doc){
+      // Navigation uncertainty (§5.3): a still-loading document means content
+      // (incl. the secret) may not have rendered yet. Applied PER scanned
+      // document so a mid-load SAME-ORIGIN frame can't be scanned as clean.
+      try { if (doc.readyState !== "complete") return { inconclusive:true }; } catch (e) { return { inconclusive:true }; }
+      try {
+        const w = doc.defaultView, l = w && w.location;
+        if (l && (hit(l.href) || hit(l.search) || hit(l.hash))) return { hit:true };
+      } catch (e) { return { inconclusive:true }; }
+      let n = 0;
+      const stack = doc.documentElement ? [doc.documentElement] : [];
+      while (stack.length) {
+        const el = stack.pop();
+        if (!el) continue;
+        if (++n > 200000) return { inconclusive:true };
+        if (el.attributes) {
+          for (const a of el.attributes) {
+            const nm = a.name;
+            if (nm === "value" || nm === "placeholder" || nm === "title" || nm === "aria-label" || nm.indexOf("data-") === 0) {
+              if (hit(a.value)) return { hit:true };
+            }
+          }
+        }
+        if ((el.tagName === "INPUT" || el.tagName === "TEXTAREA") && hit(el.value)) return { hit:true };
+        try { if (el.isContentEditable && hit(el.innerText)) return { hit:true }; } catch (e) {}
+        if (el.shadowRoot) { for (const c of el.shadowRoot.children) stack.push(c); }
+        if (el.children) { for (const c of el.children) stack.push(c); }
+      }
+      try { if (doc.body && hit(doc.body.innerText)) return { hit:true }; } catch (e) {}
+      let frames;
+      try { frames = doc.querySelectorAll("iframe,frame"); } catch (e) { return { inconclusive:true }; }
+      for (const f of frames) {
+        let cd = null;
+        try { cd = f.contentDocument; } catch (e) { return { inconclusive:true }; }
+        if (cd === null) return { inconclusive:true };
+        const r = scanDoc(cd);
+        if (r.hit) return { hit:true };
+        if (r.inconclusive) return { inconclusive:true };
+      }
+      return {};
+    }
+    const r = scanDoc(document);
+    if (r.inconclusive) return { found:false, inconclusive:true };
+    return { found: r.hit === true, inconclusive:false };
+  } catch (e) { return { found:false, inconclusive:true }; }
+}`;
+
+const OBSERVE_TEXT_FN = `function(needle){
+  try {
+    const t = (document.body && document.body.innerText) || "";
+    return { host: location.host, has: typeof needle === "string" && needle !== "" && t.indexOf(needle) !== -1 };
+  } catch (e) { return { host:"", has:false }; }
+}`;
+
 function fieldFingerprint(domain: string, target: string, backendNodeId: number | null, field: FieldDescriptor): string {
   const seed = JSON.stringify({ domain, target, backendNodeId, ...field });
   return `sha256:${createHash("sha256").update(seed).digest("hex").slice(0, 16)}`;
@@ -280,7 +353,7 @@ function handleFingerprint(
 
 export class CdpBrowserOps implements BrowserOps {
   available = true;
-  constructor(private readonly cdp: CdpClient) {}
+  constructor(private readonly cdp: CdpClient, private readonly cdpCallTimeoutMs = 10_000) {}
 
   private async pickPage(): Promise<{ id: string }> {
     const r = await this.cdp.send<{ targetInfos: { targetId: string; type: string; url: string; attached: boolean }[] }>(
@@ -417,6 +490,20 @@ export class CdpBrowserOps implements BrowserOps {
     } finally {
       await this.cdp.send("Runtime.releaseObject", { objectId: object.objectId }, sessionId).catch(() => undefined);
     }
+  }
+
+  // Bounded CDP send: clears its timer on response and drops the pending entry
+  // on timeout (see CdpClient.sendWithTimeout) so a hung transport fails the
+  // route closed WITHOUT leaking a timer or a pending request. `timeoutMs`
+  // defaults to the per-call cap but callers with a tighter overall deadline
+  // (observeText's success-wait) pass a smaller remaining budget.
+  private boundedSend<T>(
+    method: string,
+    params: unknown,
+    sessionId: string | undefined,
+    timeoutMs: number = this.cdpCallTimeoutMs,
+  ): Promise<T> {
+    return this.cdp.sendWithTimeout<T>(method, params, sessionId, timeoutMs);
   }
 
   // Walk self -> ancestors to the nearest element whose elementKind is field/button/link.
@@ -622,6 +709,81 @@ export class CdpBrowserOps implements BrowserOps {
       }
     } finally {
       await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+
+  async proveAbsence(secret: string): Promise<AbsenceProofResult> {
+    if (secret === "") return { passed: false };
+    const overallDeadline = Date.now() + this.cdpCallTimeoutMs * 6;
+    let targets: { targetInfos: { targetId: string; type: string }[] };
+    try {
+      targets = await this.boundedSend<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets", undefined, undefined);
+    } catch {
+      return { passed: false };
+    }
+    for (const t of targets.targetInfos.filter((x) => x.type === "page")) {
+      if (Date.now() > overallDeadline) return { passed: false };
+      let sessionId = "";
+      try {
+        const a = await this.boundedSend<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true }, undefined);
+        sessionId = a.sessionId;
+        const r = await this.boundedSend<{ result: { value?: { found?: boolean; inconclusive?: boolean } }; exceptionDetails?: unknown }>(
+          "Runtime.evaluate",
+          { expression: `(${ABSENCE_SCAN_FN})(${JSON.stringify(secret)})`, returnByValue: true, awaitPromise: false },
+          sessionId,
+        );
+        if (r.exceptionDetails !== undefined) return { passed: false };
+        const v = r.result.value;
+        if (v === undefined || v.inconclusive === true || v.found !== false) return { passed: false };
+      } catch {
+        return { passed: false };
+      } finally {
+        if (sessionId !== "") await this.boundedSend("Target.detachFromTarget", { sessionId }, undefined).catch(() => undefined);
+      }
+    }
+    return { passed: true };
+  }
+
+  async observeText(domain: string, text: string, timeoutMs: number): Promise<boolean> {
+    const norm = domain.toLowerCase();
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    // Per-call budget: a single hung CDP call must NOT blow past the caller's
+    // success-wait. Each call is capped at the smaller of the per-call cap and
+    // the time remaining before `deadline` (spec §4.2 step 11 / §5.3 timeout).
+    const callBudget = (): number => Math.max(1, Math.min(this.cdpCallTimeoutMs, deadline - Date.now()));
+    for (;;) {
+      if (Date.now() >= deadline) return false;
+      let targets: { targetInfos: { targetId: string; type: string }[] };
+      try {
+        targets = await this.boundedSend<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets", undefined, undefined, callBudget());
+      } catch {
+        return false;
+      }
+      for (const t of targets.targetInfos.filter((x) => x.type === "page")) {
+        if (Date.now() >= deadline) return false;
+        let sessionId = "";
+        try {
+          const a = await this.boundedSend<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true }, undefined, callBudget());
+          sessionId = a.sessionId;
+          const r = await this.boundedSend<{ result: { value?: { host?: string; has?: boolean } } }>(
+            "Runtime.evaluate",
+            { expression: `(${OBSERVE_TEXT_FN})(${JSON.stringify(text)})`, returnByValue: true, awaitPromise: false },
+            sessionId,
+            callBudget(),
+          );
+          const v = r.result.value;
+          if (v !== undefined && typeof v.host === "string") {
+            const h = v.host.toLowerCase();
+            if ((h === norm || h.endsWith(`.${norm}`)) && v.has === true) return true;
+          }
+        } catch {
+          // ignore this target for this poll round
+        } finally {
+          if (sessionId !== "") await this.boundedSend("Target.detachFromTarget", { sessionId }, undefined, callBudget()).catch(() => undefined);
+        }
+      }
+      if (Date.now() >= deadline) return false;
+      await new Promise((res) => setTimeout(res, 200));
     }
   }
 }

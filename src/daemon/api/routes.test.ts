@@ -129,6 +129,8 @@ function stubBrowser(s: { domain: string; target: string; value: string }): Brow
       page_title: "stub", backend_node_id: 2, handle_fingerprint: "sha256:stubpick", element_kind: "button" as const,
     }),
     revalidateHandle: async () => undefined,
+    observeText: async () => true,
+    proveAbsence: async () => ({ passed: true }),
   };
 }
 
@@ -285,6 +287,8 @@ test("inject refuses when target changes after approval (post != pre)", async ()
         page_title: "stub", backend_node_id: 2, handle_fingerprint: "sha256:stubpick", element_kind: "button" as const,
       }),
       revalidateHandle: async () => undefined,
+      observeText: async () => true,
+      proveAbsence: async () => ({ passed: true }),
     };
 
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
@@ -409,6 +413,8 @@ test("capture rejects when the focused field changes between approval and captur
         field_fingerprint: "sha256:FIELD_B",
       }),
       injectFocused: async () => ({ domain: "dashboard.stripe.com", target_id: "T1", field, field_fingerprint: "sha256:FIELD_A" }),
+      observeText: async () => true,
+      proveAbsence: async () => ({ passed: true }),
     };
 
     // Pre-issue an approval bound to FIELD_A (matches the `pre` read).
@@ -740,6 +746,8 @@ test("inject that fails before writing the value auto-resumes (blind mode left O
         page_title: "stub", backend_node_id: 2, handle_fingerprint: "sha256:stubpick", element_kind: "button" as const,
       }),
       revalidateHandle: async () => undefined,
+      observeText: async () => true,
+      proveAbsence: async () => ({ passed: true }),
     };
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
       ref: "ss://local/dev/INJ2", domain: "app.example.com", wait_for_approval: false,
