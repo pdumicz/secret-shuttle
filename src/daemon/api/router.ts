@@ -7,6 +7,7 @@ import { registerStatus } from "./routes/status.js";
 import { registerBlind } from "./routes/blind.js";
 import { registerSecrets } from "./routes/secrets.js";
 import { registerInjectSubmit } from "./routes/inject-submit.js";
+import { registerRevealCapture } from "./routes/reveal-capture.js";
 import { registerApprovals } from "./routes/approvals.js";
 import { registerBrowser } from "./routes/browser.js";
 import { registerTemplates } from "./routes/templates.js";
@@ -26,6 +27,7 @@ export function registerRoutes(
   registerBlind(server, services, daemonPortRef);
   registerSecrets(server, services, daemonPortRef);
   registerInjectSubmit(server, services, daemonPortRef);
+  registerRevealCapture(server, services, daemonPortRef);
   registerApprovals(server, services);
   registerBrowser(server, services);
   registerTemplates(server, services, daemonPortRef);
