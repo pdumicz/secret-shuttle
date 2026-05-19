@@ -823,6 +823,7 @@ export class CdpBrowserOps implements BrowserOps {
       if (activeBackend !== ref.backend_node_id) {
         throw new ShuttleError("inject_focus_mismatch", "Focused element is not the marked field.");
       }
+      // WRITE_SCRIPT targets document.activeElement; the immediately-preceding activeBackend===ref.backend_node_id assertion plus WRITE_SCRIPT's own editability re-check bound the risk. Severed-agent model: only same-page JS could refocus, which is inside the human-approved trust boundary.
       const r = await this.cdp.send<{ result: { value: { ok: boolean; field?: FieldDescriptor; domain?: string; reason?: string } } }>(
         "Runtime.evaluate",
         { expression: WRITE_SCRIPT(value), returnByValue: true, awaitPromise: false },
@@ -870,14 +871,22 @@ export class CdpBrowserOps implements BrowserOps {
       const cq = await this.cdp
         .send<{ quads: number[][] }>("DOM.getContentQuads", { backendNodeId: ref.backend_node_id }, sessionId)
         .catch(() => ({ quads: [] as number[][] }));
+      // Pick the LARGEST-area content fragment, not the first. A control split
+      // across fragments (inline wrap, or a box clipped by sticky chrome on a
+      // scrollable form — common on the Vercel/Stripe dashboards this targets)
+      // can have its FIRST fragment occluded under sticky chrome while a LATER
+      // fragment is the real visible box; the max-area quad is the robust click
+      // target. Single-fragment controls (the common case) are unaffected.
       let point: { x: number; y: number } | null = null;
+      let bestArea = 0;
       for (const q of cq.quads) {
         if (q.length === 8) {
           const xs = [q[0] ?? 0, q[2] ?? 0, q[4] ?? 0, q[6] ?? 0];
           const ys = [q[1] ?? 0, q[3] ?? 0, q[5] ?? 0, q[7] ?? 0];
-          if (polygonArea(xs, ys) > 1) {
+          const area = polygonArea(xs, ys);
+          if (area > 1 && area > bestArea) {
+            bestArea = area;
             point = { x: ((xs[0] ?? 0) + (xs[1] ?? 0) + (xs[2] ?? 0) + (xs[3] ?? 0)) / 4, y: ((ys[0] ?? 0) + (ys[1] ?? 0) + (ys[2] ?? 0) + (ys[3] ?? 0)) / 4 };
-            break;
           }
         }
       }
@@ -898,6 +907,7 @@ export class CdpBrowserOps implements BrowserOps {
       if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0) {
         throw new ShuttleError("click_offscreen", "Submit control is off-screen.");
       }
+      // includeUserAgentShadowDOM:false is safe here: UA shadow only ever flattens to its host (a node-or-ancestor of the real target); it cannot mask a page-author overlay, which is always hit-tested normally. Do NOT flip to true (a UA scrollbar/native-control internal could then hit-test as a "descendant" and weaken this occlusion guard).
       const hit = await this.cdp
         .send<{ backendNodeId?: number }>("DOM.getNodeForLocation", { x: Math.round(point.x), y: Math.round(point.y), includeUserAgentShadowDOM: false }, sessionId)
         .catch(() => ({} as { backendNodeId?: number }));

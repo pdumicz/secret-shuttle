@@ -9,9 +9,14 @@ interface Sent { id?: number; method?: string; params?: Record<string, unknown>;
 
 class ClickTransport extends EventEmitter implements CdpTransport {
   quads: number[][] = [[10, 10, 30, 10, 30, 30, 10, 30]]; // 20x20 square, center (20,20)
-  hitBackendNodeId = 55;          // what DOM.getNodeForLocation returns
+  hitBackendNodeId = 55;          // what DOM.getNodeForLocation returns (default, point-independent)
   containsResult = false;         // ancestor.contains(hitNode) result
   mouseEvents: string[] = [];
+  mousePoints: { x: number; y: number }[] = []; // (x,y) of every Input.dispatchMouseEvent
+  // Optional point-keyed hit-test: when set, DOM.getNodeForLocation returns
+  // `handleId` ONLY for the {x,y} the daemon queries (rounded), else `otherId`.
+  // Used to prove which quad's centroid the daemon hit-tested.
+  pointHit: { x: number; y: number; handleId: number; otherId: number } | null = null;
 
   send(msg: Sent): void {
     const reply = (result: unknown): void => queueMicrotask(() => this.emit("message", { id: msg.id, result }));
@@ -24,11 +29,22 @@ class ClickTransport extends EventEmitter implements CdpTransport {
       case "DOM.getBoxModel":
         reply({ model: { content: [10, 10, 30, 10, 30, 30, 10, 30], width: 20, height: 20 } });
         return;
-      case "DOM.getNodeForLocation": reply({ backendNodeId: this.hitBackendNodeId }); return;
+      case "DOM.getNodeForLocation": {
+        if (this.pointHit !== null) {
+          const qx = Number(msg.params?.["x"]);
+          const qy = Number(msg.params?.["y"]);
+          const isTarget = qx === this.pointHit.x && qy === this.pointHit.y;
+          reply({ backendNodeId: isTarget ? this.pointHit.handleId : this.pointHit.otherId });
+          return;
+        }
+        reply({ backendNodeId: this.hitBackendNodeId });
+        return;
+      }
       case "DOM.resolveNode": reply({ object: { objectId: `obj-${Math.random()}` } }); return;
       case "Runtime.callFunctionOn": reply({ result: { value: this.containsResult } }); return;
       case "Input.dispatchMouseEvent":
         this.mouseEvents.push(String(msg.params?.["type"]));
+        this.mousePoints.push({ x: Number(msg.params?.["x"]), y: Number(msg.params?.["y"]) });
         reply({});
         return;
       default: reply({}); return;
@@ -63,6 +79,31 @@ test("clickBackendNode fails closed when the point is occluded (hit node not con
     (e: unknown) => e instanceof ShuttleError && e.code === "click_occluded",
   );
   assert.deepEqual(t.mouseEvents, []);
+});
+
+test("clickBackendNode picks the LARGEST-area content quad (sticky-header robustness), not the first", async () => {
+  const t = new ClickTransport();
+  // Fragment order: small clipped fragment FIRST (area 16, centroid (2,2)),
+  // then the large real visible box (area 20000, centroid (200,150)).
+  t.quads = [
+    [0, 0, 4, 0, 4, 4, 0, 4],                       // small: under sticky chrome
+    [100, 100, 300, 100, 300, 200, 100, 200],       // large: the real box
+  ];
+  // Hit-test resolves to the handle (55 == ref) ONLY at the LARGE box centroid.
+  // Anywhere else (e.g. the small fragment's (2,2)) returns a non-contained id;
+  // containsResult=false so isDescendantOf is false → would throw click_occluded.
+  t.pointHit = { x: 200, y: 150, handleId: 55, otherId: 999 };
+  t.containsResult = false;
+  const ops = new CdpBrowserOps(new CdpClient(t));
+  await ops.clickBackendNode({ target_id: "T-1", backend_node_id: 55 });
+  // Proves max-area selection: the OLD first-quad code would have hit-tested
+  // (2,2), gotten 999 (not contained), and thrown click_occluded instead.
+  assert.deepEqual(t.mouseEvents, ["mouseMoved", "mousePressed", "mouseReleased"]);
+  assert.deepEqual(t.mousePoints, [
+    { x: 200, y: 150 },
+    { x: 200, y: 150 },
+    { x: 200, y: 150 },
+  ]);
 });
 
 test("clickBackendNode fails closed on a zero-area / missing box", async () => {
