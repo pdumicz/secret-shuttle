@@ -22,7 +22,7 @@ The spec (§14) defines five independently shippable phases. Phase 1 (Opaque Bro
 
 ## Phase 2 File Structure
 
-- **Modify** `src/vault/types.ts` — add `"inject_submit"` to the `SecretAction` union.
+- **Modify** `src/vault/types.ts` — add `"inject_submit"` to the `SecretAction` union and export a canonical `ALL_SECRET_ACTIONS` list (single source for request validation; deliberately distinct from the `DEFAULT_ACTIONS` policy list).
 - **Modify** `src/vault/vault.ts` — **export** `DEFAULT_ACTIONS` (single source of truth, reused by the generate route) extended with `inject_submit`; change `upsertSecret` so an overwrite **preserves the existing `allowed_actions`** when the caller omits them (extended default applies to brand-new records only); an explicit caller-supplied `allowedActions` still wins.
 - **Create** `src/vault/inject-submit-action.test.ts` — `SecretAction` default/overwrite-preserve/legacy-deny unit tests.
 - **Modify** `src/daemon/approvals/store.ts` — add `"inject_submit"` to the `ApprovalBinding.action` union; add non-display `submit_fingerprint`/`success_condition`/`auto_resume`/`allowed_actions` (added to `bindingsMatch`; `allowed_actions` via the reused `domainSet` stable-set helper) and display-only `field_handle_label`/`submit_handle_label`.
@@ -168,7 +168,7 @@ Expected: FAIL — the first test fails (`inject_submit` not in defaults) and th
 
 - [ ] **Step 4: Add `inject_submit` to the `SecretAction` union**
 
-In `src/vault/types.ts`, replace the `SecretAction` type (lines 3-7):
+In `src/vault/types.ts`, replace the `SecretAction` type (lines 3-7) with the extended union **plus** a canonical runtime list — the single source of truth for "every known action", reused by request validation so the list is never re-typed:
 ```ts
 export type SecretAction =
   | "capture_from_page"
@@ -176,6 +176,19 @@ export type SecretAction =
   | "compare_fingerprint"
   | "use_as_stdin"
   | "inject_submit";
+
+// Canonical runtime enumeration of SecretAction. Request validation derives
+// from this (never re-lists actions). NOTE: this is "all known actions" — it is
+// deliberately NOT the same concept as vault.ts `DEFAULT_ACTIONS` ("actions
+// granted by default"), which stays an explicit policy list so a future action
+// is never silently default-granted.
+export const ALL_SECRET_ACTIONS: SecretAction[] = [
+  "capture_from_page",
+  "inject_into_field",
+  "compare_fingerprint",
+  "use_as_stdin",
+  "inject_submit",
+];
 ```
 
 - [ ] **Step 5: Extend the default set and fix overwrite-preserve**
@@ -542,28 +555,23 @@ Expected: FAIL — the first test fails (`allowed_actions` ignored; record has t
 
 - [ ] **Step 3: Add validation BEFORE approval, the binding field, the passthrough, and export `enforceDomain`**
 
-In `src/daemon/api/routes/secrets.ts`, add this validation helper immediately **above** `export function registerSecrets(` (after the `interface CompareBody {…}` block):
+In `src/daemon/api/routes/secrets.ts`, add these imports alongside the existing imports (after the existing `import { assertSecretActionAllowed } from "../../../policy/policy.js";` line) — reuse the single sources of truth, never re-list actions:
 ```ts
-const SECRET_ACTIONS = new Set([
-  "capture_from_page",
-  "inject_into_field",
-  "compare_fingerprint",
-  "use_as_stdin",
-  "inject_submit",
-]);
+import { DEFAULT_ACTIONS } from "../../../vault/vault.js";
+import { ALL_SECRET_ACTIONS, type SecretAction } from "../../../vault/types.js";
+```
 
-function validatedActions(raw: unknown): import("../../../vault/types.js").SecretAction[] | undefined {
+Then add this validation helper immediately **above** `export function registerSecrets(` (after the `interface CompareBody {…}` block) — the valid-action set is **derived from `ALL_SECRET_ACTIONS`**, never re-typed:
+```ts
+const SECRET_ACTIONS = new Set<string>(ALL_SECRET_ACTIONS);
+
+function validatedActions(raw: unknown): SecretAction[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw) || raw.some((x) => typeof x !== "string" || !SECRET_ACTIONS.has(x))) {
     throw new ShuttleError("bad_request", "allowed_actions: must be an array of known secret actions");
   }
-  return raw as import("../../../vault/types.js").SecretAction[];
+  return raw as SecretAction[];
 }
-```
-
-In the same file, add the default-set import alongside the existing imports (after the existing `import { assertSecretActionAllowed } from "../../../policy/policy.js";` line) — reuse the single source of truth, never re-list the actions:
-```ts
-import { DEFAULT_ACTIONS } from "../../../vault/vault.js";
 ```
 
 In the same file, extend the `GenerateBody` interface (lines 17-27) by adding one field before the closing brace:
@@ -579,7 +587,7 @@ In the generate route, immediately **after** the existing `const effectiveAllowe
       // Effective scope shown in the approval == what will actually be stored
       // (mirrors vault.upsertSecret's own resolution, §4.4): explicit wins; else
       // preserve an existing record's actions on overwrite; else the default set.
-      let existingActions: import("../../../vault/types.js").SecretAction[] | undefined;
+      let existingActions: SecretAction[] | undefined;
       try {
         existingActions = (await services.vault.getSecret(plannedRef)).allowed_actions;
       } catch {
@@ -932,6 +940,29 @@ test("observeText ignores matches on a different host", async () => {
   assert.equal(await ops.observeText("vercel.com", "Added", 300), false);
 });
 
+test("observeText honors the success-wait budget even when CDP hangs (not the 10s per-call default)", async () => {
+  // getTargets/attach answer; Runtime.evaluate never replies. With the DEFAULT
+  // 10s per-call cap, a naive bound would block ~10s on the first evaluate.
+  // The remaining-budget cap must make a 400ms success-wait return ~promptly.
+  class HangEvalTransport extends EventEmitter implements CdpTransport {
+    send(msg: Sent): void {
+      if (msg.method === "Target.getTargets") {
+        queueMicrotask(() => this.emit("message", { id: msg.id, result: { targetInfos: [{ targetId: "T-1", type: "page" }] } }));
+        return;
+      }
+      if (msg.method === "Target.attachToTarget") {
+        queueMicrotask(() => this.emit("message", { id: msg.id, result: { sessionId: "S-1" } }));
+        return;
+      }
+      // Runtime.evaluate / detach: never reply.
+    }
+  }
+  const ops = new CdpBrowserOps(new CdpClient(new HangEvalTransport())); // default cdpCallTimeoutMs = 10_000
+  const started = Date.now();
+  assert.equal(await ops.observeText("vercel.com", "Added", 400), false);
+  assert.ok(Date.now() - started < 3_000, "must respect the ~400ms success-wait, not the 10s per-call cap");
+});
+
 test("proveAbsence fails closed PROMPTLY when a CDP call never responds (no route hang)", async () => {
   // A transport that answers getTargets/attach but never replies to Runtime.evaluate
   // would hang forever without a bounded send. proveAbsence MUST fail closed within
@@ -1163,9 +1194,16 @@ In `src/daemon/chrome/internal-ops.ts`, add this private helper to `CdpBrowserOp
 ```ts
   // Bounded CDP send: clears its timer on response and drops the pending entry
   // on timeout (see CdpClient.sendWithTimeout) so a hung transport fails the
-  // route closed WITHOUT leaking a timer or a pending request.
-  private boundedSend<T>(method: string, params: unknown, sessionId: string | undefined): Promise<T> {
-    return this.cdp.sendWithTimeout<T>(method, params, sessionId, this.cdpCallTimeoutMs);
+  // route closed WITHOUT leaking a timer or a pending request. `timeoutMs`
+  // defaults to the per-call cap but callers with a tighter overall deadline
+  // (observeText's success-wait) pass a smaller remaining budget.
+  private boundedSend<T>(
+    method: string,
+    params: unknown,
+    sessionId: string | undefined,
+    timeoutMs: number = this.cdpCallTimeoutMs,
+  ): Promise<T> {
+    return this.cdp.sendWithTimeout<T>(method, params, sessionId, timeoutMs);
   }
 ```
 
@@ -1206,22 +1244,29 @@ Then add these two methods to the `CdpBrowserOps` class immediately **after** th
   async observeText(domain: string, text: string, timeoutMs: number): Promise<boolean> {
     const norm = domain.toLowerCase();
     const deadline = Date.now() + Math.max(0, timeoutMs);
+    // Per-call budget: a single hung CDP call must NOT blow past the caller's
+    // success-wait. Each call is capped at the smaller of the per-call cap and
+    // the time remaining before `deadline` (spec §4.2 step 11 / §5.3 timeout).
+    const callBudget = (): number => Math.max(1, Math.min(this.cdpCallTimeoutMs, deadline - Date.now()));
     for (;;) {
+      if (Date.now() >= deadline) return false;
       let targets: { targetInfos: { targetId: string; type: string }[] };
       try {
-        targets = await this.boundedSend<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets", undefined, undefined);
+        targets = await this.boundedSend<{ targetInfos: { targetId: string; type: string }[] }>("Target.getTargets", undefined, undefined, callBudget());
       } catch {
         return false;
       }
       for (const t of targets.targetInfos.filter((x) => x.type === "page")) {
+        if (Date.now() >= deadline) return false;
         let sessionId = "";
         try {
-          const a = await this.boundedSend<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true }, undefined);
+          const a = await this.boundedSend<{ sessionId: string }>("Target.attachToTarget", { targetId: t.targetId, flatten: true }, undefined, callBudget());
           sessionId = a.sessionId;
           const r = await this.boundedSend<{ result: { value?: { host?: string; has?: boolean } } }>(
             "Runtime.evaluate",
             { expression: `(${OBSERVE_TEXT_FN})(${JSON.stringify(text)})`, returnByValue: true, awaitPromise: false },
             sessionId,
+            callBudget(),
           );
           const v = r.result.value;
           if (v !== undefined && typeof v.host === "string") {
@@ -1231,7 +1276,7 @@ Then add these two methods to the `CdpBrowserOps` class immediately **after** th
         } catch {
           // ignore this target for this poll round
         } finally {
-          if (sessionId !== "") await this.boundedSend("Target.detachFromTarget", { sessionId }, undefined).catch(() => undefined);
+          if (sessionId !== "") await this.boundedSend("Target.detachFromTarget", { sessionId }, undefined, callBudget()).catch(() => undefined);
         }
       }
       if (Date.now() >= deadline) return false;
@@ -1263,7 +1308,7 @@ In `src/daemon/api/browser-handles-routes.test.ts`, in `stub`, add immediately a
 - [ ] **Step 6: Run the new test, then the full suite**
 
 Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test dist/daemon/chrome/absence-proof.test.js dist/daemon/chrome/cdp-client-timeout.test.js`
-Expected: PASS — 12 absence-proof tests (incl. hung-transport fail-closed and the three per-document navigation-uncertainty shim cases) + 2 `cdp-client-timeout` tests pass.
+Expected: PASS — 13 absence-proof tests (incl. hung-transport fail-closed, the observeText success-wait-budget case, and the three per-document navigation-uncertainty shim cases) + 2 `cdp-client-timeout` tests pass.
 
 Run: `npm test`
 Expected: PASS — all existing tests green (the three stub fixups satisfy the extended interface; the new optional constructor arg + new `CdpClient.sendWithTimeout` are backward compatible additions).
@@ -2540,6 +2585,8 @@ _(record here during Task 11 — e.g. "2026-05-‑‑: Vercel env-var add → su
 
 > **Review iteration 1 (4 findings patched):** (1) Task 4 modifies `ui-server.ts` to serialize the new grant fields + a runtime JSON test (static-HTML test alone would pass while the live UI showed `?`); (2) Task 8 requires the submit handle to share the field handle's target **and** domain (`handle_target_mismatch`, fail-closed) + cross-target/cross-domain tests; (3) Task 5 wraps every CDP call in a bounded send + `document.readyState` navigation guard + hung-transport test; (4) Task 3 validates `allowed_actions` **before** `requireApproval`, carries it on the generate binding (matched), UI surfaces it — `ApprovalBinding` task reordered before `generate`.
 >
+> **Review iteration 3 (2 findings patched):** (P2) `observeText` now caps every CDP call at the *remaining* success-wait (`min(cdpCallTimeoutMs, deadline - now)`, floor 1ms) and bails when no budget remains — a hung CDP call can no longer blow past the caller's `success_timeout_ms`; `boundedSend` gained an optional explicit-timeout arg and a hung-eval budget test was added. (P3) `ALL_SECRET_ACTIONS` is exported from `types.ts` as the single canonical action enumeration; the route's validation `Set` derives from it instead of re-listing actions (`DEFAULT_ACTIONS` stays an explicit policy list by design, with a comment, so a future action is never silently default-granted).
+>
 > **Review iteration 2 (3 findings patched):** (1) Task 1 **exports** `DEFAULT_ACTIONS`; Task 3 computes the **effective** action scope (explicit → existing-on-overwrite → default) and **always** puts it on the generate binding + stores exactly that, so the human sees the true scope even when actions are omitted or force-rotated (added production-no-wait approval tests for both cases). (2) Task 5's `readyState` guard moved **inside `scanDoc(doc)`** so every scanned document *and same-origin frame* must be `complete` (a mid-load frame can no longer scan clean); the weak string-match test is replaced by a DOM-shim behavioral test proving per-document gating (incl. the loading-frame case). (3) Task 5's timeout is now a real leak-free `CdpClient.sendWithTimeout` (clears its timer on response, drops the pending entry on timeout) with its own `cdp-client-timeout.test.ts`; `boundedSend` just delegates — no leaked timers after success, no `pending` growth after timeout.
 
 **1. Spec coverage (Phase 2 scope):**
@@ -2549,13 +2596,13 @@ _(record here during Task 11 — e.g. "2026-05-‑‑: Vercel env-var add → su
 - §6.4 binding/UI additions that apply to §4 (`submit_fingerprint`, `success_condition`, `auto_resume`, `allowed_actions`, display-only labels; UI auto-resume disclosure; **`ui-server.ts` serialization**) → Tasks 2 & 4. (`reveal_*`/`container_*`/`capture_mode` binding fields are Plan 3 — intentionally not added here.)
 - §7 separately-audited `autoResumeBlind` (no approval, no `blankAllPages`, distinct `blind_auto_resume` action, `/v1/blind/end` untouched) → Task 7 + Task 8 wiring + Task 8 test asserting no `blind_end` record.
 - §8 audit events `inject_submit` + `blind_auto_resume` → Task 7 vocabulary + Task 8 emissions. (`browser_mark` shipped in Phase 1; `reveal_capture` is Plan 3.)
-- §12 `injectIntoBackendNode` (DOM.focus + activeElement assertion + WRITE_SCRIPT), `clickBackendNode` (trusted Input at hit-tested box; descendant/occlusion guard; fail-closed on no/zero box), `proveAbsence` (`{passed}` only, bounded) + the §4.2-step-11 success observer (`observeText`, boolean only, bounded) → Tasks 5–6.
-- §13 test slices: `inject_submit` SecretAction (Task 1), generate effective-scope incl. **production-no-wait default + force-rotate-preserve** (Task 3), route tests incl. force/blind-lifecycle/pre-write-safe/post-write-stays/auto-resume+audit/inconclusive/**cross-target+cross-domain** (Task 8), `clickBackendNode` trusted-input + occlusion (Task 6), absence proof present/inconclusive/error/**hung-transport**/**per-document+loading-frame nav** + **`sendWithTimeout`** (Task 5), approval binding (Task 2) + UI static+JSON (Task 4), negative/security e2e (Task 10), [P2a] gate (Task 11).
+- §12 `injectIntoBackendNode` (DOM.focus + activeElement assertion + WRITE_SCRIPT), `clickBackendNode` (trusted Input at hit-tested box; descendant/occlusion guard; fail-closed on no/zero box), `proveAbsence` (`{passed}` only, bounded) + the §4.2-step-11 success observer (`observeText`, boolean only, **bounded by the remaining `success_timeout_ms`, not the 10s per-call cap**) → Tasks 5–6.
+- §13 test slices: `inject_submit` SecretAction (Task 1), generate effective-scope incl. **production-no-wait default + force-rotate-preserve** (Task 3), route tests incl. force/blind-lifecycle/pre-write-safe/post-write-stays/auto-resume+audit/inconclusive/**cross-target+cross-domain** (Task 8), `clickBackendNode` trusted-input + occlusion (Task 6), absence proof present/inconclusive/error/**hung-transport**/**observeText success-wait-budget**/**per-document+loading-frame nav** + **`sendWithTimeout`** (Task 5), approval binding (Task 2) + UI static+JSON (Task 4), negative/security e2e (Task 10), [P2a] gate (Task 11).
 - §14 build order phase 2 → this whole plan. §15 acceptance criteria → Tasks 8/5/10/4/11. §16 decisions (always force-approval; distinct SecretAction fail-closed; trusted CDP Input not JS .click(); auto-resume bypasses blank; raw-only proof) → Tasks 1/6/7/8.
 
 **2. Placeholder scan:** no TBD/TODO; every code step contains complete code; every command has an expected result. The only non-code step is Task 11 — explicitly a manual release gate (spec §13 [P2a]), with concrete commands and PASS/BEST-EFFORT criteria. The `ui.html`→`dist` path uncertainty in Task 4 is bounded with a concrete fallback (inspect `ui-server.ts` `HTML_PATH`) and the runtime JSON test does not depend on the file copy at all.
 
-**3. Type consistency:** `SecretAction` (Task 1, +`inject_submit`) ↔ `validatedActions`/`SECRET_ACTIONS` (Task 3) ↔ `assertSecretActionAllowed(secret,"inject_submit")` (Task 8). `DEFAULT_ACTIONS` is `export`ed once in Task 1 and imported by the generate route in Task 3 (no duplicated list); the route's `effectiveActions` (`requestedActions ?? existing ?? DEFAULT_ACTIONS`) is the exact value put on the binding **and** passed to `upsertSecret`, so binding == stored == what the UI shows, and it mirrors `upsertSecret`'s own resolution. `ApprovalBinding` new fields `submit_fingerprint`/`success_condition`/`auto_resume`/`allowed_actions`/`field_handle_label`/`submit_handle_label` (Task 2) are exactly the keys the generate route (Task 3) and the inject-submit route (Task 8) build, `ui-server.ts` serializes (Task 4), `ui.html` reads (Task 4), and the binding test asserts (Task 2); `allowed_actions` is matched via the reused `domainSet` stable-set helper. `BackendNodeRef { target_id; backend_node_id }`/`AbsenceProofResult { passed }` (Task 5) are the exact shapes `injectIntoBackendNode`/`clickBackendNode` (Task 6) and the route call sites (Task 8) use; `BrowserHandle` (Phase 1) exposes `target_id`/`backend_node_id`/`handle_fingerprint`/`element_kind`/`page_title`/`page_url_host`/`label`/`domain` which the route consumes (incl. the new submit-vs-field `target_id`/`domain` equality check). `CdpBrowserOps`'s new optional `cdpCallTimeoutMs` constructor arg and `CdpClient.sendWithTimeout` are additive/backward compatible with every existing `new CdpBrowserOps(cdp)` and `cdp.send(...)` call site (Phase-1 `mark-pick`/route tests unaffected). `AutoResumeArgs` (Task 7) `success_signal:"text_matched"`/`absence_proof:"passed"` match the route's only auto-resume call (Task 8) and the audit fields added in Task 7. The three `BrowserOps` stubs gain the four methods in the same tasks that extend the interface (Tasks 5–6), so the tree is green at every commit. `enforceDomain` is `export`ed in Task 3 and imported by the route in Task 8.
+**3. Type consistency:** `SecretAction` (Task 1, +`inject_submit`) ↔ `ALL_SECRET_ACTIONS` (Task 1, single canonical enumeration) → `SECRET_ACTIONS = new Set(ALL_SECRET_ACTIONS)` in `validatedActions` (Task 3, no re-listed strings) ↔ `assertSecretActionAllowed(secret,"inject_submit")` (Task 8). `DEFAULT_ACTIONS` is `export`ed once in Task 1 (kept an explicit policy list, distinct from `ALL_SECRET_ACTIONS`) and imported by the generate route in Task 3 (no duplicated list); the route's `effectiveActions` (`requestedActions ?? existing ?? DEFAULT_ACTIONS`) is the exact value put on the binding **and** passed to `upsertSecret`, so binding == stored == what the UI shows, and it mirrors `upsertSecret`'s own resolution. `ApprovalBinding` new fields `submit_fingerprint`/`success_condition`/`auto_resume`/`allowed_actions`/`field_handle_label`/`submit_handle_label` (Task 2) are exactly the keys the generate route (Task 3) and the inject-submit route (Task 8) build, `ui-server.ts` serializes (Task 4), `ui.html` reads (Task 4), and the binding test asserts (Task 2); `allowed_actions` is matched via the reused `domainSet` stable-set helper. `BackendNodeRef { target_id; backend_node_id }`/`AbsenceProofResult { passed }` (Task 5) are the exact shapes `injectIntoBackendNode`/`clickBackendNode` (Task 6) and the route call sites (Task 8) use; `BrowserHandle` (Phase 1) exposes `target_id`/`backend_node_id`/`handle_fingerprint`/`element_kind`/`page_title`/`page_url_host`/`label`/`domain` which the route consumes (incl. the new submit-vs-field `target_id`/`domain` equality check). `CdpBrowserOps`'s new optional `cdpCallTimeoutMs` constructor arg and `CdpClient.sendWithTimeout` are additive/backward compatible with every existing `new CdpBrowserOps(cdp)` and `cdp.send(...)` call site (Phase-1 `mark-pick`/route tests unaffected). `AutoResumeArgs` (Task 7) `success_signal:"text_matched"`/`absence_proof:"passed"` match the route's only auto-resume call (Task 8) and the audit fields added in Task 7. The three `BrowserOps` stubs gain the four methods in the same tasks that extend the interface (Tasks 5–6), so the tree is green at every commit. `enforceDomain` is `export`ed in Task 3 and imported by the route in Task 8.
 
 ---
 
