@@ -127,6 +127,21 @@ export interface AbsenceProofResult {
   passed: boolean;
 }
 
+export type SafetyClass = "safe" | "readable";
+
+export interface BaselineEntry {
+  /** Stable structural key of the candidate within the approved subtree (path-based, not text). */
+  key: string;
+  /** safe = empty/absent/password-input-with-no-script-readable-value/recognized mask; readable = any non-empty script-readable value/text. */
+  safety: SafetyClass;
+  /** Hashed value/state fingerprint of this candidate (NEVER raw value/text). */
+  fp: string;
+}
+
+export interface Baseline {
+  entries: BaselineEntry[];
+}
+
 export interface FieldDescriptor {
   tag: string;
   type?: string;
@@ -166,6 +181,12 @@ export interface BrowserOps {
   proveAbsence(secret: string): Promise<AbsenceProofResult>;
   injectIntoBackendNode(ref: BackendNodeRef, value: string): Promise<InjectResult>;
   clickBackendNode(ref: BackendNodeRef): Promise<void>;
+  /** Daemon-only single-element value reader (spec §12). Value never returned to the agent layer. Used internally; the per-candidate safe→revealed gate lives in `resolveWithinContainer` (all 3 modes go through it). */
+  readBackendNodeValue(ref: BackendNodeRef): Promise<string>;
+  /** Pre-blind, daemon-only: hashed value/state + safety class per candidate in the approved subtree. Readable siblings recorded, not rejected. */
+  baselineCandidates(ref: BackendNodeRef): Promise<Baseline>;
+  /** Post-reveal, daemon-only. Applies the SAME §6.1 per-candidate safe→revealed gate to ALL THREE modes: predicate → transition-eligible filter (drop unchanged-from-readable / still-safe) → exactly one safe→revealed → DOM containment proof → one-shot value read. For `field` the scan is bound to the field's own backend node (the field is its own subtree root / sole candidate) so a field already readable-unchanged pre-reveal fails closed too. Throws fail-closed on any uncertainty. */
+  resolveWithinContainer(ref: BackendNodeRef, mode: "field" | "container" | "focused-after-reveal", baseline: Baseline): Promise<{ value: string }>;
 }
 
 const READ_SCRIPT = `
@@ -342,6 +363,196 @@ const OBSERVE_TEXT_FN = `function(needle){
     const t = (document.body && document.body.innerText) || "";
     return { host: location.host, has: typeof needle === "string" && needle !== "" && t.indexOf(needle) !== -1 };
   } catch (e) { return { host:"", has:false }; }
+}`;
+
+// Daemon-only. `this` = the approved field/container subtree root. Records, per
+// candidate-eligible element, a HASHED value/state fingerprint (never raw) + a
+// safety class (§6.1). Readable siblings are RECORDED, not rejected. Returns
+// { entries:[{key,safety,fp}] } only. "__BASELINE__" routes the scripted test
+// transport. Exported so the predicate/classification is unit-assertable.
+export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
+  var TEXT = ["","text","password","email","url","search","tel","number"];
+  function h(s){ // small non-cryptographic digest; only used to detect change (never reversed/egressed as text)
+    s = String(s == null ? "" : s); var x = 5381, i = 0;
+    for (i = 0; i < s.length; i++) { x = ((x << 5) + x + s.charCodeAt(i)) | 0; }
+    return ("00000000" + (x >>> 0).toString(16)).slice(-8);
+  }
+  function kind(el){
+    var tag = el.tagName.toLowerCase();
+    var type = (el.type || "").toLowerCase();
+    var role = (el.getAttribute && (el.getAttribute("role") || "")).toLowerCase ? (el.getAttribute("role") || "").toLowerCase() : "";
+    var editable = (typeof HTMLElement !== "undefined" && el instanceof HTMLElement) ? el.isContentEditable : el.isContentEditable === true;
+    if (editable && tag !== "input" && tag !== "textarea") return "field";
+    if (tag === "textarea") return "field";
+    if (tag === "input" && TEXT.indexOf(type) !== -1) return "field";
+    if (tag === "button" || tag === "summary" || role === "button") return "button";
+    if (tag === "input" && ["submit","button","image","reset"].indexOf(type) !== -1) return "button";
+    if ((tag === "a" && el.hasAttribute && el.hasAttribute("href")) || role === "link") return "link";
+    return "other";
+  }
+  // A candidate is: a field-kind element with non-empty value/text, OR a
+  // non-interactive text-bearing element (code/span/pre/p/div text node) with
+  // non-empty text. Buttons/links/labels are NEVER candidates.
+  function isCandidate(el){
+    var k = kind(el);
+    if (k === "button" || k === "link") return false;
+    var tag = el.tagName.toLowerCase();
+    if (tag === "label") return false;
+    if (k === "field") return true;
+    // non-interactive text element: only count its OWN text (no descendant elements
+    // with their own candidacy) to avoid double-counting container wrappers.
+    if (el.children && el.children.length > 0) return false;
+    return true;
+  }
+  function readableValue(el){
+    var tag = el.tagName.toLowerCase();
+    if (tag === "input" || tag === "textarea") {
+      // password input with no script-readable value is SAFE; .value is script-readable here only if the page exposes it
+      return typeof el.value === "string" ? el.value : "";
+    }
+    if (el.isContentEditable) return typeof el.innerText === "string" ? el.innerText : "";
+    return typeof el.textContent === "string" ? el.textContent : "";
+  }
+  function isSafeState(el){
+    var tag = el.tagName.toLowerCase();
+    var v = readableValue(el);
+    if (v === "" || v == null) return true;
+    if ((tag === "input" || tag === "textarea") && (el.type || "").toLowerCase() === "password" && el.value === "") return true;
+    // recognized mask/placeholder: a run of bullet/asterisk chars only
+    if (/^[\\u2022\\u25CF\\*\\u2024\\u00B7\\s]+$/.test(v)) return true;
+    return false;
+  }
+  try {
+    var root = this;
+    if (!root || root.nodeType !== 1) return { ok:false, entries:[] };
+    var entries = [], stack = [{ el: root, path: "0" }], n = 0;
+    while (stack.length) {
+      var cur = stack.pop(); var el = cur.el;
+      if (!el || el.nodeType !== 1) continue;
+      if (++n > 200000) return { ok:false, entries:[] };
+      if (isCandidate(el)) {
+        var safe = isSafeState(el);
+        entries.push({ key: cur.path, safety: safe ? "safe" : "readable", fp: h(readableValue(el)) });
+      }
+      if (el.shadowRoot) { var sc = el.shadowRoot.children; for (var i = 0; i < sc.length; i++) stack.push({ el: sc[i], path: cur.path + ".s" + i }); }
+      if (el.children) { for (var j = 0; j < el.children.length; j++) stack.push({ el: el.children[j], path: cur.path + "." + j }); }
+    }
+    return { ok:true, entries: entries };
+  } catch (e) { return { ok:false, entries:[] }; }
+}`;
+
+// Daemon-only. `this` = the approved subtree root: the container (modes
+// `container`/`focused-after-reveal`) OR the field's own element (mode `field`,
+// where the field is its own subtree root / sole candidate). `focused` is the
+// document.activeElement passed in for `focused-after-reveal`, else null.
+//
+// Returns the CHOSEN ELEMENT ITSELF (`return chosen;`) — or `null` for EVERY
+// fail-closed selection outcome (zero transition-eligible / >1
+// transition-eligible / chosen-but-already-readable-unchanged / no
+// safe→revealed transition / predicate-fails-or-control-label /
+// focused-after-reveal with a non-candidate focused element / empty resolved
+// value / any error). NO value, NO {ok,...} envelope — this exactly mirrors
+// the merged NORMALIZE_TO_ACTIONABLE_FN element-or-null contract so the daemon
+// (resolveWithinContainer) can take it via Runtime.callFunctionOn WITHOUT
+// returnByValue (a RemoteObject), prove DOM containment with the EXISTING
+// isDescendantOf, and then read the value EXACTLY ONCE off that same objectId.
+// Returning the element does NOT egress text (no returnByValue → only a remote
+// handle). "__RESOLVE__" routes the scripted test transport. The embedded
+// kind()/predicate/transition logic is UNCHANGED (must stay in lockstep with
+// elementKind()/NORMALIZE_TO_ACTIONABLE_FN, §3.3); only the returns are now
+// element-or-null. The single chosen value is read separately, once, by the
+// daemon (→ upsertSecret only).
+export const RESOLVE_SCAN_FN = `function(baseline, focused){ /* __RESOLVE__ */
+  var TEXT = ["","text","password","email","url","search","tel","number"];
+  function h(s){ s = String(s == null ? "" : s); var x = 5381, i = 0; for (i=0;i<s.length;i++){ x = ((x<<5)+x+s.charCodeAt(i))|0; } return ("00000000"+(x>>>0).toString(16)).slice(-8); }
+  function kind(el){
+    var tag = el.tagName.toLowerCase();
+    var type = (el.type || "").toLowerCase();
+    var role = (el.getAttribute && (el.getAttribute("role") || "")).toLowerCase ? (el.getAttribute("role") || "").toLowerCase() : "";
+    var editable = (typeof HTMLElement !== "undefined" && el instanceof HTMLElement) ? el.isContentEditable : el.isContentEditable === true;
+    if (editable && tag !== "input" && tag !== "textarea") return "field";
+    if (tag === "textarea") return "field";
+    if (tag === "input" && TEXT.indexOf(type) !== -1) return "field";
+    if (tag === "button" || tag === "summary" || role === "button") return "button";
+    if (tag === "input" && ["submit","button","image","reset"].indexOf(type) !== -1) return "button";
+    if ((tag === "a" && el.hasAttribute && el.hasAttribute("href")) || role === "link") return "link";
+    return "other";
+  }
+  function isCandidate(el){
+    var k = kind(el);
+    if (k === "button" || k === "link") return false;
+    var tag = el.tagName.toLowerCase();
+    if (tag === "label") return false;
+    if (k === "field") return true;
+    if (el.children && el.children.length > 0) return false;
+    return true;
+  }
+  function readableValue(el){
+    var tag = el.tagName.toLowerCase();
+    if (tag === "input" || tag === "textarea") return typeof el.value === "string" ? el.value : "";
+    if (el.isContentEditable) return typeof el.innerText === "string" ? el.innerText : "";
+    return typeof el.textContent === "string" ? el.textContent : "";
+  }
+  function isSafeState(el){
+    var tag = el.tagName.toLowerCase();
+    var v = readableValue(el);
+    if (v === "" || v == null) return true;
+    if ((tag === "input" || tag === "textarea") && (el.type || "").toLowerCase() === "password" && el.value === "") return true;
+    if (/^[\\u2022\\u25CF\\*\\u2024\\u00B7\\s]+$/.test(v)) return true;
+    return false;
+  }
+  try {
+    var root = this;
+    if (!root || root.nodeType !== 1) return null;
+    var bmap = {}; var be = (baseline && baseline.entries) || [];
+    for (var bi = 0; bi < be.length; bi++) bmap[be[bi].key] = be[bi];
+    // Enumerate predicate-matching elements with the SAME structural keys as the
+    // baseline. The root itself is included (mode field: the field is its own
+    // root and sole candidate, so the same per-candidate gate applies to it).
+    var cands = [], stack = [{ el: root, path: "0" }], n = 0;
+    while (stack.length) {
+      var cur = stack.pop(); var el = cur.el;
+      if (!el || el.nodeType !== 1) continue;
+      if (++n > 200000) return null;
+      if (isCandidate(el)) cands.push({ el: el, path: cur.path });
+      if (el.shadowRoot) { var sc = el.shadowRoot.children; for (var i=0;i<sc.length;i++) stack.push({ el: sc[i], path: cur.path + ".s" + i }); }
+      if (el.children) { for (var j=0;j<el.children.length;j++) stack.push({ el: el.children[j], path: cur.path + "." + j }); }
+    }
+    // focused-after-reveal: the only eligible element is the passed activeElement,
+    // and ONLY if it itself passes the predicate.
+    if (focused != null) {
+      if (!isCandidate(focused)) return null;
+      cands = cands.filter(function(c){ return c.el === focused; });
+      if (cands.length === 0) return null;
+    }
+    // Filter to TRANSITION-ELIGIBLE: had a SAFE baseline AND now shows a
+    // safe→revealed transition (now NOT safe, value present). Drop anything
+    // unchanged from a readable baseline or still-safe. A chosen candidate that
+    // was already READABLE-UNCHANGED pre-reveal is the manual-handling case
+    // (secret was observable without blind protection → fail closed → null).
+    var eligible = [];
+    for (var ci = 0; ci < cands.length; ci++) {
+      var c = cands[ci];
+      var b = bmap[c.path];
+      var nowSafe = isSafeState(c.el);
+      if (b && b.safety === "readable") {
+        // preexisting readable (unchanged OR changed) is NEVER a safe→revealed
+        // transition → ignored (not ambiguous, not eligible).
+        continue;
+      }
+      // b is safe (or no baseline entry → treat as newly-appeared/safe)
+      if (nowSafe) continue;                     // still safe → not revealed
+      eligible.push(c);
+    }
+    // Exactly-one rule over the TRANSITION-ELIGIBLE set only (readable siblings
+    // never cause a false ">1"). Zero / >1 / empty value → null. Same logic as
+    // before; only the return is now the element (or null).
+    if (eligible.length !== 1) return null;
+    var chosen = eligible[0].el;
+    var val = readableValue(chosen);
+    if (typeof val !== "string" || val === "") return null;
+    return chosen;
+  } catch (e) { return null; }
 }`;
 
 function fieldFingerprint(domain: string, target: string, backendNodeId: number | null, field: FieldDescriptor): string {
@@ -929,6 +1140,211 @@ export class CdpBrowserOps implements BrowserOps {
       await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y }, sessionId);
       await this.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 }, sessionId);
       await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 }, sessionId);
+    } finally {
+      await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+
+  // Daemon-only single-element value reader (spec §12). Resolves the marked
+  // backend node and reads its value via Runtime.callFunctionOn. The value is
+  // returned to the route ONLY (→ upsertSecret); never to the agent.
+  // Fail-closed on any error. (The per-candidate safe→revealed gate lives in
+  // resolveWithinContainer — ALL THREE modes go through that; this method is
+  // the generic §12 reader primitive, kept and tested independently.)
+  async readBackendNodeValue(ref: BackendNodeRef): Promise<string> {
+    const sessionId = await this.attach(ref.target_id);
+    try {
+      const { object } = await this.cdp.send<{ object: { objectId: string } }>(
+        "DOM.resolveNode",
+        { backendNodeId: ref.backend_node_id },
+        sessionId,
+      );
+      try {
+        const r = await this.cdp.send<{ result: { value: { ok: boolean; value?: string } } }>(
+          "Runtime.callFunctionOn",
+          {
+            objectId: object.objectId,
+            returnByValue: true,
+            functionDeclaration: `function(){
+              try {
+                var tag = this.tagName.toLowerCase();
+                if (tag === "input" || tag === "textarea") return { ok:true, value: typeof this.value === "string" ? this.value : "" };
+                if (this.isContentEditable) return { ok:true, value: typeof this.innerText === "string" ? this.innerText : "" };
+                return { ok:true, value: typeof this.textContent === "string" ? this.textContent : "" };
+              } catch (e) { return { ok:false }; }
+            }`,
+          },
+          sessionId,
+        );
+        const v = r.result.value;
+        if (v === undefined || v.ok !== true || typeof v.value !== "string") {
+          throw new ShuttleError("reveal_read_failed", "Could not read the marked field value.");
+        }
+        return v.value;
+      } finally {
+        await this.cdp.send("Runtime.releaseObject", { objectId: object.objectId }, sessionId).catch(() => undefined);
+      }
+    } catch (err) {
+      if (err instanceof ShuttleError) throw err;
+      throw new ShuttleError("reveal_read_failed", "Field read failed.");
+    } finally {
+      await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+
+  // Pre-blind, daemon-only. Resolves the approved field/container backend node
+  // and runs BASELINE_SCAN_FN bound to it. Returns hashed/classified entries
+  // ONLY (no raw text). Readable siblings are RECORDED, not rejected (§6.1).
+  async baselineCandidates(ref: BackendNodeRef): Promise<Baseline> {
+    const sessionId = await this.attach(ref.target_id);
+    try {
+      const { object } = await this.cdp.send<{ object: { objectId: string } }>(
+        "DOM.resolveNode",
+        { backendNodeId: ref.backend_node_id },
+        sessionId,
+      );
+      try {
+        const r = await this.cdp.send<{ result: { value: { ok: boolean; entries: { key: string; safety: "safe" | "readable"; fp: string }[] } } }>(
+          "Runtime.callFunctionOn",
+          { objectId: object.objectId, returnByValue: true, functionDeclaration: BASELINE_SCAN_FN },
+          sessionId,
+        );
+        const v = r.result.value;
+        if (v === undefined || v.ok !== true || !Array.isArray(v.entries)) {
+          throw new ShuttleError("reveal_baseline_failed", "Could not baseline the approved subtree.");
+        }
+        return { entries: v.entries };
+      } finally {
+        await this.cdp.send("Runtime.releaseObject", { objectId: object.objectId }, sessionId).catch(() => undefined);
+      }
+    } catch (err) {
+      if (err instanceof ShuttleError) throw err;
+      throw new ShuttleError("reveal_baseline_failed", "Baseline failed.");
+    } finally {
+      await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+
+  // Post-reveal, daemon-only. Applies the SAME §6.1 per-candidate
+  // safe→revealed gate to ALL THREE modes (`field`/`container`/
+  // `focused-after-reveal`). Resolves the approved subtree root backend node
+  // (the container, or — mode `field` — the field's OWN backend node so the
+  // field is its own sole candidate and a field already readable-unchanged
+  // pre-reveal fails closed too), runs RESOLVE_SCAN_FN bound to it (with
+  // document.activeElement for focused-after-reveal). RESOLVE_SCAN_FN returns
+  // the CHOSEN ELEMENT itself or null — so this mirrors the merged
+  // normalizeToActionable RemoteObject pattern EXACTLY: callFunctionOn WITHOUT
+  // returnByValue → a RemoteObject; null/subtype:"null"/no-objectId → fail
+  // closed. Then DOM.describeNode {objectId} → backendNodeId → DOM-containment
+  // proof reusing the EXISTING isDescendantOf (the approved container's backend
+  // node must contain — or equal — the chosen node) → read the value EXACTLY
+  // ONCE via callFunctionOn on that SAME objectId with returnByValue:true.
+  // Every resolved objectId is released in finally (mirrors describeBackendNode/
+  // normalizeToActionable). Fail-closed (single ShuttleError; the response is
+  // enum-only captured:"unknown" so granular reasons are not surfaced) on no
+  // single safe→revealed candidate, containment failure, or any CDP error.
+  async resolveWithinContainer(
+    ref: BackendNodeRef,
+    mode: "field" | "container" | "focused-after-reveal",
+    baseline: Baseline,
+  ): Promise<{ value: string }> {
+    const sessionId = await this.attach(ref.target_id);
+    try {
+      const { object } = await this.cdp.send<{ object: { objectId: string } }>(
+        "DOM.resolveNode",
+        { backendNodeId: ref.backend_node_id },
+        sessionId,
+      );
+      try {
+        // focused-after-reveal: resolve document.activeElement as a callable arg.
+        let focusedArg: { objectId: string } | { value: null } = { value: null };
+        if (mode === "focused-after-reveal") {
+          const ae = await this.cdp.send<{ result: { objectId?: string } }>(
+            "Runtime.evaluate",
+            { expression: "document.activeElement", returnByValue: false },
+            sessionId,
+          );
+          focusedArg = ae.result.objectId !== undefined ? { objectId: ae.result.objectId } : { value: null };
+        }
+        try {
+          // ONE scan call. RESOLVE_SCAN_FN returns the chosen element itself or
+          // null — invoked WITHOUT returnByValue so we get a RemoteObject
+          // (mirrors normalizeToActionable). A null/subtype:"null"/no-objectId
+          // RemoteObject is every fail-closed selection outcome (zero / >1
+          // transition-eligible / already-readable-unchanged / no transition /
+          // predicate-fails / focused-non-candidate / empty value).
+          const r = await this.cdp.send<{ result: { objectId?: string; subtype?: string } }>(
+            "Runtime.callFunctionOn",
+            {
+              objectId: object.objectId,
+              arguments: [{ value: baseline }, focusedArg],
+              functionDeclaration: RESOLVE_SCAN_FN,
+            },
+            sessionId,
+          );
+          const chosenObjectId = r.result.objectId;
+          if (typeof chosenObjectId !== "string" || r.result.subtype === "null") {
+            throw new ShuttleError(
+              "reveal_no_transition",
+              "No single safe→revealed candidate after reveal.",
+            );
+          }
+          try {
+            const d = await this.cdp.send<{ node: { backendNodeId: number } }>(
+              "DOM.describeNode",
+              { objectId: chosenObjectId },
+              sessionId,
+            );
+            const chosenBackend = d.node.backendNodeId;
+            // DOM-containment proof reusing the EXISTING isDescendantOf: the
+            // approved subtree root must CONTAIN or EQUAL the chosen node.
+            const contained =
+              chosenBackend === ref.backend_node_id ||
+              (await this.isDescendantOf(sessionId, ref.backend_node_id, chosenBackend).catch(() => false));
+            if (!contained) {
+              throw new ShuttleError(
+                "reveal_not_contained",
+                "Chosen element is not inside the approved container.",
+              );
+            }
+            // Read the value EXACTLY ONCE, daemon-internal, off the SAME
+            // objectId (returnByValue:true). The value reaches only the route →
+            // vault.upsertSecret; it is NEVER returned to the agent layer or audit.
+            const rv = await this.cdp.send<{ result: { value: { ok: boolean; value?: string } } }>(
+              "Runtime.callFunctionOn",
+              {
+                objectId: chosenObjectId,
+                returnByValue: true,
+                functionDeclaration: `function(){
+                  try {
+                    var t = this;
+                    if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return { ok:true, value: typeof t.value === "string" ? t.value : "" };
+                    if (t instanceof HTMLElement && t.isContentEditable) return { ok:true, value: typeof t.innerText === "string" ? t.innerText : "" };
+                    return { ok:true, value: typeof t.textContent === "string" ? t.textContent : "" };
+                  } catch (e) { return { ok:false }; }
+                }`,
+              },
+              sessionId,
+            );
+            const v = rv.result.value;
+            if (v === undefined || v.ok !== true || typeof v.value !== "string" || v.value === "") {
+              throw new ShuttleError("reveal_no_transition", "Resolved candidate had no value.");
+            }
+            return { value: v.value };
+          } finally {
+            await this.cdp.send("Runtime.releaseObject", { objectId: chosenObjectId }, sessionId).catch(() => undefined);
+          }
+        } finally {
+          if ("objectId" in focusedArg) {
+            await this.cdp.send("Runtime.releaseObject", { objectId: focusedArg.objectId }, sessionId).catch(() => undefined);
+          }
+        }
+      } finally {
+        await this.cdp.send("Runtime.releaseObject", { objectId: object.objectId }, sessionId).catch(() => undefined);
+      }
+    } catch (err) {
+      if (err instanceof ShuttleError) throw err;
+      throw new ShuttleError("reveal_resolve_failed", "Resolution failed.");
     } finally {
       await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
     }

@@ -133,6 +133,9 @@ function stubBrowser(s: { domain: string; target: string; value: string }): Brow
     proveAbsence: async () => ({ passed: true }),
     injectIntoBackendNode: async () => ({ domain: s.domain, target_id: s.target, field, field_fingerprint: fp }),
     clickBackendNode: async () => undefined,
+    readBackendNodeValue: async () => "stub_value",
+    baselineCandidates: async () => ({ entries: [] }),
+    resolveWithinContainer: async () => ({ value: "stub_value" }),
   };
 }
 
@@ -293,6 +296,9 @@ test("inject refuses when target changes after approval (post != pre)", async ()
       proveAbsence: async () => ({ passed: true }),
       injectIntoBackendNode: async () => ({ domain: "dashboard.example.com", target_id: "T1", field, field_fingerprint: "f" }),
       clickBackendNode: async () => undefined,
+      readBackendNodeValue: async () => "stub_value",
+      baselineCandidates: async () => ({ entries: [] }),
+      resolveWithinContainer: async () => ({ value: "stub_value" }),
     };
 
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
@@ -421,6 +427,9 @@ test("capture rejects when the focused field changes between approval and captur
       proveAbsence: async () => ({ passed: true }),
       injectIntoBackendNode: async () => ({ domain: "dashboard.stripe.com", target_id: "T1", field, field_fingerprint: "sha256:FIELD_A" }),
       clickBackendNode: async () => undefined,
+      readBackendNodeValue: async () => "stub_value",
+      baselineCandidates: async () => ({ entries: [] }),
+      resolveWithinContainer: async () => ({ value: "stub_value" }),
     };
 
     // Pre-issue an approval bound to FIELD_A (matches the `pre` read).
@@ -756,6 +765,9 @@ test("inject that fails before writing the value auto-resumes (blind mode left O
       proveAbsence: async () => ({ passed: true }),
       injectIntoBackendNode: async () => ({ domain: "app.example.com", target_id: "T1", field, field_fingerprint: "f" }),
       clickBackendNode: async () => undefined,
+      readBackendNodeValue: async () => "stub_value",
+      baselineCandidates: async () => ({ entries: [] }),
+      resolveWithinContainer: async () => ({ value: "stub_value" }),
     };
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
       ref: "ss://local/dev/INJ2", domain: "app.example.com", wait_for_approval: false,

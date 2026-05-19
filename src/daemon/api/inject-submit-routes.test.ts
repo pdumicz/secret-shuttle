@@ -26,6 +26,9 @@ function stub(over: Partial<BrowserOps> = {}): BrowserOps {
     proveAbsence: async () => ({ passed: true }),
     injectIntoBackendNode: async () => inj,
     clickBackendNode: async () => undefined,
+    readBackendNodeValue: async () => "stub_value",
+    baselineCandidates: async () => ({ entries: [] }),
+    resolveWithinContainer: async () => ({ value: "stub_value" }),
     ...over,
   };
 }

@@ -38,6 +38,9 @@ function stubBrowser(state: { domain: string; target: string; value: string }): 
     proveAbsence: async () => ({ passed: true }),
     injectIntoBackendNode: async () => ({ domain: state.domain, target_id: state.target, field, field_fingerprint: fingerprint }),
     clickBackendNode: async () => undefined,
+    readBackendNodeValue: async () => "stub_value",
+    baselineCandidates: async () => ({ entries: [] }),
+    resolveWithinContainer: async () => ({ value: "stub_value" }),
   };
 }
 
