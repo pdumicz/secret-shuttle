@@ -131,6 +131,8 @@ function stubBrowser(s: { domain: string; target: string; value: string }): Brow
     revalidateHandle: async () => undefined,
     observeText: async () => true,
     proveAbsence: async () => ({ passed: true }),
+    injectIntoBackendNode: async () => ({ domain: s.domain, target_id: s.target, field, field_fingerprint: fp }),
+    clickBackendNode: async () => undefined,
   };
 }
 
@@ -289,6 +291,8 @@ test("inject refuses when target changes after approval (post != pre)", async ()
       revalidateHandle: async () => undefined,
       observeText: async () => true,
       proveAbsence: async () => ({ passed: true }),
+      injectIntoBackendNode: async () => ({ domain: "dashboard.example.com", target_id: "T1", field, field_fingerprint: "f" }),
+      clickBackendNode: async () => undefined,
     };
 
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
@@ -415,6 +419,8 @@ test("capture rejects when the focused field changes between approval and captur
       injectFocused: async () => ({ domain: "dashboard.stripe.com", target_id: "T1", field, field_fingerprint: "sha256:FIELD_A" }),
       observeText: async () => true,
       proveAbsence: async () => ({ passed: true }),
+      injectIntoBackendNode: async () => ({ domain: "dashboard.stripe.com", target_id: "T1", field, field_fingerprint: "sha256:FIELD_A" }),
+      clickBackendNode: async () => undefined,
     };
 
     // Pre-issue an approval bound to FIELD_A (matches the `pre` read).
@@ -748,6 +754,8 @@ test("inject that fails before writing the value auto-resumes (blind mode left O
       revalidateHandle: async () => undefined,
       observeText: async () => true,
       proveAbsence: async () => ({ passed: true }),
+      injectIntoBackendNode: async () => ({ domain: "app.example.com", target_id: "T1", field, field_fingerprint: "f" }),
+      clickBackendNode: async () => undefined,
     };
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
       ref: "ss://local/dev/INJ2", domain: "app.example.com", wait_for_approval: false,

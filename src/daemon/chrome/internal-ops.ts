@@ -164,6 +164,8 @@ export interface BrowserOps {
   revalidateHandle(h: { target_id: string; domain: string; backend_node_id: number; handle_fingerprint: string; element_kind: ElementKind }): Promise<void>;
   observeText(domain: string, text: string, timeoutMs: number): Promise<boolean>;
   proveAbsence(secret: string): Promise<AbsenceProofResult>;
+  injectIntoBackendNode(ref: BackendNodeRef, value: string): Promise<InjectResult>;
+  clickBackendNode(ref: BackendNodeRef): Promise<void>;
 }
 
 const READ_SCRIPT = `
@@ -352,6 +354,15 @@ function handleFingerprint(
 ): string {
   const seed = JSON.stringify({ domain, target, backendNodeId, ...meta, kind });
   return `sha256:${createHash("sha256").update(seed).digest("hex").slice(0, 16)}`;
+}
+
+function polygonArea(xs: number[], ys: number[]): number {
+  let a = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const j = (i + 1) % xs.length;
+    a += (xs[i] ?? 0) * (ys[j] ?? 0) - (xs[j] ?? 0) * (ys[i] ?? 0);
+  }
+  return Math.abs(a) / 2;
 }
 
 export class CdpBrowserOps implements BrowserOps {
@@ -787,6 +798,120 @@ export class CdpBrowserOps implements BrowserOps {
       }
       if (Date.now() >= deadline) return false;
       await new Promise((res) => setTimeout(res, 200));
+    }
+  }
+
+  async injectIntoBackendNode(ref: BackendNodeRef, value: string): Promise<InjectResult> {
+    const sessionId = await this.attach(ref.target_id);
+    try {
+      await this.cdp.send("DOM.focus", { backendNodeId: ref.backend_node_id }, sessionId);
+      const ev = await this.cdp.send<{ result: { objectId?: string } }>(
+        "Runtime.evaluate",
+        { expression: "document.activeElement", returnByValue: false },
+        sessionId,
+      );
+      const objectId = ev.result.objectId;
+      if (objectId === undefined) throw new ShuttleError("inject_focus_failed", "Focus did not land on an element.");
+      let activeBackend: number;
+      try {
+        const rn = await this.cdp.send<{ nodeId: number }>("DOM.requestNode", { objectId }, sessionId);
+        const d = await this.cdp.send<{ node: { backendNodeId: number } }>("DOM.describeNode", { nodeId: rn.nodeId }, sessionId);
+        activeBackend = d.node.backendNodeId;
+      } finally {
+        await this.cdp.send("Runtime.releaseObject", { objectId }, sessionId).catch(() => undefined);
+      }
+      if (activeBackend !== ref.backend_node_id) {
+        throw new ShuttleError("inject_focus_mismatch", "Focused element is not the marked field.");
+      }
+      const r = await this.cdp.send<{ result: { value: { ok: boolean; field?: FieldDescriptor; domain?: string; reason?: string } } }>(
+        "Runtime.evaluate",
+        { expression: WRITE_SCRIPT(value), returnByValue: true, awaitPromise: false },
+        sessionId,
+      );
+      const res = r.result.value;
+      if (!res.ok || res.field === undefined || res.domain === undefined) {
+        throw new ShuttleError("inject_failed", res.reason ?? "Could not write to the marked field.");
+      }
+      const fp = fieldFingerprint(res.domain.toLowerCase(), ref.target_id, ref.backend_node_id, res.field);
+      return { domain: res.domain.toLowerCase(), target_id: ref.target_id, field: res.field, field_fingerprint: fp };
+    } finally {
+      await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+
+  private async isDescendantOf(sessionId: string, ancestorBackendNodeId: number, candidateBackendNodeId: number): Promise<boolean> {
+    const a = await this.cdp.send<{ object: { objectId: string } }>("DOM.resolveNode", { backendNodeId: ancestorBackendNodeId }, sessionId);
+    try {
+      const d = await this.cdp.send<{ object: { objectId: string } }>("DOM.resolveNode", { backendNodeId: candidateBackendNodeId }, sessionId);
+      try {
+        const r = await this.cdp.send<{ result: { value: boolean } }>(
+          "Runtime.callFunctionOn",
+          {
+            objectId: a.object.objectId,
+            returnByValue: true,
+            arguments: [{ objectId: d.object.objectId }],
+            functionDeclaration: "function(other){ return this.contains(other); }",
+          },
+          sessionId,
+        );
+        return r.result.value === true;
+      } finally {
+        await this.cdp.send("Runtime.releaseObject", { objectId: d.object.objectId }, sessionId).catch(() => undefined);
+      }
+    } finally {
+      await this.cdp.send("Runtime.releaseObject", { objectId: a.object.objectId }, sessionId).catch(() => undefined);
+    }
+  }
+
+  async clickBackendNode(ref: BackendNodeRef): Promise<void> {
+    const sessionId = await this.attach(ref.target_id);
+    try {
+      await this.cdp.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: ref.backend_node_id }, sessionId).catch(() => undefined);
+      const cq = await this.cdp
+        .send<{ quads: number[][] }>("DOM.getContentQuads", { backendNodeId: ref.backend_node_id }, sessionId)
+        .catch(() => ({ quads: [] as number[][] }));
+      let point: { x: number; y: number } | null = null;
+      for (const q of cq.quads) {
+        if (q.length === 8) {
+          const xs = [q[0] ?? 0, q[2] ?? 0, q[4] ?? 0, q[6] ?? 0];
+          const ys = [q[1] ?? 0, q[3] ?? 0, q[5] ?? 0, q[7] ?? 0];
+          if (polygonArea(xs, ys) > 1) {
+            point = { x: ((xs[0] ?? 0) + (xs[1] ?? 0) + (xs[2] ?? 0) + (xs[3] ?? 0)) / 4, y: ((ys[0] ?? 0) + (ys[1] ?? 0) + (ys[2] ?? 0) + (ys[3] ?? 0)) / 4 };
+            break;
+          }
+        }
+      }
+      if (point === null) {
+        const bm = await this.cdp
+          .send<{ model?: { content: number[]; width: number; height: number } }>("DOM.getBoxModel", { backendNodeId: ref.backend_node_id }, sessionId)
+          .catch(() => ({} as { model?: { content: number[]; width: number; height: number } }));
+        const m = bm.model;
+        if (m === undefined || m.width <= 0 || m.height <= 0 || m.content.length < 8) {
+          throw new ShuttleError("click_no_box", "Submit control has no visible box.");
+        }
+        const c = m.content;
+        point = {
+          x: ((c[0] ?? 0) + (c[2] ?? 0) + (c[4] ?? 0) + (c[6] ?? 0)) / 4,
+          y: ((c[1] ?? 0) + (c[3] ?? 0) + (c[5] ?? 0) + (c[7] ?? 0)) / 4,
+        };
+      }
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0) {
+        throw new ShuttleError("click_offscreen", "Submit control is off-screen.");
+      }
+      const hit = await this.cdp
+        .send<{ backendNodeId?: number }>("DOM.getNodeForLocation", { x: Math.round(point.x), y: Math.round(point.y), includeUserAgentShadowDOM: false }, sessionId)
+        .catch(() => ({} as { backendNodeId?: number }));
+      const hitBackend = hit.backendNodeId;
+      if (hitBackend === undefined) throw new ShuttleError("click_hit_test_failed", "Could not hit-test the submit point.");
+      if (hitBackend !== ref.backend_node_id) {
+        const contained = await this.isDescendantOf(sessionId, ref.backend_node_id, hitBackend).catch(() => false);
+        if (!contained) throw new ShuttleError("click_occluded", "Submit point is covered by another element.");
+      }
+      await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y }, sessionId);
+      await this.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 }, sessionId);
+      await this.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 }, sessionId);
+    } finally {
+      await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
     }
   }
 }
