@@ -506,6 +506,8 @@ export const RESOLVE_SCAN_FN = `function(baseline, focused){ /* __RESOLVE__ */
     if (!root || root.nodeType !== 1) return null;
     var bmap = {}; var be = (baseline && baseline.entries) || [];
     for (var bi = 0; bi < be.length; bi++) bmap[be[bi].key] = be[bi];
+    var readableFps = {};
+    for (var rk = 0; rk < be.length; rk++) { if (be[rk].safety === "readable") readableFps[be[rk].fp] = 1; }
     // Enumerate predicate-matching elements with the SAME structural keys as the
     // baseline. The root itself is included (mode field: the field is its own
     // root and sole candidate, so the same per-candidate gate applies to it).
@@ -542,6 +544,7 @@ export const RESOLVE_SCAN_FN = `function(baseline, focused){ /* __RESOLVE__ */
       }
       // b is safe (or no baseline entry → treat as newly-appeared/safe)
       if (nowSafe) continue;                     // still safe → not revealed
+      if (readableFps[h(readableValue(c.el))]) continue; // §6.1: this exact value was script-readable somewhere in the approved subtree pre-reveal → observable before blind protection → fail closed. Positional baseline keys are unstable across reveal-time DOM reflow, so re-anchor the "already readable" decision by value hash, not path.
       eligible.push(c);
     }
     // Exactly-one rule over the TRANSITION-ELIGIBLE set only (readable siblings

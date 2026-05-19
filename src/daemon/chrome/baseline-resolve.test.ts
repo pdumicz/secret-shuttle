@@ -313,6 +313,68 @@ test("resolveWithinContainer fails closed on any CDP error", async () => {
   );
 });
 
+test("RESOLVE_SCAN_FN: a pre-readable secret merely re-wrapped by reveal (path shifts) fails closed — value-hash re-anchor, §6.1", () => {
+  const S = "whsec_ALREADY_VISIBLE_BEFORE_BLIND";
+  // baseline: label (readable) + code element with pre-existing secret (readable)
+  const code0 = el("code", { __id: "secret", textContent: S });
+  const label0 = el("span", { __id: "lbl", textContent: "Signing secret" });
+  const root0 = el("div", { children: [label0, code0] });
+  const baseline = makeBaseline(root0)(root0);
+  // post-reveal: SAME unchanged code value, but now nested inside a NEW wrapper <div>
+  // → the code element's path shifts (e.g. "0.1" → "0.1.0"), defeating the positional gate
+  const code1 = el("code", { __id: "secret", textContent: S });
+  const wrapper = el("div", { children: [code1] });
+  const label1 = el("span", { __id: "lbl", textContent: "Signing secret" });
+  const root1 = el("div", { children: [label1, wrapper] });
+  const r = makeResolve(root1)(root1, baseline, null);
+  // The secret value was already script-readable before blind protection → must fail closed
+  assert.equal(r, null);
+});
+
+test("RESOLVE_SCAN_FN: legitimate password masked→revealed still returns the element (no regression from the value re-anchor)", () => {
+  // baseline: password input with empty value → safe (fp is hash of "")
+  const field0 = el("input", { __id: "pw", type: "password", value: "" });
+  const root0 = el("div", { children: [field0] });
+  const baseline = makeBaseline(root0)(root0);
+  // post-reveal: real secret value now present — fp of "" ≠ fp of the revealed value
+  const field1 = el("input", { __id: "pw", type: "password", value: "whsec_REAL_SECRET" });
+  const root1 = el("div", { children: [field1] });
+  const r = makeResolve(root1)(root1, baseline, null);
+  assert.notEqual(r, null);
+  assert.equal(r?.__id, "pw");
+});
+
+test("RESOLVE_SCAN_FN: legitimate empty-text element→revealed at the same path still returns the element", () => {
+  // baseline: <code> with empty textContent → safe (fp is hash of "")
+  const code0 = el("code", { __id: "tok", textContent: "" });
+  const root0 = el("div", { children: [code0] });
+  const baseline = makeBaseline(root0)(root0);
+  // post-reveal: real token value appears — fp of "" ≠ fp of revealed value
+  const code1 = el("code", { __id: "tok", textContent: "ghp_REAL_TOKEN_HERE" });
+  const root1 = el("div", { children: [code1] });
+  const r = makeResolve(root1)(root1, baseline, null);
+  assert.notEqual(r, null);
+  assert.equal(r?.__id, "tok");
+});
+
+test("RESOLVE_SCAN_FN: a readable sibling label that reflows does not block a legitimate safe→revealed field", () => {
+  // baseline: readable <span> label + safe empty <input> field
+  const label0 = el("span", { __id: "lbl", textContent: "API Key" }); // readable — different value from the field
+  const field0 = el("input", { __id: "fld", type: "text", value: "" }); // safe
+  const root0 = el("div", { children: [label0, field0] });
+  const baseline = makeBaseline(root0)(root0);
+  // post-reveal: label re-wrapped inside a new <div> (path shifts), field revealed
+  // The label's fp (hash of "API Key") ≠ the field's revealed value's fp
+  const label1 = el("span", { __id: "lbl", textContent: "API Key" });
+  const wrapper = el("div", { children: [label1] });
+  const field1 = el("input", { __id: "fld", type: "text", value: "sk-real-api-key-9999" });
+  const root1 = el("div", { children: [wrapper, field1] });
+  const r = makeResolve(root1)(root1, baseline, null);
+  // The label reflow must NOT fail-close the legitimate field reveal
+  assert.notEqual(r, null);
+  assert.equal(r?.__id, "fld");
+});
+
 test("baselineCandidates fails closed (ShuttleError reveal_baseline_failed) when an entry is structurally malformed (daemon trust-boundary guard)", async () => {
   const t = new RcTransport();
   // ok:true but an entry violates the {key:string, safety:"safe"|"readable", fp:string} shape.
