@@ -305,7 +305,16 @@ export const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
         try { if (el.isContentEditable && hit(el.innerText)) return { hit:true }; } catch (e) {}
         if ((el.tagName === "SCRIPT" || el.tagName === "STYLE" || el.tagName === "NOSCRIPT") && hit(el.textContent)) return { hit:true };
         if (el.tagName === "TEMPLATE") { try { if (el.content && hit(el.content.textContent)) return { hit:true }; } catch (e) { return { inconclusive:true }; } }
-        if (el.shadowRoot) { for (const c of el.shadowRoot.children) stack.push(c); }
+        if (el.shadowRoot) {
+          // Open shadow roots are script-readable (incl. by the resumed agent
+          // via host.shadowRoot.textContent). shadowRoot.textContent is the
+          // analog of the light-DOM documentElement.textContent catch-all and
+          // covers ordinary shadow text/spans/divs/text-nodes that the
+          // per-element walk does not. Closed shadow roots are null here →
+          // correctly out of scope per §5.4. Fail closed on any error.
+          try { if (hit(el.shadowRoot.textContent)) return { hit:true }; } catch (e) { return { inconclusive:true }; }
+          for (const c of el.shadowRoot.children) stack.push(c);
+        }
         if (el.children) { for (const c of el.children) stack.push(c); }
       }
       try { if (doc.body && hit(doc.body.innerText)) return { hit:true }; } catch (e) {}

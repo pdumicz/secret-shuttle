@@ -188,7 +188,11 @@ interface ShimNode {
   textContent?: string;
   isContentEditable?: boolean;
   innerText?: string;
-  shadowRoot?: { children: ShimNode[] } | null;
+  // Mirrors real DOM: an open shadowRoot exposes BOTH .textContent (concatenated
+  // subtree text — the analog of light-DOM documentElement.textContent) AND
+  // .children (element children, walked for INPUT.value / nested hosts). Closed
+  // shadow roots are null here (correctly out of scope per §5.4).
+  shadowRoot?: { textContent?: string; children: ShimNode[] } | null;
   content?: { textContent?: string } | null;
   children?: ShimNode[];
 }
@@ -303,4 +307,90 @@ test("absence scan hits on a <template> content.textContent", () => {
     children: [{ tagName: "TEMPLATE", attributes: null, content: { textContent: "tmpl sek" }, children: [], shadowRoot: null }],
   });
   assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+// --- Open-shadow-root ORDINARY-TEXT fail-OPEN regression coverage -----------
+// Open shadow roots are script-readable (incl. by the resumed agent via
+// host.shadowRoot.textContent). The per-element walk only catches INPUT/TEXTAREA
+// .value, contenteditable, SCRIPT/STYLE/NOSCRIPT/TEMPLATE — NOT ordinary
+// spans/divs/text-nodes. The light-DOM body.innerText / documentElement.text
+// Content catch-alls do NOT cross into shadow trees. So the secret as plain
+// shadow text was a confirmed fail-OPEN (scan returned {found:false}). The fix
+// adds shadowRoot.textContent as the in-shadow analog of the light-DOM
+// documentElement.textContent catch-all. These tests model shadowRoot with BOTH
+// .textContent (concatenated subtree text, like real DOM) and .children.
+
+// (j) THE FAIL-OPEN REGRESSION GUARD: secret as ordinary text in an open-shadow
+// <span> with NO value/attribute of its own. Reachable only via
+// shadowRoot.textContent. FAILS before the internal-ops fix, PASSES after.
+test("absence scan hits on ordinary text in an open-shadow <span> [regression: fail-OPEN]", () => {
+  const doc = richDoc({
+    children: [{
+      tagName: "MY-HOST",
+      attributes: null,
+      children: [],
+      shadowRoot: {
+        textContent: "prefix sek suffix",
+        children: [{ tagName: "SPAN", attributes: null, textContent: "prefix sek suffix", children: [], shadowRoot: null }],
+      },
+    }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+// (k) secret only as a bare text node / <div> in the shadow root: reachable via
+// shadowRoot.textContent but NOT via any pushed child's per-element check
+// (children empty — no INPUT/TEXTAREA/contenteditable/etc.).
+test("absence scan hits on a bare text node in an open shadow root (textContent, zero scannable children)", () => {
+  const doc = richDoc({
+    children: [{
+      tagName: "MY-HOST",
+      attributes: null,
+      children: [],
+      shadowRoot: { textContent: "lone sek text node", children: [] },
+    }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+// (l) NESTED: host -> open shadowRoot -> child host -> open shadowRoot whose
+// textContent holds the secret. Proves recursion still works: the outer
+// shadowRoot.children push reaches the inner host, whose shadowRoot.textContent
+// catch-all then fires. Outer shadow textContent itself is innocuous.
+test("absence scan hits on a NESTED open-shadow textContent (host -> shadow -> host -> shadow)", () => {
+  const doc = richDoc({
+    children: [{
+      tagName: "OUTER-HOST",
+      attributes: null,
+      children: [],
+      shadowRoot: {
+        textContent: "outer wrapper, nothing here",
+        children: [{
+          tagName: "INNER-HOST",
+          attributes: null,
+          children: [],
+          shadowRoot: { textContent: "deeply nested sek value", children: [] },
+        }],
+      },
+    }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+// (m) MONOTONICITY: a CLEAN open-shadow doc (innocuous shadow text + child,
+// secret nowhere) must STILL be conclusive-clean — the fix must not introduce a
+// false positive.
+test("absence scan stays conclusive-clean for an open shadow root with no secret (no false positive)", () => {
+  const doc = richDoc({
+    children: [{
+      tagName: "MY-HOST",
+      attributes: null,
+      children: [],
+      shadowRoot: {
+        textContent: "perfectly innocuous shadow content",
+        children: [{ tagName: "SPAN", attributes: null, textContent: "innocuous", children: [], shadowRoot: null }],
+      },
+    }],
+  });
+  assert.deepEqual(runScan(doc), { found: false, inconclusive: false });
 });
