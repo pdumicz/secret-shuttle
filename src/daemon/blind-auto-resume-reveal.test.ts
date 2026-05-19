@@ -72,3 +72,18 @@ test("autoResumeBlind refuses (throws auto_resume_precondition) for reveal_captu
   );
   assert.notEqual(services.blind.current(), null);
 });
+
+test("autoResumeBlind refuses (throws auto_resume_precondition) for reveal_capture if success_signal is neither text_matched nor secret_captured even when the proof passed; stays blind", async () => {
+  const services = new DaemonServices();
+  services.blind.start("dashboard.stripe.com", "reveal_capture");
+  await assert.rejects(
+    () => autoResumeBlind(services, {
+      op: "reveal_capture", domain: "dashboard.stripe.com",
+      // @ts-expect-error intentionally invalid signal to prove the success_signal guard branch fails closed
+      success_signal: "secret_revealed",
+      absence_proof: "passed",
+    }),
+    (e: unknown) => e instanceof Error && (e as { code?: string }).code === "auto_resume_precondition",
+  );
+  assert.notEqual(services.blind.current(), null);
+});

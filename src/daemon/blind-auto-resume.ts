@@ -24,7 +24,7 @@ export async function autoResumeBlind(services: DaemonServices, args: AutoResume
   ) {
     throw new ShuttleError(
       "auto_resume_precondition",
-      "autoResumeBlind requires success_signal=text_matched AND absence_proof=passed.",
+      "autoResumeBlind requires success_signal=text_matched|secret_captured AND absence_proof=passed.",
     );
   }
   services.blind.end();
