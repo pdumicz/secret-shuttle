@@ -136,6 +136,11 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
         target_id: targetHandle.target_id,
         backend_node_id: targetHandle.backend_node_id,
       });
+      // Runtime shape guard: observable is a daemon-only field that must be present.
+      // Absence means an outdated or non-conforming BrowserOps implementation → fail closed.
+      if (typeof (baselinePre as { observable?: unknown }).observable !== "string") {
+        throw new ShuttleError("reveal_baseline_failed", "Could not baseline the approved subtree.");
+      }
 
       const binding: ApprovalBinding = {
         action: "reveal_capture",
@@ -212,6 +217,7 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
             const mergedBaseline: Baseline = {
               entries: baselinePost.entries,
               readableFps: Array.from(new Set([...baselinePre.readableFps, ...baselinePost.readableFps])),
+              observable: "", // not used by resolveWithinContainer; daemon-only gate uses baselinePre/baselinePost.observable directly
             };
             const revealRef: BackendNodeRef = { target_id: revealHandle.target_id, backend_node_id: revealHandle.backend_node_id };
             await browser.clickBackendNode(revealRef);
@@ -230,6 +236,17 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
               mergedBaseline,
             );
             capturedValue = res.value;
+            // §6.1 authoritative observable-before-blind gate (daemon-only; user-ratified).
+            // If the captured bytes appeared anywhere in EITHER pre-blind sample's
+            // serialized/observable surface, they were script-readable before blind →
+            // fail closed. baselinePre/baselinePost.observable are daemon-only and are
+            // never returned, audited, logged, or persisted.
+            if (
+              capturedValue !== "" &&
+              (baselinePre.observable.includes(capturedValue) || baselinePost.observable.includes(capturedValue))
+            ) {
+              throw new ShuttleError("reveal_no_transition", "Resolved value was observable before blind mode.");
+            }
             // Hide BEFORE returning so the page is in its proven-clean state.
             if (hideHandle !== undefined) {
               await browser.clickBackendNode({ target_id: hideHandle.target_id, backend_node_id: hideHandle.backend_node_id });

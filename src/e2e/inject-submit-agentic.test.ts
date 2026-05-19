@@ -28,7 +28,7 @@ function stubBrowser(): BrowserOps {
     injectIntoBackendNode: async () => inj,
     clickBackendNode: async () => undefined,
     readBackendNodeValue: async () => "stub_value",
-    baselineCandidates: async () => ({ entries: [], readableFps: [] }),
+    baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "" }),
     resolveWithinContainer: async () => ({ value: "stub_value" }),
   };
 }

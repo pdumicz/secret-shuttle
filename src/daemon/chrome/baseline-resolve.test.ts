@@ -30,22 +30,60 @@ interface El {
   href?: boolean;
   children?: El[];
   shadowRoot?: { children: El[] } | null;
+  /** Extra attributes beyond role/href, keyed by attribute name. Used by __attrs-aware shim. */
+  __attrs?: Record<string, string>;
+}
+// Minimal outerHTML serializer for the shim: <TAG attr="v">children/text</TAG>
+function serializeOuterHTML(e: El): string {
+  const tag = e.tagName.toLowerCase();
+  const attrParts: string[] = [];
+  if (e.role != null) attrParts.push(`role="${e.role}"`);
+  if (e.href === true) attrParts.push(`href=""`);
+  if (e.__attrs !== undefined) {
+    for (const [k, v] of Object.entries(e.__attrs)) {
+      attrParts.push(`${k}="${String(v).replace(/"/g, "&quot;")}"`);
+    }
+  }
+  const openTag = attrParts.length > 0 ? `<${tag} ${attrParts.join(" ")}>` : `<${tag}>`;
+  const children = e.children ?? [];
+  if (children.length > 0) {
+    return `${openTag}${children.map(serializeOuterHTML).join("")}</${tag}>`;
+  }
+  const text = e.textContent ?? "";
+  return `${openTag}${text}</${tag}>`;
 }
 function el(tag: string, props: Partial<El> = {}): El {
-  return {
+  const obj: El = {
     tagName: tag.toUpperCase(),
     nodeType: 1,
     children: [],
     shadowRoot: null,
     getAttribute(name: string) {
       if (name === "role") return props.role ?? null;
+      if (props.__attrs !== undefined && name in props.__attrs) return props.__attrs[name] ?? null;
       return null;
     },
+    getAttributeNames() {
+      const names: string[] = [];
+      if (props.role != null) names.push("role");
+      if (props.href === true) names.push("href");
+      if (props.__attrs !== undefined) names.push(...Object.keys(props.__attrs));
+      return names;
+    },
     hasAttribute(name: string) {
-      return name === "href" ? props.href === true : false;
+      if (name === "href") return props.href === true;
+      if (props.__attrs !== undefined) return name in props.__attrs;
+      return false;
     },
     ...props,
   } as unknown as El;
+  // Attach outerHTML as a getter so it serializes the current state.
+  Object.defineProperty(obj, "outerHTML", {
+    get() { return serializeOuterHTML(this as El); },
+    enumerable: false,
+    configurable: true,
+  });
+  return obj;
 }
 function makeBaseline(root: El): (r: El) => unknown {
   return new Function("root", `return (${BASELINE_SCAN_FN}).call(root);`) as (r: El) => unknown;
@@ -60,15 +98,16 @@ function makeResolve(root: El): (r: El, baseline: unknown, focused: El | null) =
     (r: El, b: unknown, f: El | null) => El | null;
 }
 
-test("BASELINE_SCAN_FN classes an empty/absent input as safe and a non-empty text node as readable; returns hashes only (no raw text)", () => {
+test("BASELINE_SCAN_FN classes an empty/absent input as safe and a non-empty text node as readable; entries/readableFps carry no raw text (observable is daemon-only)", () => {
   const input = el("input", { type: "text", value: "" });
   const label = el("span", { textContent: "Webhook signing secret" });
   const root = el("div", { children: [input, label] });
   const b = makeBaseline(root)(root) as Baseline;
   assert.equal(Array.isArray(b.entries), true);
-  // empty input → safe; label with text → readable; NEITHER carries raw text
-  const dump = JSON.stringify(b);
-  assert.equal(dump.includes("Webhook signing secret"), false);
+  // empty input → safe; label with text → readable; entries and readableFps carry no raw text.
+  // observable is daemon-only and intentionally contains raw text — check only entries/readableFps.
+  const safeDump = JSON.stringify({ entries: b.entries, readableFps: b.readableFps });
+  assert.equal(safeDump.includes("Webhook signing secret"), false);
   const safes = b.entries.filter((e) => e.safety === "safe").length;
   const readables = b.entries.filter((e) => e.safety === "readable").length;
   assert.equal(safes >= 1, true);
@@ -181,7 +220,7 @@ class RcTransport extends EventEmitter implements CdpTransport {
   fieldValue = "whsec_FIELD_MODE_VALUE";
   // baselineCandidates drives BASELINE_SCAN_FN whose result we inject directly
   // (the scan logic itself is covered by the DOM-shim tests above).
-  baselineResult: { ok: boolean; entries: Baseline["entries"]; readableFps: string[] } = { ok: true, entries: [{ key: "k0", safety: "safe", fp: "h0" }], readableFps: [] };
+  baselineResult: { ok: boolean; entries: Baseline["entries"]; readableFps: string[]; observable: string } = { ok: true, entries: [{ key: "k0", safety: "safe", fp: "h0" }], readableFps: [], observable: "" };
   // RESOLVE_SCAN_FN now returns the chosen ELEMENT (no returnByValue → a
   // RemoteObject). `resolveYieldsObject:false` simulates the fail-closed
   // null/no-objectId outcome (zero / >1 / already-readable / no-transition).
@@ -247,10 +286,10 @@ test("readBackendNodeValue fails closed (ShuttleError) on any CDP error", async 
 
 test("baselineCandidates returns the hashed/classified Baseline (no raw text leaves)", async () => {
   const t = new RcTransport();
-  t.baselineResult = { ok: true, entries: [{ key: "k0", safety: "safe", fp: "h0" }, { key: "k1", safety: "readable", fp: "h1" }], readableFps: ["aabbccdd"] };
+  t.baselineResult = { ok: true, entries: [{ key: "k0", safety: "safe", fp: "h0" }, { key: "k1", safety: "readable", fp: "h1" }], readableFps: ["aabbccdd"], observable: "some observable text" };
   const ops = new CdpBrowserOps(new CdpClient(t));
   const b = await ops.baselineCandidates({ target_id: "T-1", backend_node_id: 7 });
-  assert.deepEqual(b, { entries: t.baselineResult.entries, readableFps: t.baselineResult.readableFps });
+  assert.deepEqual(b, { entries: t.baselineResult.entries, readableFps: t.baselineResult.readableFps, observable: t.baselineResult.observable });
 });
 
 test("resolveWithinContainer (container): RemoteObject chosen → describeNode → isDescendantOf passes → ONE value read", async () => {
@@ -263,7 +302,7 @@ test("resolveWithinContainer (container): RemoteObject chosen → describeNode �
   const r = await ops.resolveWithinContainer(
     { target_id: "T-1", backend_node_id: 7 },
     "container",
-    { entries: [{ key: "k0", safety: "safe", fp: "h0" }], readableFps: [] },
+    { entries: [{ key: "k0", safety: "safe", fp: "h0" }], readableFps: [], observable: "" },
   );
   assert.deepEqual(r, { value: "whsec_RESOLVED" });
 });
@@ -277,7 +316,7 @@ test("resolveWithinContainer (field mode): same per-candidate gate path — Remo
   t.containsResult = false;  // contains(self) may be false; the IS-root branch must still pass
   t.fieldValue = "whsec_FIELD_GATED";
   const ops = new CdpBrowserOps(new CdpClient(t));
-  const r = await ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "field", { entries: [], readableFps: [] });
+  const r = await ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "field", { entries: [], readableFps: [], observable: "" });
   assert.deepEqual(r, { value: "whsec_FIELD_GATED" });
 });
 
@@ -286,7 +325,7 @@ test("resolveWithinContainer fails closed when RESOLVE_SCAN_FN yields a null Rem
   t.resolveYieldsObject = false; // subtype:"null" / no objectId → no single safe→revealed candidate
   const ops = new CdpBrowserOps(new CdpClient(t));
   await assert.rejects(
-    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [], readableFps: [] }),
+    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [], readableFps: [], observable: "" }),
     (e: unknown) => e instanceof ShuttleError && e.code === "reveal_no_transition",
   );
 });
@@ -298,7 +337,7 @@ test("resolveWithinContainer fails closed when DOM containment proof is false (c
   t.containsResult = false;    // container.contains(chosen) === false
   const ops = new CdpBrowserOps(new CdpClient(t));
   await assert.rejects(
-    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [], readableFps: [] }),
+    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [], readableFps: [], observable: "" }),
     (e: unknown) => e instanceof ShuttleError && e.code === "reveal_not_contained",
   );
 });
@@ -308,7 +347,7 @@ test("resolveWithinContainer fails closed on any CDP error", async () => {
   t.throwOnEvaluate = true;
   const ops = new CdpBrowserOps(new CdpClient(t));
   await assert.rejects(
-    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [], readableFps: [] }),
+    () => ops.resolveWithinContainer({ target_id: "T-1", backend_node_id: 7 }, "container", { entries: [], readableFps: [], observable: "" }),
     (e: unknown) => e instanceof ShuttleError,
   );
 });
@@ -438,14 +477,15 @@ test("BASELINE_SCAN_FN: readableFps includes hashes of label/button text (non-ca
     el("button", { textContent: "Reveal" }),
     el("input", { type: "text", value: "" }),
   ] });
-  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[] };
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
   assert.equal(Array.isArray(b.readableFps), true, "readableFps must be an array");
   // The label and button text must be hashed into readableFps.
   // h("whsec_LABEL_TEXT") via djb2 - we verify by checking it's non-empty and no raw text leaks.
   assert.equal(b.readableFps.length > 0, true, "readableFps must contain at least the label/button hashes");
-  // No raw text in the serialised baseline (neither entries nor readableFps)
-  const dump = JSON.stringify(b);
-  assert.equal(dump.includes(labelText), false, "no raw label text must appear in baseline JSON");
+  // No raw text in the serialised baseline (entries and readableFps must not contain raw text;
+  // observable is daemon-only and intentionally contains raw text — exclude from this dump check).
+  const dump = JSON.stringify({ ok: b.ok, entries: b.entries, readableFps: b.readableFps });
+  assert.equal(dump.includes(labelText), false, "no raw label text must appear in entries/readableFps JSON");
   // entries must NOT contain the label (it's not a candidate)
   assert.equal(b.entries.some((e: unknown) => JSON.stringify(e).includes(labelText)), false);
 });
@@ -484,4 +524,54 @@ test("CONTROL: readable sibling label beside a genuine safe→revealed field —
   const r = makeResolve(postRoot)(postRoot, baseline, null);
   assert.notEqual(r, null);
   assert.equal(r?.__id, "fld");
+});
+
+// ---- NEW §6.1 round-4: BASELINE_SCAN_FN observable blob tests ----
+
+test("BASELINE_SCAN_FN: observable contains a secret appearing as a substring of label text (round-4 defect)", () => {
+  // The secret is embedded inside label text — not a candidate, not in entries.
+  // It MUST appear in the observable blob so the daemon-side gate can catch it.
+  const SECRET_SUB = "whsec_SUBSTRING_IN_LABEL_r4";
+  const bRoot = el("div", { children: [
+    el("label", { textContent: `Signing secret: ${SECRET_SUB} (keep safe)` }),
+    el("input", { type: "text", value: "" }),
+  ] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  assert.ok(typeof b.observable === "string", "observable must be a string");
+  assert.ok(b.observable.includes(SECRET_SUB),
+    "observable must contain the substring secret from the label text");
+  // observable must NOT be empty
+  assert.ok(b.observable.length > 0, "observable must be non-empty");
+});
+
+test("BASELINE_SCAN_FN: observable contains a secret in a data-* attribute value (round-4 defect)", () => {
+  // The secret lives only in a script-readable attribute — not in textContent or .value.
+  // It MUST appear in the observable blob.
+  const SECRET_ATTR = "whsec_DATA_ATTR_IN_OBSERVABLE_r4";
+  const bRoot = el("div", { children: [
+    el("div", { __attrs: { "data-secret": SECRET_ATTR }, textContent: "" }),
+    el("input", { type: "text", value: "" }),
+  ] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  assert.ok(typeof b.observable === "string", "observable must be a string");
+  assert.ok(b.observable.includes(SECRET_ATTR),
+    "observable must contain the attribute value secret");
+});
+
+test("BASELINE_SCAN_FN: observable is empty string with ok:false when subtree outerHTML exceeds OBS_CAP (size-bound fail-closed)", () => {
+  // A pathological DOM whose outerHTML exceeds OBS_CAP must fail closed.
+  // Build a shim with a getter that returns a huge string for outerHTML.
+  const hugeRoot = el("div", { children: [el("input", { type: "text", value: "" })] });
+  // Override the outerHTML getter to simulate a giant subtree.
+  Object.defineProperty(hugeRoot, "outerHTML", {
+    get() { return "x".repeat(4_000_001); },
+    configurable: true,
+  });
+  const b = makeBaseline(hugeRoot)(hugeRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, false, "ok must be false (size-bound fail-closed)");
+  assert.equal(b.observable, "", "observable must be empty string on ok:false");
+  assert.deepEqual(b.entries, [], "entries must be [] on ok:false");
+  assert.deepEqual(b.readableFps, [], "readableFps must be [] on ok:false");
 });

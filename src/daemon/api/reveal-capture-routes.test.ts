@@ -29,7 +29,7 @@ function stub(over: Partial<BrowserOps> = {}): BrowserOps {
     injectIntoBackendNode: async () => inj,
     clickBackendNode: async () => undefined,
     readBackendNodeValue: async () => SECRET,
-    baselineCandidates: async () => ({ entries: [], readableFps: [] }),
+    baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "" }),
     resolveWithinContainer: async () => ({ value: SECRET }),
     ...over,
   };
@@ -374,7 +374,7 @@ test("Finding 2 (dual-sample): call #1 (pre-approval) runs with blind NOT active
       baselineCandidates: async () => {
         callIndex += 1;
         blindStatePerCall.push(services.blind.current());
-        return { entries: [], readableFps: [] };
+        return { entries: [], readableFps: [], observable: "" };
       },
     });
     await setup(services, port);
@@ -403,10 +403,10 @@ test("§6.1 sever→baseline erase residual closed: pre-approval∪post-sever re
         baselineCallIndex += 1;
         if (baselineCallIndex === 1) {
           // Pre-approval: the value is still observable — agent saw it.
-          return { entries: [], readableFps: ["HASH_OF_PREOBSERVED"] };
+          return { entries: [], readableFps: ["HASH_OF_PREOBSERVED"], observable: "" };
         } else {
           // Post-sever: adversarial JS erased the value from the DOM.
-          return { entries: [], readableFps: [] };
+          return { entries: [], readableFps: [], observable: "" };
         }
       },
       resolveWithinContainer: async (_ref, _mode, baseline) => {
@@ -439,7 +439,7 @@ test("§6.1 union does NOT regress legitimate capture: both baseline calls retur
   // The union of two empty sets is empty → the secret hash is not rejected → captured.
   await withDaemon(async ({ port, services }) => {
     services.browser = stub({
-      baselineCandidates: async () => ({ entries: [], readableFps: [] }),
+      baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "" }),
       resolveWithinContainer: async () => ({ value: SECRET }),
       proveAbsence: async () => ({ passed: true }),
     });
@@ -449,5 +449,91 @@ test("§6.1 union does NOT regress legitimate capture: both baseline calls retur
     const r = await call(port, "POST", "/v1/secrets/reveal-capture", containerBody({ approval_id: g.id }));
     assert.equal((r.body as { captured: unknown }).captured, true,
       "legitimate masked→revealed flow must still yield captured:true with both samples empty");
+  });
+});
+
+test("§6.1 substring/attribute observable gate: a captured value that appears in a pre-blind sample's observable blob fails closed", async () => {
+  // Round-4 defect: the whole-element hash gate misses a secret that is a SUBSTRING
+  // of label text or lives in a script-readable attribute. The daemon-side observable
+  // gate must catch it: if capturedValue appears anywhere in EITHER pre-blind sample's
+  // observable string, we fail closed (captured:"unknown", blind stays active).
+  const LIVE_VALUE = "whsec_LIVE_OBSERVABLE_X9f2";
+  await withDaemon(async ({ port, services, home }) => {
+    let callIndex = 0;
+    services.browser = stub({
+      baselineCandidates: async () => {
+        callIndex += 1;
+        if (callIndex === 1) {
+          // Pre-approval sample: the secret appears as a SUBSTRING of label text in the
+          // serialized subtree — script-observable before blind mode.
+          return { entries: [], readableFps: [], observable: `prefix Signing secret: ${LIVE_VALUE} suffix` };
+        } else {
+          // Post-sever sample: observable blob is clean (value erased post-sever).
+          return { entries: [], readableFps: [], observable: "" };
+        }
+      },
+      resolveWithinContainer: async () => ({ value: LIVE_VALUE }),
+      proveAbsence: async () => ({ passed: true }),
+    });
+    await setup(services, port);
+    const g = services.approvals.create(bindingFor());
+    services.approvals.approve(g.id);
+    const r = await call(port, "POST", "/v1/secrets/reveal-capture", containerBody({ approval_id: g.id }));
+    // Must fail closed: observable gate caught the pre-blind substring match.
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { captured: unknown }).captured, "unknown",
+      "observable-before-blind value must fail closed (captured:unknown)");
+    assert.equal((r.body as { blind_mode: boolean }).blind_mode, true,
+      "blind must stay active after observable gate fires");
+    assert.equal((r.body as { next: string }).next, "manual_recovery_required");
+    // Blind must remain active (no auto-resume).
+    assert.notEqual(services.blind.current(), null,
+      "blind.current() must be non-null — gate must not auto-resume");
+    // No blind_auto_resume audit event.
+    const log = await readFile(getShuttlePaths(home).auditLogPath, "utf8");
+    assert.equal(log.includes('"blind_auto_resume"'), false,
+      "audit must NOT contain blind_auto_resume after observable gate fires");
+    // Response and audit must not contain the raw captured value or observable blob.
+    assert.equal(JSON.stringify(r.body).includes(LIVE_VALUE), false,
+      "response body must NOT contain the raw captured value");
+    assert.equal(log.includes(LIVE_VALUE), false,
+      "audit must NOT contain the raw captured value");
+  });
+});
+
+test("§6.1 observable gate control: observable blobs not containing the captured value → captured:true (no regression)", async () => {
+  // Monotonicity: the gate must NOT block a legitimate capture where the captured
+  // value was never in any pre-blind observable (genuine masked→revealed flow).
+  await withDaemon(async ({ port, services }) => {
+    services.browser = stub({
+      baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "some label text with no secret" }),
+      resolveWithinContainer: async () => ({ value: SECRET }),
+      proveAbsence: async () => ({ passed: true }),
+    });
+    await setup(services, port);
+    const g = services.approvals.create(bindingFor());
+    services.approvals.approve(g.id);
+    const r = await call(port, "POST", "/v1/secrets/reveal-capture", containerBody({ approval_id: g.id }));
+    assert.equal((r.body as { captured: unknown }).captured, true,
+      "observable gate must NOT block a genuine reveal where value was absent from pre-blind observables");
+  });
+});
+
+test("§6.1 observable gate shape-guard: baselineCandidates missing observable field → reveal_baseline_failed", async () => {
+  // The shape guard must also require observable:string. A missing or non-string
+  // observable is a structural violation → fail closed at the baseline stage.
+  await withDaemon(async ({ port, services }) => {
+    services.browser = stub({
+      // Deliberately omit observable to trigger the shape guard.
+      baselineCandidates: async () => ({ entries: [], readableFps: [] } as unknown as { entries: []; readableFps: []; observable: string }),
+    });
+    await setup(services, port);
+    const g = services.approvals.create(bindingFor());
+    services.approvals.approve(g.id);
+    const r = await call(port, "POST", "/v1/secrets/reveal-capture", containerBody({ approval_id: g.id }));
+    // Shape guard fires before blind is started (pre-approval), so it throws.
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "reveal_baseline_failed",
+      "missing observable must trigger reveal_baseline_failed shape guard");
   });
 });

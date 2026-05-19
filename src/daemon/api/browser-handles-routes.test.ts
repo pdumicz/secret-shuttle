@@ -29,7 +29,7 @@ function stub(desc: Partial<HandleDescriptor> = {}): BrowserOps {
     injectIntoBackendNode: async () => ({ domain: base.domain, target_id: base.target_id, field: { tag: "input", editable: true }, field_fingerprint: base.handle_fingerprint }),
     clickBackendNode: async () => undefined,
     readBackendNodeValue: async () => "stub_value",
-    baselineCandidates: async () => ({ entries: [], readableFps: [] }),
+    baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "" }),
     resolveWithinContainer: async () => ({ value: "stub_value" }),
   };
 }

@@ -142,6 +142,8 @@ export interface Baseline {
   entries: BaselineEntry[];
   /** Hashes (djb2) of every element's own readable value anywhere in the approved subtree pre-reveal, regardless of candidacy. Used by RESOLVE_SCAN_FN to detect §6.1 anywhere-observable values. */
   readableFps: string[];
+  /** DAEMON-ONLY. Concatenated pre-blind observable surface of the approved subtree (serialized HTML + every element's live readable value + every raw attribute value). Contains pre-secret bytes — MUST never be returned to the agent, audited, logged, or persisted. Used only for the §6.1 substring fail-closed check. */
+  observable: string;
 }
 
 export interface FieldDescriptor {
@@ -374,6 +376,7 @@ const OBSERVE_TEXT_FN = `function(needle){
 // transport. Exported so the predicate/classification is unit-assertable.
 export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
   var TEXT = ["","text","password","email","url","search","tel","number"];
+  var OBS_CAP = 4000000;
   function h(s){ // small non-cryptographic digest; only used to detect change (never reversed/egressed as text)
     s = String(s == null ? "" : s); var x = 5381, i = 0;
     for (i = 0; i < s.length; i++) { x = ((x << 5) + x + s.charCodeAt(i)) | 0; }
@@ -426,15 +429,40 @@ export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
   }
   try {
     var root = this;
-    if (!root || root.nodeType !== 1) return { ok:false, entries:[], readableFps:[] };
+    if (!root || root.nodeType !== 1) return { ok:false, entries:[], readableFps:[], observable:"" };
+    // §6.1 observable blob: size-bound check on outerHTML first (single property access).
+    var outerHtml = "";
+    try { outerHtml = root.outerHTML; } catch (e) { return { ok:false, entries:[], readableFps:[], observable:"" }; }
+    if (typeof outerHtml !== "string" || outerHtml.length > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
+    var obsParts = [outerHtml];
+    var obsLen = outerHtml.length;
     var entries = [], readableFpsSet = {}, stack = [{ el: root, path: "0", inControl: false }], n = 0;
     while (stack.length) {
       var cur = stack.pop(); var el = cur.el;
       if (!el || el.nodeType !== 1) continue;
-      if (++n > 200000) return { ok:false, entries:[], readableFps:[] };
+      if (++n > 200000) return { ok:false, entries:[], readableFps:[], observable:"" };
       // Part A: hash EVERY element's own readable value into readableFpsSet (regardless of candidacy or inControl).
       var rv = readableValue(el);
       if (rv !== "") readableFpsSet[h(rv)] = 1;
+      // §6.1 observable: collect live readableValue per element (unescaped — covers input .value/contentEditable not in outerHTML).
+      // Use NUL (\\x00) separator to prevent cross-boundary false matches.
+      if (rv !== "") {
+        obsLen += 1 + rv.length;
+        if (obsLen > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
+        obsParts.push(rv);
+      }
+      // §6.1 observable: collect every attribute value (unescaped raw attribute values — covers HTML-escaping blind spots and non-reflected attrs).
+      try {
+        var attrNames = el.getAttributeNames ? el.getAttributeNames() : [];
+        for (var ai = 0; ai < attrNames.length; ai++) {
+          var av = el.getAttribute(attrNames[ai]);
+          if (typeof av === "string" && av !== "") {
+            obsLen += 1 + av.length;
+            if (obsLen > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
+            obsParts.push(av);
+          }
+        }
+      } catch (e) { return { ok:false, entries:[], readableFps:[], observable:"" }; }
       // Part B: an element is a candidate only if NOT inside a control subtree.
       var selfControl = (kind(el) === "button" || kind(el) === "link" || el.tagName.toLowerCase() === "label");
       if (!cur.inControl && isCandidate(el)) {
@@ -446,8 +474,9 @@ export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
       if (el.children) { for (var j = 0; j < el.children.length; j++) stack.push({ el: el.children[j], path: cur.path + "." + j, inControl: childInControl }); }
     }
     var readableFpsArr = Object.keys(readableFpsSet);
-    return { ok:true, entries: entries, readableFps: readableFpsArr };
-  } catch (e) { return { ok:false, entries:[], readableFps:[] }; }
+    var observable = obsParts.join("\\x00");
+    return { ok:true, entries: entries, readableFps: readableFpsArr, observable: observable };
+  } catch (e) { return { ok:false, entries:[], readableFps:[], observable:"" }; }
 }`;
 
 // Daemon-only. `this` = the approved subtree root: the container (modes
@@ -1219,7 +1248,7 @@ export class CdpBrowserOps implements BrowserOps {
         sessionId,
       );
       try {
-        const r = await this.cdp.send<{ result: { value: { ok: boolean; entries: { key: string; safety: "safe" | "readable"; fp: string }[]; readableFps: string[] } } }>(
+        const r = await this.cdp.send<{ result: { value: { ok: boolean; entries: { key: string; safety: "safe" | "readable"; fp: string }[]; readableFps: string[]; observable: string } } }>(
           "Runtime.callFunctionOn",
           { objectId: object.objectId, returnByValue: true, functionDeclaration: BASELINE_SCAN_FN },
           sessionId,
@@ -1236,11 +1265,12 @@ export class CdpBrowserOps implements BrowserOps {
               typeof e.fp === "string",
           ) ||
           !Array.isArray(v.readableFps) ||
-          !v.readableFps.every((x) => typeof x === "string")
+          !v.readableFps.every((x) => typeof x === "string") ||
+          typeof v.observable !== "string"
         ) {
           throw new ShuttleError("reveal_baseline_failed", "Could not baseline the approved subtree.");
         }
-        return { entries: v.entries, readableFps: v.readableFps };
+        return { entries: v.entries, readableFps: v.readableFps, observable: v.observable };
       } finally {
         await this.cdp.send("Runtime.releaseObject", { objectId: object.objectId }, sessionId).catch(() => undefined);
       }
