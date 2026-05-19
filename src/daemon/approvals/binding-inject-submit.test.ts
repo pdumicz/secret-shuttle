@@ -77,3 +77,14 @@ test("allowed_actions is part of matching (approved scope cannot be swapped); or
     (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
   );
 });
+
+test("auto_resume:false does not match an approval that omits auto_resume (scope is not nullable-equivalent)", () => {
+  const store = new ApprovalStore();
+  const g = store.create({ ...base(), auto_resume: false });
+  store.approve(g.id);
+  const { auto_resume: _omit, ...noFlag } = base();
+  assert.throws(
+    () => store.consume(g.id, noFlag),
+    (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
+  );
+});

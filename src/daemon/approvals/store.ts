@@ -151,6 +151,7 @@ function stableStringify(v: unknown): string {
   return JSON.stringify(Object.fromEntries(keys.map((k) => [k, obj[k]])));
 }
 
+/** Stable, order-insensitive JSON of a string set (null/undefined ⇒ []). Used for allowed_domains and allowed_actions. */
 function domainSet(v: string[] | null | undefined): string {
   return JSON.stringify([...(v ?? [])].sort());
 }
