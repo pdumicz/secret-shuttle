@@ -3,8 +3,8 @@ import { ensureShuttleHome, getShuttlePaths } from "../shared/config.js";
 
 export type DaemonAuditAction =
   | "init" | "unlock" | "lock"
-  | "blind_start" | "blind_end"
-  | "generate" | "capture" | "inject" | "compare"
+  | "blind_start" | "blind_end" | "blind_auto_resume"
+  | "generate" | "capture" | "inject" | "inject_submit" | "compare"
   | "template_run"
   | "approval_created" | "approval_granted" | "approval_denied"
   | "approval_expired" | "approval_used" | "approval_mismatch";
@@ -21,6 +21,11 @@ export interface DaemonAuditEvent {
   approval_id?: string;
   error_code?: string;
   message?: string;
+  submitted?: boolean | "unknown";
+  success_signal?: string;
+  absence_proof?: string;
+  blind_mode?: boolean;
+  op?: string;
 }
 
 export async function writeDaemonAudit(event: DaemonAuditEvent): Promise<void> {
