@@ -364,15 +364,16 @@ test("no raw secret appears in any response body (extends the no-leak assertion)
   });
 });
 
-test("Finding 2: baseline is taken AFTER blind.start/sever (not before requireApproval) — blind is already active when baselineCandidates runs", async () => {
-  // The baseline must be taken while blind is active (agent severed), not during
-  // the approval window where the agent can still observe the page (§6.1 / Finding 2).
+test("Finding 2 (dual-sample): call #1 (pre-approval) runs with blind NOT active; call #2 (post-sever) runs with blind active — both timing invariants enforced", async () => {
+  // Two baseline calls exist: #1 pre-approval (agent still observing), #2 post-sever
+  // (blind active). Call #1 must see blind.current()===null; call #2 must see non-null.
   await withDaemon(async ({ port, services }) => {
-    let blindStateAtBaselineCall: unknown = undefined;
+    let callIndex = 0;
+    const blindStatePerCall: unknown[] = [];
     services.browser = stub({
       baselineCandidates: async () => {
-        // Capture blind.current() at the moment baselineCandidates is called.
-        blindStateAtBaselineCall = services.blind.current();
+        callIndex += 1;
+        blindStatePerCall.push(services.blind.current());
         return { entries: [], readableFps: [] };
       },
     });
@@ -380,11 +381,73 @@ test("Finding 2: baseline is taken AFTER blind.start/sever (not before requireAp
     const g = services.approvals.create(bindingFor());
     services.approvals.approve(g.id);
     await call(port, "POST", "/v1/secrets/reveal-capture", containerBody({ approval_id: g.id }));
-    // blind.current() returns the domain string when active, null when not.
-    // It must be non-null when baselineCandidates was called.
-    assert.notEqual(blindStateAtBaselineCall, null,
-      "baselineCandidates must be called AFTER blind.start (blind.current() must be non-null at call time)");
-    assert.notEqual(blindStateAtBaselineCall, undefined,
-      "baselineCandidates must have been called at all");
+    assert.equal(callIndex, 2,
+      "baselineCandidates must be called exactly 2 times (pre-approval + post-sever)");
+    assert.strictEqual(blindStatePerCall[0], null,
+      "call #1 (pre-approval): blind.current() must be null — agent still observing at this point");
+    assert.notEqual(blindStatePerCall[1], null,
+      "call #2 (post-sever): blind.current() must be non-null — blind started before this sample");
+  });
+});
+
+test("§6.1 sever→baseline erase residual closed: pre-approval∪post-sever readableFps union — a value erased between samples remains in the reject set", async () => {
+  // Adversarial scenario: agent page-JS runs between sever and the post-sever baseline,
+  // erasing a pre-observed value from the DOM. Without the union, the post-sever-only
+  // baseline would have an empty readableFps and the value would escape the reject set.
+  // With the union, the pre-approval sample's HASH_OF_PREOBSERVED persists.
+  await withDaemon(async ({ port, services }) => {
+    let baselineCallIndex = 0;
+    let capturedBaselineArg: { entries: unknown[]; readableFps: string[] } | undefined;
+    services.browser = stub({
+      baselineCandidates: async () => {
+        baselineCallIndex += 1;
+        if (baselineCallIndex === 1) {
+          // Pre-approval: the value is still observable — agent saw it.
+          return { entries: [], readableFps: ["HASH_OF_PREOBSERVED"] };
+        } else {
+          // Post-sever: adversarial JS erased the value from the DOM.
+          return { entries: [], readableFps: [] };
+        }
+      },
+      resolveWithinContainer: async (_ref, _mode, baseline) => {
+        // Capture the merged baseline that the route passes in.
+        capturedBaselineArg = baseline as { entries: unknown[]; readableFps: string[] };
+        return { value: SECRET };
+      },
+    });
+    await setup(services, port);
+    const g = services.approvals.create(bindingFor());
+    services.approvals.approve(g.id);
+    await call(port, "POST", "/v1/secrets/reveal-capture", containerBody({ approval_id: g.id }));
+    assert.equal(baselineCallIndex, 2,
+      "baselineCandidates must be called exactly 2 times");
+    assert.ok(capturedBaselineArg !== undefined,
+      "resolveWithinContainer must have been called with a baseline argument");
+    assert.ok(
+      capturedBaselineArg!.readableFps.includes("HASH_OF_PREOBSERVED"),
+      "merged baseline readableFps must include the pre-approval hash even though post-sever sample erased it (union closes the residual)",
+    );
+    // entries must come from the post-sever (call #2) sample — [] in this stub.
+    assert.deepEqual(capturedBaselineArg!.entries, [],
+      "entries must come from the post-sever sample (transition gate reflects state at reveal time)");
+  });
+});
+
+test("§6.1 union does NOT regress legitimate capture: both baseline calls return empty readableFps → captured:true", async () => {
+  // Monotonicity control: in a genuine masked/empty→revealed flow the secret is
+  // absent at BOTH sample points (it only appears after the reveal click).
+  // The union of two empty sets is empty → the secret hash is not rejected → captured.
+  await withDaemon(async ({ port, services }) => {
+    services.browser = stub({
+      baselineCandidates: async () => ({ entries: [], readableFps: [] }),
+      resolveWithinContainer: async () => ({ value: SECRET }),
+      proveAbsence: async () => ({ passed: true }),
+    });
+    await setup(services, port);
+    const g = services.approvals.create(bindingFor());
+    services.approvals.approve(g.id);
+    const r = await call(port, "POST", "/v1/secrets/reveal-capture", containerBody({ approval_id: g.id }));
+    assert.equal((r.body as { captured: unknown }).captured, true,
+      "legitimate masked→revealed flow must still yield captured:true with both samples empty");
   });
 });

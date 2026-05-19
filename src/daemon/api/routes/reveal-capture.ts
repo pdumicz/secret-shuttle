@@ -8,7 +8,7 @@ import { writeDaemonAudit } from "../../audit.js";
 import { canonicalEnvironment, buildSecretRef } from "../../../shared/refs.js";
 import { asObject, optString, reqString } from "../validate.js";
 import { blankAllPages, disableObservationDomains } from "../../chrome/internal-ops.js";
-import type { BackendNodeRef } from "../../chrome/internal-ops.js";
+import type { Baseline, BackendNodeRef } from "../../chrome/internal-ops.js";
 import { enforceDomain } from "./secrets.js";
 import { autoResumeBlind } from "../../blind-auto-resume.js";
 import type { BrowserHandle } from "../../browser-handles.js";
@@ -128,6 +128,15 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
       }
       enforceDomain(domain, effectiveAllowed, "reveal-capture");
 
+      // §6.1 baseline sample #1: pre-approval (agent still observing). Unioned with
+      // the post-sever sample so a value observable at EITHER time fails closed —
+      // closes both the approval-window staleness hole and the sever→baseline
+      // agent-JS-erase residual.
+      const baselinePre = await browser.baselineCandidates({
+        target_id: targetHandle.target_id,
+        backend_node_id: targetHandle.backend_node_id,
+      });
+
       const binding: ApprovalBinding = {
         action: "reveal_capture",
         ref: null,
@@ -190,13 +199,20 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
       try {
         await withDeadline(
           (async () => {
-            // 2b. Post-blind baseline: taken AFTER sever (blind.start + severAgentConnections),
-            // immediately before the reveal click. This ensures the baseline reflects only
-            // what was observable while the agent was severed (Finding 2 / §6.1).
-            const baseline = await browser.baselineCandidates({
+            // §6.1 baseline sample #2: post-sever, immediately pre-reveal-click.
+            const baselinePost = await browser.baselineCandidates({
               target_id: targetHandle.target_id,
               backend_node_id: targetHandle.backend_node_id,
             });
+            // Union the readableFps from both samples: a value script-observable at
+            // EITHER the pre-approval point OR the post-sever point is in the reject set.
+            // entries come from baselinePost (the post-sever/current state) — the
+            // path-keyed safety transition gate must reflect the state at reveal time;
+            // using stale pre-approval entries would reintroduce Finding-2-class staleness.
+            const mergedBaseline: Baseline = {
+              entries: baselinePost.entries,
+              readableFps: Array.from(new Set([...baselinePre.readableFps, ...baselinePost.readableFps])),
+            };
             const revealRef: BackendNodeRef = { target_id: revealHandle.target_id, backend_node_id: revealHandle.backend_node_id };
             await browser.clickBackendNode(revealRef);
             // ALL THREE modes go through resolveWithinContainer so the §6.1
@@ -211,7 +227,7 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
             const res = await browser.resolveWithinContainer(
               { target_id: targetHandle.target_id, backend_node_id: targetHandle.backend_node_id },
               captureMode,
-              baseline,
+              mergedBaseline,
             );
             capturedValue = res.value;
             // Hide BEFORE returning so the page is in its proven-clean state.
