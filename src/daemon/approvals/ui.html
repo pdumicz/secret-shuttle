@@ -35,6 +35,7 @@
           template: `Run template ${esc(g.template_id ?? "")} with secret ${esc(g.ref ?? "")}`,
           // NOTE: only the literal <b> tags are static HTML here; every interpolated value MUST stay esc()-wrapped (spliced raw at <p><b>${human}</b></p>).
           inject_submit: `Inject secret ${esc(g.ref ?? "")} into <b>${esc(g.field_handle_label ?? "?")}</b> on ${esc(g.destination_domain ?? "?")}, click <b>${esc(g.submit_handle_label ?? "?")}</b>, wait for success, and automatically resume observation only if the secret is verified gone`,
+          reveal_capture: `Click <b>${esc(g.reveal_handle_label ?? "?")}</b> on ${esc(g.destination_domain ?? "?")}, capture the revealed secret into ${esc(g.planned_ref ?? "")} (from <b>${esc(g.field_handle_label ?? g.container_handle_label ?? "?")}</b>, mode <code>${esc(g.capture_mode ?? "?")}</code>), hide it, and automatically resume observation only if the secret is verified gone`,
           blind_end: `Resume browser observation for ${esc(g.destination_domain ?? "?")}`,
         }[g.action] || `${esc(g.action)}`;
         const scope = Array.isArray(g.allowed_domains) && g.allowed_domains.length
@@ -50,6 +51,7 @@
           ${g.template_params ? Object.keys(g.template_params).sort().map((k) =>
             `<div class="row"><span class="label">param: ${esc(k)}</span><code>${esc(g.template_params[k])}</code></div>`).join("") : ""}
           ${g.success_condition ? `<div class="row"><span class="label">Success marker</span><code>${esc(g.success_condition)}</code></div>` : ""}
+          ${g.capture_mode ? `<div class="row"><span class="label">Capture mode</span><code>${esc(g.capture_mode)}</code></div>` : ""}
           <details style="margin-top:.5rem">
             <summary class="label">Technical details</summary>
             ${g.template_binary_path ? `<div class="row"><span class="label">Binary</span><code>${esc(g.template_binary_path)}</code></div>` : ""}
@@ -57,9 +59,12 @@
             ${g.target_id ? `<div class="row"><span class="label">Browser target</span><code>${esc(g.target_id)}</code></div>` : ""}
             ${g.field_fingerprint ? `<div class="row"><span class="label">Field fingerprint</span><code>${esc(g.field_fingerprint)}</code></div>` : ""}
             ${g.submit_fingerprint ? `<div class="row"><span class="label">Submit fingerprint</span><code>${esc(g.submit_fingerprint)}</code></div>` : ""}
+            ${g.reveal_fingerprint ? `<div class="row"><span class="label">Reveal fingerprint</span><code>${esc(g.reveal_fingerprint)}</code></div>` : ""}
+            ${g.hide_fingerprint ? `<div class="row"><span class="label">Hide fingerprint</span><code>${esc(g.hide_fingerprint)}</code></div>` : ""}
+            ${g.container_fingerprint ? `<div class="row"><span class="label">Container fingerprint</span><code>${esc(g.container_fingerprint)}</code></div>` : ""}
           </details>
           ${g.action === "blind_end" ? `<div class="row" style="color:#c33"><b>Approving navigates open pages to about:blank and resumes observation. Approve only if the secret has been saved/submitted and is no longer visible.</b></div>` : ""}
-          ${g.action === "inject_submit" ? `<div class="row" style="color:#c33"><b>Approving authorizes the daemon to auto-resume observation only if the secret is verified gone (success marker observed AND the raw secret absent from every observable surface). If either check does not pass, blind mode stays on.</b></div>` : ""}
+          ${(g.action === "inject_submit" || g.action === "reveal_capture") ? `<div class="row" style="color:#c33"><b>Approving authorizes the daemon to auto-resume observation only if the secret is verified gone (success/capture and absence checks pass). If they do not, blind mode stays on.</b></div>` : ""}
         `;
         document.getElementById("status").textContent = `Status: ${g.status}`;
       }
