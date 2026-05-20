@@ -1,5 +1,6 @@
 import { ShuttleError } from "../../shared/errors.js";
 import { vercelEnvAdd } from "./builtin/vercel-env-add.js";
+import { githubActionsSecretSet } from "./builtin/github-actions-secret-set.js";
 
 export interface TemplateDefinition {
   id: string;
@@ -24,7 +25,10 @@ export interface TemplateDefinition {
 export class TemplateRegistry {
   private readonly map: Map<string, TemplateDefinition>;
   constructor() {
-    this.map = new Map<string, TemplateDefinition>([[vercelEnvAdd.id, vercelEnvAdd]]);
+    this.map = new Map<string, TemplateDefinition>([
+      [vercelEnvAdd.id, vercelEnvAdd],
+      [githubActionsSecretSet.id, githubActionsSecretSet],
+    ]);
   }
   list(): TemplateDefinition[] {
     return [...this.map.values()];

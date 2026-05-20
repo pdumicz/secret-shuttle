@@ -79,3 +79,72 @@ test("TemplateDefinition.secret_delivery accepts 'tmp_env_file_0600' (union wide
   assert.equal(fake.secret_delivery, "tmp_env_file_0600");
   assert.equal(fake.value_arg_template, "--env-file={{__env_file_path__}}");
 });
+
+test("registry lists github-actions-secret-set", () => {
+  const r = new TemplateRegistry();
+  const list = r.list();
+  assert.ok(list.find((t) => t.id === "github-actions-secret-set"));
+});
+
+test("github-actions-secret-set: stdin delivery, required name+repo, optional env/org", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("github-actions-secret-set");
+  assert.equal(t.secret_delivery, "stdin");
+  assert.deepEqual(t.required_params.sort(), ["name", "repo"]);
+  assert.equal(t.binary, "gh");
+});
+
+test("github-actions-secret-set: validateParams accepts a valid name+repo+env+org", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("github-actions-secret-set");
+  assert.doesNotThrow(() =>
+    t.validateParams?.({ name: "STRIPE_KEY", repo: "acme/web", env: "production", org: "acme" }),
+  );
+});
+
+test("github-actions-secret-set: validateParams rejects an invalid env-var name", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("github-actions-secret-set");
+  assert.throws(
+    () => t.validateParams?.({ name: "1bad", repo: "acme/web" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("github-actions-secret-set: validateParams rejects a repo without a slash", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("github-actions-secret-set");
+  assert.throws(
+    () => t.validateParams?.({ name: "STRIPE_KEY", repo: "noslash" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("github-actions-secret-set: validateParams rejects a whitespace-only name", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("github-actions-secret-set");
+  assert.throws(
+    () => t.validateParams?.({ name: "   ", repo: "acme/web" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("github-actions-secret-set: validateParams rejects shell metacharacters in env/org", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("github-actions-secret-set");
+  assert.throws(
+    () => t.validateParams?.({ name: "STRIPE_KEY", repo: "acme/web", env: "prod;rm -rf /" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+  assert.throws(
+    () => t.validateParams?.({ name: "STRIPE_KEY", repo: "acme/web", org: "$(whoami)" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("github-actions-secret-set: destinationEnvironment is env when set, repo otherwise", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("github-actions-secret-set");
+  assert.equal(t.destinationEnvironment?.({ name: "X", repo: "acme/web", env: "production" }), "production");
+  assert.equal(t.destinationEnvironment?.({ name: "X", repo: "acme/web" }), "acme/web");
+});

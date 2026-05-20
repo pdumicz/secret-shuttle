@@ -1,0 +1,65 @@
+import { ShuttleError } from "../../../shared/errors.js";
+import type { TemplateDefinition } from "../registry.js";
+
+// gh secret set <name> --repo <owner/repo>   (value from stdin)
+//
+// Spec §9 names this template. The [P2b] gate (Task 11) verifies the argv
+// shape against `gh secret set --help` at execution time. This template ships
+// the minimal common case (repo secret, stdin delivery) which the [P2b] gate
+// is expected to pass on every supported gh version. Org / environment scopes
+// can be added in a follow-up template (e.g. github-actions-org-secret-set)
+// once the [P2b] gate has confirmed the per-variant argv vector — that avoids
+// shipping a fixed args[] with conditional placeholders, which is brittle.
+//
+// The optional `env` / `org` params are accepted (and shape-validated) for
+// forward compatibility; they are threaded into destinationEnvironment so the
+// approval UI shows the destination, but they are NOT spliced into args[] in
+// this template. The shipped argv vector stays deterministic across gh
+// releases: `secret set <name> --repo=<owner/repo>`.
+
+export const githubActionsSecretSet: TemplateDefinition = {
+  id: "github-actions-secret-set",
+  description:
+    "Set a GitHub Actions repository secret via the official GitHub CLI (gh), reading the value from stdin.",
+  binary: "gh",
+  args: ["secret", "set", "{{name}}", "--repo={{repo}}"],
+  secret_delivery: "stdin",
+  required_params: ["name", "repo"],
+  requires_approval_when_production: true,
+  destinationEnvironment: (p) => (typeof p["env"] === "string" && p["env"] !== "" ? p["env"] : (p["repo"] ?? "")),
+  validateParams: (params) => {
+    const name = (params["name"] ?? "").trim();
+    const repo = (params["repo"] ?? "").trim();
+    const env = (params["env"] ?? "").trim();
+    const org = (params["org"] ?? "").trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(name)) {
+      throw new ShuttleError(
+        "invalid_template_param",
+        "GitHub Actions secret name must match ^[A-Za-z_][A-Za-z0-9_]{0,254}$.",
+      );
+    }
+    if (!/^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/.test(repo)) {
+      throw new ShuttleError(
+        "invalid_template_param",
+        "GitHub repo must be owner/repo, each side matching [A-Za-z0-9._-]{1,100}.",
+      );
+    }
+    if (env !== "" && !/^[A-Za-z0-9._-]{1,100}$/.test(env)) {
+      throw new ShuttleError(
+        "invalid_template_param",
+        "GitHub environment (--env) must match [A-Za-z0-9._-]{1,100}.",
+      );
+    }
+    if (org !== "" && !/^[A-Za-z0-9._-]{1,100}$/.test(org)) {
+      throw new ShuttleError(
+        "invalid_template_param",
+        "GitHub organization (--org) must match [A-Za-z0-9._-]{1,100}.",
+      );
+    }
+    // env/org are accepted for forward compatibility (carried into the
+    // approval binding via destinationEnvironment + template_params) but the
+    // shipped args[] uses --repo only. A follow-up template can add --env /
+    // --org variants once the [P2b] gate confirms the per-variant argv vector
+    // on a current gh release.
+  },
+};
