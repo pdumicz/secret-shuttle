@@ -17,6 +17,7 @@ import { unlockCommand } from "./commands/unlock.js";
 import { templateCommand } from "./commands/template.js";
 import { migrateCommand } from "./commands/migrate.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { agentCommand } from "./commands/agent.js";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
 
 const program = new Command();
@@ -43,6 +44,7 @@ program.addCommand(templateCommand());
 program.addCommand(daemonCommand());
 program.addCommand(migrateCommand());
 program.addCommand(doctorCommand());
+program.addCommand(agentCommand());
 
 if (process.argv.length <= 2) {
   program.help();
