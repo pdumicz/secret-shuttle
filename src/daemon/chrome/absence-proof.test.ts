@@ -449,3 +449,49 @@ test("absence scan hits on a shadow-comment-only direct child of an open shadowR
   });
   assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
 });
+
+// --- §6.1 round-7: open-shadow ESCAPABLE-CHAR TEXT-NODE fail-OPEN guard -----
+// Round-6 swapped ABSENCE's haystack from `shadowRoot.textContent` to
+// `shadowRoot.innerHTML` on the node-coverage monotonicity argument
+// (`textContent ⊂ innerHTML` at the NODE level — innerHTML adds comments and
+// markup). That argument does NOT hold for RAW BYTES: innerHTML HTML-ESCAPES
+// text nodes (`&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;`),
+// while the needle (the raw secret string) is unescaped. So
+// `innerHTML.includes(rawSecret)` MISSES any secret with escapable characters
+// — reopening round-5 for that character class.
+//
+// Round-7 fix: check BOTH `shadowRoot.textContent` (raw, unescaped — catches
+// escapable-char text-node bytes) AND `shadowRoot.innerHTML` (catches
+// comments + markup at any depth). Union of two surfaces — strictly
+// monotonic, strictly more fail-closed, symmetric with BASELINE_SCAN_FN.
+
+// (o) THE FAIL-OPEN REGRESSION GUARD: the needle ITSELF contains escapable
+// chars, so it is present in textContent's raw bytes but absent from
+// innerHTML's HTML-escaped serialization. This isolates the bug exactly:
+// BEFORE round-7, innerHTML alone returns {found:false} (fail-OPEN). AFTER,
+// textContent catches it. Symmetric with BASELINE_SCAN_FN's round-7 guard.
+test("absence scan hits when the needle itself contains escapable HTML chars and is only in shadow textContent [§6.1 round-7 symmetric with BASELINE; innerHTML alone HTML-escapes and misses it]", () => {
+  // Needle contains `&` and `<` — innerHTML encodes them, textContent does not.
+  // innerHTML.includes(NEEDLE) is FALSE because innerHTML stores `&amp;` /
+  // `&lt;` where the needle has the raw chars.
+  const NEEDLE = "tok&<v";
+  const ESCAPED = "tok&amp;&lt;v"; // how innerHTML would serialize the text node
+  const make = new Function("document", `return (${ABSENCE_SCAN_FN});`) as
+    (d: unknown) => (s: string) => { found?: boolean; inconclusive?: boolean };
+  const doc = richDoc({
+    children: [{
+      tagName: "MY-HOST",
+      attributes: null,
+      children: [],
+      shadowRoot: {
+        textContent: NEEDLE,
+        innerHTML: ESCAPED, // NEEDLE is NOT a substring of ESCAPED
+        children: [],
+      },
+    }],
+  });
+  // Sanity: confirm the escaping discrepancy that motivates the fix.
+  assert.equal(ESCAPED.includes(NEEDLE), false,
+    "innerHTML serialization must NOT contain the raw needle — this is the bug class");
+  assert.deepEqual(make(doc)(NEEDLE), { found: true, inconclusive: false });
+});

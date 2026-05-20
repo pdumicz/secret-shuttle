@@ -719,3 +719,39 @@ test("BASELINE_SCAN_FN: a secret as plain shadow text is still in observable aft
   assert.ok(b.observable.includes(SECRET),
     "observable must still contain plain shadow text after the round-6 innerHTML switch (textContent ⊂ innerHTML)");
 });
+
+// ---- NEW §6.1 round-7: open-shadowRoot escapable-char text-node fold --------
+// Round-6's textContent → innerHTML swap rested on a node-coverage monotonicity
+// argument that does NOT hold for RAW BYTES: innerHTML HTML-ESCAPES text nodes
+// (`&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;`), while the
+// captured value V (from `.value`/`.textContent`/`.innerText`) is unescaped.
+// So `innerHTML.includes(V)` MISSES any secret containing escapable chars —
+// reopening round-5 for any text-node secret with `& < > " '` etc. Round-7 fix:
+// fold BOTH `shadowRoot.textContent` (RAW, unescaped — text-node bytes) AND
+// `shadowRoot.innerHTML` (comments + markup at any depth). Union of two surfaces
+// is strictly additive in coverage — strictly more fail-closed, never regresses
+// legit. Symmetric with ABSENCE_SCAN_FN round-7 below.
+
+test("BASELINE_SCAN_FN: a shadow-text secret containing escapable HTML chars (& < > \") is folded into observable via textContent — innerHTML alone misses it because of HTML-escaping (§6.1 round-7)", () => {
+  // The secret lives ONLY as a text node directly under the open shadowRoot.
+  // Real DOM serialization: textContent returns the raw bytes; innerHTML
+  // HTML-encodes the text node, so `innerHTML.includes(rawSecret)` is FALSE.
+  // Before round-7 (innerHTML alone): observable does NOT contain the raw
+  // secret → §6.1 reject misses, fail-OPEN. After: textContent fold restores
+  // raw-byte coverage.
+  const SECRET = "whsec_A&B<C>D\"E"; // contains all four canonical escapable chars
+  const ESCAPED = "whsec_A&amp;B&lt;C&gt;D&quot;E"; // how innerHTML serializes the text node
+  const host = el("div", {
+    __shadow: {
+      children: [],
+      textContent: SECRET,  // raw, unescaped — what scripts read
+      innerHTML: ESCAPED,   // HTML-encoded serialization — does NOT contain SECRET
+    },
+  });
+  const bRoot = el("div", { children: [host, el("input", { type: "text", value: "" })] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  assert.ok(typeof b.observable === "string", "observable must be a string");
+  assert.ok(b.observable.includes(SECRET),
+    "observable must contain the RAW shadow text-node secret (folded shadowRoot.textContent) — innerHTML alone HTML-escapes and misses it");
+});

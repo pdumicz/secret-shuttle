@@ -332,16 +332,20 @@ export const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
         if (el.tagName === "TEMPLATE") { try { if (el.content && hit(el.content.textContent)) return { hit:true }; } catch (e) { return { inconclusive:true }; } }
         if (el.shadowRoot) {
           // Open shadow roots are script-readable (incl. by the resumed agent
-          // via host.shadowRoot.innerHTML / host.shadowRoot.childNodes[*].data).
-          // shadowRoot.innerHTML serializes the full shadow tree (text +
-          // comments + element markup + attributes at any depth) — strict
-          // SUPERSET of textContent — so it catches ordinary shadow
-          // text/spans/divs/text-nodes that the per-element walk does not AND
-          // shadow-comment-only nodes that textContent excluded (§6.1 round-6,
-          // symmetric with BASELINE_SCAN_FN's innerHTML fold above). Closed
-          // shadow roots are null here → correctly out of scope per §5.4. Fail
-          // closed on any error.
-          try { if (hit(el.shadowRoot.innerHTML)) return { hit:true }; } catch (e) { return { inconclusive:true }; }
+          // via host.shadowRoot.textContent / host.shadowRoot.innerHTML /
+          // host.shadowRoot.childNodes[*].data). Closed shadow roots are null
+          // here → correctly out of scope per §5.4. Fail closed on any error.
+          //
+          // §6.1 round-7: check BOTH textContent (raw, unescaped — catches
+          // escapable-char text-node bytes like & < > " that innerHTML would
+          // HTML-encode) AND innerHTML (catches comments + markup at any
+          // depth in the shadow tree). Symmetric with BASELINE_SCAN_FN above;
+          // strictly more conservative than either alone (haystack is the
+          // union of two surfaces, more {found:true} possible, never fewer).
+          try {
+            if (hit(el.shadowRoot.textContent)) return { hit:true };
+            if (hit(el.shadowRoot.innerHTML)) return { hit:true };
+          } catch (e) { return { inconclusive:true }; }
           for (const c of el.shadowRoot.children) stack.push(c);
         }
         if (el.children) { for (const c of el.children) stack.push(c); }
@@ -475,22 +479,34 @@ export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
       }
       var childInControl = cur.inControl || selfControl;
       if (el.shadowRoot) {
-        // §6.1: an open shadowRoot is script-readable (host.shadowRoot.innerHTML
-        // (includes comments and any non-element nodes at any depth in the
-        // shadow tree)), so bare text nodes AND comment nodes directly under it
-        // were observable pre-blind. outerHTML does NOT serialize shadow DOM
-        // and the DFS only visits shadow ELEMENT children, so fold the shadow
-        // innerHTML into the observable blob too — strict SUPERSET of
-        // textContent (textContent ⊂ innerHTML), so the blob strictly grows.
-        // Closes the shadow-comment-only §6.1 sub-case — symmetric with
-        // ABSENCE_SCAN_FN's innerHTML check below. Size-bounded; any throw →
-        // fail closed.
+        // §6.1: an open shadowRoot is script-readable, so anything in its
+        // subtree was observable pre-blind. outerHTML does NOT serialize
+        // shadow DOM and the DFS only visits shadow ELEMENT children, so we
+        // must fold the shadow surface into the observable blob explicitly.
+        //
+        // §6.1 round-7: fold BOTH shadowRoot.textContent (RAW, unescaped —
+        // catches text-node bytes with escapable chars like & < > " that
+        // innerHTML would HTML-encode) AND shadowRoot.innerHTML (catches
+        // comments and markup at any depth in the shadow tree). textContent
+        // is NOT a raw-byte superset of innerHTML, and vice versa — they
+        // cover different surfaces — so BOTH are required to fully express
+        // "anything script-readable in the open shadow tree". Closes both
+        // the round-5 plain-text case (unconditionally, for any character
+        // class) and the round-6 shadow-comment case — symmetric with
+        // ABSENCE_SCAN_FN's dual check below. Size-bounded against the same
+        // running obsLen; any throw → fail closed.
         try {
-          var st = el.shadowRoot.innerHTML;
-          if (typeof st === "string" && st !== "") {
-            obsLen += 1 + st.length;
+          var tc = el.shadowRoot.textContent;
+          if (typeof tc === "string" && tc !== "") {
+            obsLen += 1 + tc.length;
             if (obsLen > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
-            obsParts.push(st);
+            obsParts.push(tc);
+          }
+          var ih = el.shadowRoot.innerHTML;
+          if (typeof ih === "string" && ih !== "") {
+            obsLen += 1 + ih.length;
+            if (obsLen > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
+            obsParts.push(ih);
           }
         } catch (e) { return { ok:false, entries:[], readableFps:[], observable:"" }; }
         var sc = el.shadowRoot.children;
