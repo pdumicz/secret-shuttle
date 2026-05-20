@@ -108,6 +108,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         params: b.params ?? {},
         secret: secret.value,
         expectedSha256: sha256 as string,
+        tmpDir: services.tmpDir,
       });
       await services.vault.markUsed(secret.ref);
       await writeDaemonAudit({

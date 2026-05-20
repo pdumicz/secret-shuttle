@@ -193,3 +193,92 @@ test("cloudflare-secret-put: destinationEnvironment is env when set, 'production
   assert.equal(t.destinationEnvironment?.({ name: "X", env: "staging" }), "staging");
   assert.equal(t.destinationEnvironment?.({ name: "X" }), "production");
 });
+
+test("registry lists supabase-edge-secret-set", () => {
+  const r = new TemplateRegistry();
+  assert.ok(r.list().find((t) => t.id === "supabase-edge-secret-set"));
+});
+
+test("supabase-edge-secret-set: tmp_env_file_0600 delivery, required name only, value_arg_template set", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("supabase-edge-secret-set");
+  assert.equal(t.secret_delivery, "tmp_env_file_0600");
+  assert.deepEqual(t.required_params, ["name"]);
+  assert.equal(t.binary, "supabase");
+  assert.equal(typeof t.value_arg_template, "string");
+  assert.match(t.value_arg_template ?? "", /\{\{__env_file_path__\}\}/);
+});
+
+test("supabase-edge-secret-set: validateParams accepts a valid name and rejects bad ones", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("supabase-edge-secret-set");
+  assert.doesNotThrow(() => t.validateParams?.({ name: "STRIPE_KEY" }));
+  assert.throws(
+    () => t.validateParams?.({ name: "1bad" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("supabase-edge-secret-set: validateParams rejects shell metacharacters in project-ref", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("supabase-edge-secret-set");
+  assert.throws(
+    () => t.validateParams?.({ name: "STRIPE_KEY", project_ref: "abc;rm" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("supabase-edge-secret-set: destinationEnvironment is project_ref when set, 'production' otherwise", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("supabase-edge-secret-set");
+  assert.equal(t.destinationEnvironment?.({ name: "X", project_ref: "abcdefghijklmnop" }), "abcdefghijklmnop");
+  assert.equal(t.destinationEnvironment?.({ name: "X" }), "production");
+});
+
+test("supabase-edge-secret-set: runs end-to-end with a stub supabase binary, secret reaches the child via 0600 env-file", async () => {
+  const { mkdtemp, writeFile, chmod, readFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const pathModule = await import("node:path");
+  const tmp = await mkdtemp(pathModule.join(tmpdir(), "ss-sb-"));
+  try {
+    const stubDir = pathModule.join(tmp, "bin");
+    const tmpDir = pathModule.join(tmp, "tmp");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(stubDir, { recursive: true });
+    await mkdir(tmpDir, { recursive: true, mode: 0o700 });
+    const stubPath = pathModule.join(stubDir, "supabase");
+    const recoveredSidecar = pathModule.join(tmp, "recovered.txt");
+    const argvSidecar = pathModule.join(tmp, "argv.json");
+    const stubScript =
+      `#!/usr/bin/env node\n` +
+      `const fs=require("node:fs");\n` +
+      `const arg=process.argv.find(a=>a.startsWith("--env-file="));\n` +
+      `if(arg){fs.writeFileSync(${JSON.stringify(recoveredSidecar)}, fs.readFileSync(arg.slice("--env-file=".length),"utf8"));}\n` +
+      `fs.writeFileSync(${JSON.stringify(argvSidecar)}, JSON.stringify({argv:process.argv,env:Object.fromEntries(Object.entries(process.env))}));\n` +
+      `process.exit(0);\n`;
+    await writeFile(stubPath, stubScript);
+    await chmod(stubPath, 0o755);
+
+    const { runTemplate } = await import("./run.js");
+    const r = new TemplateRegistry();
+    const def = { ...r.get("supabase-edge-secret-set"), binary: stubPath };
+    const result = await runTemplate({
+      template: def, params: { name: "STRIPE_KEY" },
+      secret: "needle-supabase-9f",
+      tmpDir,
+    });
+    assert.equal(result.exit_code, 0);
+
+    const recovered = await readFile(recoveredSidecar, "utf8");
+    assert.equal(recovered, "STRIPE_KEY=needle-supabase-9f\n");
+    const { argv, env } = JSON.parse(await readFile(argvSidecar, "utf8")) as {
+      argv: string[]; env: Record<string,string>;
+    };
+    for (const a of argv) assert.equal(a.includes("needle-supabase-9f"), false);
+    for (const [k, v] of Object.entries(env)) assert.equal((k+"="+v).includes("needle-supabase-9f"), false);
+    const { readdir } = await import("node:fs/promises");
+    assert.deepEqual(await readdir(tmpDir), []);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});

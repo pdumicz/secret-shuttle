@@ -2,6 +2,7 @@ import { ShuttleError } from "../../shared/errors.js";
 import { vercelEnvAdd } from "./builtin/vercel-env-add.js";
 import { githubActionsSecretSet } from "./builtin/github-actions-secret-set.js";
 import { cloudflareSecretPut } from "./builtin/cloudflare-secret-put.js";
+import { supabaseEdgeSecretSet } from "./builtin/supabase-edge-secret-set.js";
 
 export interface TemplateDefinition {
   id: string;
@@ -30,6 +31,7 @@ export class TemplateRegistry {
       [vercelEnvAdd.id, vercelEnvAdd],
       [githubActionsSecretSet.id, githubActionsSecretSet],
       [cloudflareSecretPut.id, cloudflareSecretPut],
+      [supabaseEdgeSecretSet.id, supabaseEdgeSecretSet],
     ]);
   }
   list(): TemplateDefinition[] {
