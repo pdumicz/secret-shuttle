@@ -148,3 +148,48 @@ test("github-actions-secret-set: destinationEnvironment is env when set, repo ot
   assert.equal(t.destinationEnvironment?.({ name: "X", repo: "acme/web", env: "production" }), "production");
   assert.equal(t.destinationEnvironment?.({ name: "X", repo: "acme/web" }), "acme/web");
 });
+
+test("registry lists cloudflare-secret-put", () => {
+  const r = new TemplateRegistry();
+  assert.ok(r.list().find((t) => t.id === "cloudflare-secret-put"));
+});
+
+test("cloudflare-secret-put: stdin delivery, required name only", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("cloudflare-secret-put");
+  assert.equal(t.secret_delivery, "stdin");
+  assert.deepEqual(t.required_params, ["name"]);
+  assert.equal(t.binary, "wrangler");
+});
+
+test("cloudflare-secret-put: validateParams accepts a valid name + optional env", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("cloudflare-secret-put");
+  assert.doesNotThrow(() => t.validateParams?.({ name: "STRIPE_KEY", env: "staging" }));
+  assert.doesNotThrow(() => t.validateParams?.({ name: "STRIPE_KEY" }));
+});
+
+test("cloudflare-secret-put: validateParams rejects an invalid env-var name", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("cloudflare-secret-put");
+  assert.throws(
+    () => t.validateParams?.({ name: "1bad" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("cloudflare-secret-put: validateParams rejects shell metacharacters in env", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("cloudflare-secret-put");
+  assert.throws(
+    () => t.validateParams?.({ name: "STRIPE_KEY", env: "prod && rm -rf /" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("cloudflare-secret-put: destinationEnvironment is env when set, 'production' otherwise", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("cloudflare-secret-put");
+  assert.equal(t.destinationEnvironment?.({ name: "X", env: "staging" }), "staging");
+  assert.equal(t.destinationEnvironment?.({ name: "X" }), "production");
+});

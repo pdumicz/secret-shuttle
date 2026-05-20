@@ -1,6 +1,7 @@
 import { ShuttleError } from "../../shared/errors.js";
 import { vercelEnvAdd } from "./builtin/vercel-env-add.js";
 import { githubActionsSecretSet } from "./builtin/github-actions-secret-set.js";
+import { cloudflareSecretPut } from "./builtin/cloudflare-secret-put.js";
 
 export interface TemplateDefinition {
   id: string;
@@ -28,6 +29,7 @@ export class TemplateRegistry {
     this.map = new Map<string, TemplateDefinition>([
       [vercelEnvAdd.id, vercelEnvAdd],
       [githubActionsSecretSet.id, githubActionsSecretSet],
+      [cloudflareSecretPut.id, cloudflareSecretPut],
     ]);
   }
   list(): TemplateDefinition[] {
