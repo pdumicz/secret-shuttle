@@ -2,6 +2,10 @@
   "name": "secret-shuttle",
   "version": "0.1.1",
   "description": "A local blind-secret bridge for AI coding agents.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pdumicz/secret-shuttle.git"
+  },
   "type": "module",
   "bin": {
     "secret-shuttle": "./dist/cli/index.js"
