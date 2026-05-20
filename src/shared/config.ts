@@ -12,6 +12,7 @@ export interface ShuttlePaths {
   daemonSocketPath: string;
   auditLogPath: string;
   daemonConfigPath: string;
+  daemonTmpPath: string;
 }
 
 export function getSecretShuttleHome(): string {
@@ -29,6 +30,7 @@ export function getShuttlePaths(homeDir = getSecretShuttleHome()): ShuttlePaths 
     daemonSocketPath: path.join(homeDir, "daemon-socket.json"),
     auditLogPath: path.join(homeDir, "audit.jsonl"),
     daemonConfigPath: path.join(homeDir, "daemon.config.json"),
+    daemonTmpPath: path.join(homeDir, "tmp"),
   };
 }
 

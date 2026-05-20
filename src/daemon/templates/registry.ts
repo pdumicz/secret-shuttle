@@ -6,11 +6,19 @@ export interface TemplateDefinition {
   description: string;
   binary: string;
   args: string[];
-  secret_delivery: "stdin";
+  secret_delivery: "stdin" | "tmp_env_file_0600";
   required_params: string[];
   requires_approval_when_production: boolean;
   validateParams?: (params: Record<string, string>) => void;
   destinationEnvironment?: (params: Record<string, string>) => string;
+  /**
+   * Only consumed when secret_delivery === "tmp_env_file_0600". Names the argv
+   * slot for the daemon-written 0600 env-file path. The string is param-expanded
+   * the same way args[] is, plus the synthetic placeholder {{__env_file_path__}}
+   * which the daemon substitutes at run time. Required when secret_delivery is
+   * "tmp_env_file_0600"; ignored otherwise.
+   */
+  value_arg_template?: string | null;
 }
 
 export class TemplateRegistry {

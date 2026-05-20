@@ -63,3 +63,19 @@ test("resolveBinary ignores process.env.PATH and uses only the safe allowlist", 
     process.env.PATH = prev;
   }
 });
+
+test("TemplateDefinition.secret_delivery accepts 'tmp_env_file_0600' (union widened)", () => {
+  const fake: import("./registry.js").TemplateDefinition = {
+    id: "fake-env-file",
+    description: "test",
+    binary: "vercel",
+    args: ["env-file", "{{__env_file_path__}}"],
+    secret_delivery: "tmp_env_file_0600",
+    required_params: [],
+    requires_approval_when_production: false,
+    value_arg_template: "--env-file={{__env_file_path__}}",
+  };
+  // Trivial assertions — the test is structural: it must COMPILE.
+  assert.equal(fake.secret_delivery, "tmp_env_file_0600");
+  assert.equal(fake.value_arg_template, "--env-file={{__env_file_path__}}");
+});
