@@ -831,5 +831,60 @@ test("GET /v1/health reports a structured safety snapshot", async () => {
     assert.equal(h.blind_mode, null);
     assert.equal(typeof h.vault, "object");
     assert.equal(h.policy_warnings, null); // locked → cannot enumerate
+    // Phase 5 — agentic_browser capability block must be present.
+    const ab = h.agentic_browser as Record<string, unknown>;
+    assert.equal(typeof ab, "object");
+    assert.equal(ab.browser_started, false);
+    assert.equal(ab.proxy_active, false);
+    assert.equal(ab.handles_supported, true);
+    assert.equal(ab.marks_active, 0);
+    assert.equal(ab.available, false); // browser not started ⇒ unavailable
+  });
+});
+
+test("GET /v1/health.agentic_browser.available is TRUE when both browser+proxy are up and a handle is recorded", async () => {
+  await withDaemon(async (ctx) => {
+    ctx.services.browser = stubBrowser({ domain: "stripe.com", target: "T1", value: "alpha" });
+    ctx.services.cdpProxy = {} as unknown as typeof ctx.services.cdpProxy;
+    ctx.services.handles.put({
+      label: "field-x",
+      target_id: "T1",
+      domain: "stripe.com",
+      page_url_host: "dashboard.stripe.com",
+      page_title: "t",
+      backend_node_id: 99,
+      handle_fingerprint: "fp:test",
+      element_kind: "field",
+    });
+    const r = await call(ctx, "GET", "/v1/health");
+    assert.equal(r.status, 200);
+    const ab = (r.body as Record<string, unknown>).agentic_browser as Record<string, unknown>;
+    assert.equal(ab.browser_started, true);
+    assert.equal(ab.proxy_active, true);
+    assert.equal(ab.handles_supported, true);
+    assert.equal(ab.marks_active, 1);
+    assert.equal(ab.available, true);
+  });
+});
+
+test("GET /v1/health.agentic_browser exposes ONLY counts — no labels, no fingerprints, no DOM text", async () => {
+  await withDaemon(async (ctx) => {
+    ctx.services.browser = stubBrowser({ domain: "stripe.com", target: "T1", value: "alpha" });
+    ctx.services.cdpProxy = {} as unknown as typeof ctx.services.cdpProxy;
+    ctx.services.handles.put({
+      label: "secret-label-should-not-leak",
+      target_id: "T1",
+      domain: "stripe.com",
+      page_url_host: "dashboard.stripe.com",
+      page_title: "t",
+      backend_node_id: 99,
+      handle_fingerprint: "fp:should-not-leak",
+      element_kind: "field",
+    });
+    const r = await call(ctx, "GET", "/v1/health");
+    const blob = JSON.stringify(r.body);
+    assert.ok(!blob.includes("secret-label-should-not-leak"), "handle label must not appear in /v1/health");
+    assert.ok(!blob.includes("fp:should-not-leak"), "handle fingerprint must not appear in /v1/health");
+    assert.ok(!blob.includes("backend_node_id"), "backend_node_id must not appear in /v1/health");
   });
 });
