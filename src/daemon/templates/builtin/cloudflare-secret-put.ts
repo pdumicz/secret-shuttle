@@ -1,9 +1,13 @@
 import { ShuttleError } from "../../../shared/errors.js";
 import type { TemplateDefinition } from "../registry.js";
 
-// wrangler secret put <NAME>   (value from stdin)
-// Optional: --env <env>. The [P2b] gate (Task 11) confirms this argv shape
-// against `wrangler secret put --help` on a current wrangler release.
+// wrangler secret put <NAME> [--env <env>]   (value from stdin)
+//
+// Optional: --env <env>. When env is set, additionalArgs() splices ["--env",
+// env] into the child argv so the actual write scope matches the destination
+// shown to the human in the approval UI (destinationEnvironment). The [P2b]
+// gate (Task 11) confirms this argv shape against `wrangler secret put --help`
+// on a current wrangler release.
 
 export const cloudflareSecretPut: TemplateDefinition = {
   id: "cloudflare-secret-put",
@@ -14,6 +18,10 @@ export const cloudflareSecretPut: TemplateDefinition = {
   secret_delivery: "stdin",
   required_params: ["name"],
   requires_approval_when_production: true,
+  additionalArgs: (params) => {
+    const env = (params["env"] ?? "").trim();
+    return env !== "" ? ["--env", env] : [];
+  },
   destinationEnvironment: (p) => (typeof p["env"] === "string" && p["env"] !== "" ? p["env"] : "production"),
   validateParams: (params) => {
     const name = (params["name"] ?? "").trim();

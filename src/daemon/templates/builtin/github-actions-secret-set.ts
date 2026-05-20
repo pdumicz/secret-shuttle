@@ -6,16 +6,13 @@ import type { TemplateDefinition } from "../registry.js";
 // Spec §9 names this template. The [P2b] gate (Task 11) verifies the argv
 // shape against `gh secret set --help` at execution time. This template ships
 // the minimal common case (repo secret, stdin delivery) which the [P2b] gate
-// is expected to pass on every supported gh version. Org / environment scopes
-// can be added in a follow-up template (e.g. github-actions-org-secret-set)
-// once the [P2b] gate has confirmed the per-variant argv vector — that avoids
-// shipping a fixed args[] with conditional placeholders, which is brittle.
+// is expected to pass on every supported gh version.
 //
-// The optional `env` / `org` params are accepted (and shape-validated) for
-// forward compatibility; they are threaded into destinationEnvironment so the
-// approval UI shows the destination, but they are NOT spliced into args[] in
-// this template. The shipped argv vector stays deterministic across gh
-// releases: `secret set <name> --repo=<owner/repo>`.
+// GitHub's per-scope argv is MUTUALLY-EXCLUSIVE: --env requires --repo,
+// --org excludes --repo. A single optional-args composition is brittle and
+// could produce an invalid CLI call. env / org params are therefore REJECTED
+// with invalid_template_param; use separate per-scope templates (planned
+// follow-up: github-actions-env-secret-set, github-actions-org-secret-set).
 
 export const githubActionsSecretSet: TemplateDefinition = {
   id: "github-actions-secret-set",
@@ -26,7 +23,7 @@ export const githubActionsSecretSet: TemplateDefinition = {
   secret_delivery: "stdin",
   required_params: ["name", "repo"],
   requires_approval_when_production: true,
-  destinationEnvironment: (p) => (typeof p["env"] === "string" && p["env"] !== "" ? p["env"] : (p["repo"] ?? "")),
+  destinationEnvironment: (p) => p["repo"] ?? "",
   validateParams: (params) => {
     const name = (params["name"] ?? "").trim();
     const repo = (params["repo"] ?? "").trim();
@@ -50,16 +47,23 @@ export const githubActionsSecretSet: TemplateDefinition = {
         "GitHub environment (--env) must match [A-Za-z0-9._-]{1,100}.",
       );
     }
+    if (env !== "") {
+      throw new ShuttleError(
+        "invalid_template_param",
+        "github-actions-secret-set only supports repo-scoped secrets. For environment-scoped (--env) or org-scoped (--org) secrets, use the dedicated templates (planned follow-up); do not pass env/org to this template.",
+      );
+    }
     if (org !== "" && !/^[A-Za-z0-9._-]{1,100}$/.test(org)) {
       throw new ShuttleError(
         "invalid_template_param",
         "GitHub organization (--org) must match [A-Za-z0-9._-]{1,100}.",
       );
     }
-    // env/org are accepted for forward compatibility (carried into the
-    // approval binding via destinationEnvironment + template_params) but the
-    // shipped args[] uses --repo only. A follow-up template can add --env /
-    // --org variants once the [P2b] gate confirms the per-variant argv vector
-    // on a current gh release.
+    if (org !== "") {
+      throw new ShuttleError(
+        "invalid_template_param",
+        "github-actions-secret-set only supports repo-scoped secrets. For environment-scoped (--env) or org-scoped (--org) secrets, use the dedicated templates (planned follow-up); do not pass env/org to this template.",
+      );
+    }
   },
 };

@@ -1,17 +1,16 @@
 import { ShuttleError } from "../../../shared/errors.js";
 import type { TemplateDefinition } from "../registry.js";
 
-// supabase secrets set --env-file <path>   (value via 0600 daemon-owned env-file)
+// supabase secrets set [--project-ref <ref>] --env-file <path>
+//   (value via 0600 daemon-owned env-file)
 //
 // Spec §9: /dev/stdin is NOT portable (no /dev/stdin on Windows; fragile on
 // some shells), so the safe default for supabase is tmp_env_file_0600. The
 // [P2b] gate (Task 11) confirms this argv shape against
 // `supabase secrets set --help` on a current supabase release.
 //
-// Optional --project-ref <ref>. project_ref carried into destinationEnvironment
-// so the approval UI shows the destination project; the shipped args[] omits
-// the --project-ref flag (a future template variant can add it once [P2b]
-// confirms the per-variant argv vector on the current supabase release).
+// Optional --project-ref <ref> is now wired via additionalArgs() so the actual
+// write scope matches the destination shown to the human in the approval UI.
 
 export const supabaseEdgeSecretSet: TemplateDefinition = {
   id: "supabase-edge-secret-set",
@@ -23,6 +22,10 @@ export const supabaseEdgeSecretSet: TemplateDefinition = {
   required_params: ["name"],
   requires_approval_when_production: true,
   value_arg_template: "--env-file={{__env_file_path__}}",
+  additionalArgs: (params) => {
+    const ref = (params["project_ref"] ?? "").trim();
+    return ref !== "" ? ["--project-ref", ref] : [];
+  },
   destinationEnvironment: (p) =>
     typeof p["project_ref"] === "string" && p["project_ref"] !== "" ? p["project_ref"] : "production",
   validateParams: (params) => {

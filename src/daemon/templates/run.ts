@@ -48,10 +48,17 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
     });
 
   const baseExpandedArgs = input.template.args.map(expandParam);
+  const additionalArgs = input.template.additionalArgs?.(input.params) ?? [];
+  if (!Array.isArray(additionalArgs) || !additionalArgs.every((a) => typeof a === "string")) {
+    throw new ShuttleError(
+      "template_definition_invalid",
+      "additionalArgs must return string[].",
+    );
+  }
 
   if (input.template.secret_delivery === "stdin") {
     return new Promise((resolve, reject) => {
-      const child = spawn(resolvedBinary, baseExpandedArgs, {
+      const child = spawn(resolvedBinary, [...baseExpandedArgs, ...additionalArgs], {
         shell: false,
         stdio: ["pipe", "ignore", "ignore"],
         env: buildChildEnv(),
@@ -99,7 +106,7 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
     // "__env_file_path__" as a user-supplied param.
     const rawValueArg = input.template.value_arg_template.replace(ENV_FILE_PLACEHOLDER, envFilePath);
     const valueArg = expandParam(rawValueArg);
-    const finalArgs = [...baseExpandedArgs, valueArg];
+    const finalArgs = [...baseExpandedArgs, ...additionalArgs, valueArg];
     return await new Promise<TemplateRunResult>((resolve, reject) => {
       const child = spawn(resolvedBinary, finalArgs, {
         shell: false,

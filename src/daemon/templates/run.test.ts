@@ -245,3 +245,77 @@ test("tmp_env_file_0600: throws bad_request when tmpDir is missing on the input"
     (err: unknown) => err instanceof ShuttleError && err.code === "template_tmpdir_missing",
   );
 });
+
+test("runTemplate (stdin): additionalArgs are spliced into the child argv (cloudflare-like)", async () => {
+  const { mkdtemp, readFile, rm, writeFile, chmod } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const pathModule = await import("node:path");
+  const tmp = await mkdtemp(pathModule.join(tmpdir(), "ss-rt-add-"));
+  try {
+    const stubBin = pathModule.join(tmp, "stub");
+    const argvSidecar = pathModule.join(tmp, "argv.json");
+    await writeFile(stubBin, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(argvSidecar)}, JSON.stringify(process.argv));\nprocess.exit(0);\n`);
+    await chmod(stubBin, 0o755);
+    const { runTemplate } = await import("./run.js");
+    const r = await runTemplate({
+      template: {
+        id: "stub", description: "", binary: stubBin,
+        args: ["secret", "put", "{{name}}"],
+        secret_delivery: "stdin",
+        required_params: ["name"],
+        requires_approval_when_production: false,
+        additionalArgs: (p) => p["env"] !== undefined && p["env"] !== "" ? ["--env", p["env"]] : [],
+      },
+      params: { name: "STRIPE_KEY", env: "staging" },
+      secret: "x",
+    });
+    assert.equal(r.exit_code, 0);
+    const argv = JSON.parse(await readFile(argvSidecar, "utf8")) as string[];
+    assert.ok(argv.includes("--env"), "argv must contain --env when env param is set");
+    assert.ok(argv.includes("staging"), "argv must contain the scope value");
+    // Order check: static name arg appears BEFORE additionalArgs
+    const nameIdx = argv.indexOf("STRIPE_KEY");
+    const envIdx = argv.indexOf("--env");
+    assert.ok(nameIdx < envIdx, "static args come before additionalArgs in argv");
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("runTemplate (tmp_env_file_0600): additionalArgs are spliced BEFORE the value_arg (supabase-like)", async () => {
+  const { mkdtemp, readFile, rm, writeFile, chmod, mkdir } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const pathModule = await import("node:path");
+  const tmp = await mkdtemp(pathModule.join(tmpdir(), "ss-rt-add-ef-"));
+  const tmpDir = pathModule.join(tmp, "tmp");
+  await mkdir(tmpDir, { recursive: true, mode: 0o700 });
+  try {
+    const stubBin = pathModule.join(tmp, "stub");
+    const argvSidecar = pathModule.join(tmp, "argv.json");
+    await writeFile(stubBin, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(argvSidecar)}, JSON.stringify(process.argv));\nprocess.exit(0);\n`);
+    await chmod(stubBin, 0o755);
+    const { runTemplate } = await import("./run.js");
+    await runTemplate({
+      template: {
+        id: "stub", description: "", binary: stubBin,
+        args: ["secrets", "set"],
+        secret_delivery: "tmp_env_file_0600",
+        required_params: ["name"],
+        requires_approval_when_production: false,
+        value_arg_template: "--env-file={{__env_file_path__}}",
+        additionalArgs: (p) => p["project_ref"] !== undefined && p["project_ref"] !== "" ? ["--project-ref", p["project_ref"]] : [],
+      },
+      params: { name: "X", project_ref: "abcdef" },
+      secret: "needle",
+      tmpDir,
+    });
+    const argv = JSON.parse(await readFile(argvSidecar, "utf8")) as string[];
+    assert.ok(argv.includes("--project-ref"), "argv must contain --project-ref when set");
+    assert.ok(argv.includes("abcdef"), "argv must contain the project ref value");
+    const refIdx = argv.indexOf("--project-ref");
+    const envFileIdx = argv.findIndex((a) => a.startsWith("--env-file="));
+    assert.ok(refIdx < envFileIdx, "additionalArgs come BEFORE value_arg in argv");
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});

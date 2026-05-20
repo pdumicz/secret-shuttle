@@ -94,11 +94,21 @@ test("github-actions-secret-set: stdin delivery, required name+repo, optional en
   assert.equal(t.binary, "gh");
 });
 
-test("github-actions-secret-set: validateParams accepts a valid name+repo+env+org", () => {
+test("github-actions-secret-set: validateParams REJECTS env (use a dedicated template for env-scoped secrets)", () => {
   const r = new TemplateRegistry();
   const t = r.get("github-actions-secret-set");
-  assert.doesNotThrow(() =>
-    t.validateParams?.({ name: "STRIPE_KEY", repo: "acme/web", env: "production", org: "acme" }),
+  assert.throws(
+    () => t.validateParams?.({ name: "STRIPE_KEY", repo: "acme/web", env: "production" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("github-actions-secret-set: validateParams REJECTS org (use a dedicated template for org-scoped secrets)", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("github-actions-secret-set");
+  assert.throws(
+    () => t.validateParams?.({ name: "STRIPE_KEY", repo: "acme/web", org: "acme" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
   );
 });
 
@@ -142,10 +152,9 @@ test("github-actions-secret-set: validateParams rejects shell metacharacters in 
   );
 });
 
-test("github-actions-secret-set: destinationEnvironment is env when set, repo otherwise", () => {
+test("github-actions-secret-set: destinationEnvironment is the repo (env/org are rejected upstream, never reach this)", () => {
   const r = new TemplateRegistry();
   const t = r.get("github-actions-secret-set");
-  assert.equal(t.destinationEnvironment?.({ name: "X", repo: "acme/web", env: "production" }), "production");
   assert.equal(t.destinationEnvironment?.({ name: "X", repo: "acme/web" }), "acme/web");
 });
 
@@ -281,4 +290,25 @@ test("supabase-edge-secret-set: runs end-to-end with a stub supabase binary, sec
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
+});
+
+// Approval-integrity tests: destinationEnvironment ↔ argv consistency
+
+test("cloudflare-secret-put: additionalArgs splices --env into argv when env param is set (closes scope-mismatch with destinationEnvironment)", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("cloudflare-secret-put");
+  // No env → empty extras
+  assert.deepEqual(t.additionalArgs?.({ name: "X" }) ?? [], []);
+  // With env → spliced as ["--env", value]
+  assert.deepEqual(t.additionalArgs?.({ name: "X", env: "staging" }), ["--env", "staging"]);
+  // destinationEnvironment is consistent (same value the human approves)
+  assert.equal(t.destinationEnvironment?.({ name: "X", env: "staging" }), "staging");
+});
+
+test("supabase-edge-secret-set: additionalArgs splices --project-ref into argv when project_ref param is set (closes scope-mismatch)", () => {
+  const r = new TemplateRegistry();
+  const t = r.get("supabase-edge-secret-set");
+  assert.deepEqual(t.additionalArgs?.({ name: "X" }) ?? [], []);
+  assert.deepEqual(t.additionalArgs?.({ name: "X", project_ref: "abcdefghijklmnop" }), ["--project-ref", "abcdefghijklmnop"]);
+  assert.equal(t.destinationEnvironment?.({ name: "X", project_ref: "abcdefghijklmnop" }), "abcdefghijklmnop");
 });

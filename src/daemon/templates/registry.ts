@@ -22,6 +22,16 @@ export interface TemplateDefinition {
    * "tmp_env_file_0600"; ignored otherwise.
    */
   value_arg_template?: string | null;
+  /**
+   * Optional callback that returns ADDITIONAL argv flags derived from params
+   * (e.g. `["--env", env]` if `env` is set). Called after the static args[]
+   * are expanded and BEFORE the tmp_env_file_0600 value-arg is appended. The
+   * returned array is spliced into the child argv verbatim. Used by
+   * templates with optional scope params (env / project_ref) so the
+   * destinationEnvironment shown to the human in the approval UI cannot
+   * diverge from what the child process actually writes to.
+   */
+  additionalArgs?: (params: Record<string, string>) => string[];
 }
 
 export class TemplateRegistry {
