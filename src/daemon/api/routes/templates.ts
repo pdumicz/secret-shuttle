@@ -4,7 +4,7 @@ import { requireApproval } from "../../approvals/require-approval.js";
 import type { ApprovalBinding } from "../../approvals/store.js";
 import { resolveBinary } from "../../templates/resolve-binary.js";
 import { runTemplate } from "../../templates/run.js";
-import { TemplateRegistry } from "../../templates/registry.js";
+import { TemplateRegistry, assertNoPaddedParams } from "../../templates/registry.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
@@ -41,6 +41,12 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
       const tpl = registry.get(b.template_id);
       const secret = await services.vault.getSecret(b.ref);
       assertSecretActionAllowed(secret, "use_as_stdin");
+
+      // Reject padded params before everything else — before validateParams,
+      // before destinationEnvironment, before the approval binding is built.
+      // Padding creates a raw-vs-trimmed divergence that can bypass the
+      // production-approval check (see assertNoPaddedParams in registry.ts).
+      assertNoPaddedParams(b.params ?? {});
 
       // Validate template params before creating the approval grant so a human
       // is never prompted for a structurally invalid request.

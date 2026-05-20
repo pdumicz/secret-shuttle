@@ -536,6 +536,27 @@ test("template run vercel-env-add with invalid environment returns 400 invalid_t
   });
 });
 
+test("POST /v1/templates/run rejects padded params with invalid_template_param BEFORE creating an approval", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "STRIPE_KEY", environment: "development", kind: "random_32_bytes",
+    });
+    const approvalsBefore = (ctx.services.approvals as unknown as { grants: Map<string, unknown> }).grants.size;
+    const r = await call(ctx, "POST", "/v1/templates/run", {
+      template_id: "cloudflare-secret-put",
+      ref: "ss://local/dev/STRIPE_KEY",
+      params: { name: "STRIPE_KEY", env: " production " },
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "invalid_template_param");
+    // No approval should have been created for a structurally invalid request.
+    const approvalsAfter = (ctx.services.approvals as unknown as { grants: Map<string, unknown> }).grants.size;
+    assert.equal(approvalsAfter, approvalsBefore, "no approval should be created for a padded-param request");
+  });
+});
+
 // Fix 1 tests — blind end requires human approval
 
 test("blind end requires human approval and is not agent-controlled", async () => {

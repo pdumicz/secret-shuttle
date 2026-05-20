@@ -3,6 +3,7 @@ import { buildChildEnv } from "../safe-env.js";
 import { ShuttleError } from "../../shared/errors.js";
 import { assertSafeExecutable } from "../safe-executable.js";
 import type { TemplateDefinition } from "./registry.js";
+import { assertNoPaddedParams } from "./registry.js";
 import { writeSecretEnvFile, unlinkSecretEnvFile } from "./tmp-env-file.js";
 
 export interface TemplateRunInput {
@@ -32,6 +33,13 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
       throw new ShuttleError("missing_param", `Missing required parameter: ${p}`);
     }
   }
+
+  // Reject padded params (closes the production-approval-bypass class).
+  // Called here as defense in depth — the templates route ALSO calls this
+  // before destinationEnvironment / binding / approval, so the approval UI
+  // never sees the misleading padded destination. This call is the runtime
+  // backstop in case runTemplate is invoked outside the route.
+  assertNoPaddedParams(input.params);
 
   // Defense-in-depth: freeze params so a buggy/malicious template callback
   // (validateParams, destinationEnvironment, additionalArgs) cannot mutate

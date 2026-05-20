@@ -312,6 +312,42 @@ test("runTemplate freezes input.params — a callback that mutates throws (TypeE
   }
 });
 
+test("runTemplate rejects padded params at the function boundary (defense in depth — closes production-approval bypass class)", async () => {
+  const { runTemplate } = await import("./run.js");
+  await assert.rejects(
+    runTemplate({
+      template: {
+        id: "stub", description: "", binary: process.execPath,
+        args: ["-e", "0"],
+        secret_delivery: "stdin",
+        required_params: ["name"],
+        requires_approval_when_production: false,
+      },
+      params: { name: "STRIPE_KEY", env: " production " },
+      secret: "x",
+    }),
+    (e: unknown) => e instanceof Error && (e as { code?: string }).code === "invalid_template_param",
+  );
+});
+
+test("runTemplate rejects whitespace-only params (closes the '   ' default-scope bypass)", async () => {
+  const { runTemplate } = await import("./run.js");
+  await assert.rejects(
+    runTemplate({
+      template: {
+        id: "stub", description: "", binary: process.execPath,
+        args: ["-e", "0"],
+        secret_delivery: "stdin",
+        required_params: ["name"],
+        requires_approval_when_production: false,
+      },
+      params: { name: "STRIPE_KEY", env: "   " },
+      secret: "x",
+    }),
+    (e: unknown) => e instanceof Error && (e as { code?: string }).code === "invalid_template_param",
+  );
+});
+
 test("runTemplate (tmp_env_file_0600): additionalArgs are spliced BEFORE the value_arg (supabase-like)", async () => {
   const { mkdtemp, readFile, rm, writeFile, chmod, mkdir } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");

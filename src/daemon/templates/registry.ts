@@ -53,3 +53,32 @@ export class TemplateRegistry {
     return t;
   }
 }
+
+/**
+ * Reject any param whose value has leading or trailing whitespace. Padded
+ * values create a divergence between validateParams / additionalArgs (which
+ * trim internally) and destinationEnvironment (which uses the raw value),
+ * enabling a production-approval bypass: e.g. env=" production " would
+ * execute `wrangler ... --env production` (a production write) while
+ * destinationEnvironment returns " production " (≠ "production"), bypassing
+ * the route's production-approval elevation. Whitespace-only values
+ * (e.g. "   ") similarly diverge: argv is empty (default scope) while
+ * destinationEnvironment returns "   " (a non-empty non-"production" string).
+ *
+ * Called from BOTH the templates route (before destinationEnvironment is
+ * called for the approval binding) AND runTemplate (defense in depth, in
+ * case runTemplate is invoked outside the route).
+ *
+ * Throws ShuttleError("invalid_template_param", ...) on the first padded
+ * param found.
+ */
+export function assertNoPaddedParams(params: Readonly<Record<string, string>>): void {
+  for (const [k, v] of Object.entries(params)) {
+    if (typeof v === "string" && v !== v.trim()) {
+      throw new ShuttleError(
+        "invalid_template_param",
+        `Parameter ${k} must not contain leading or trailing whitespace; padding creates a divergence between argv and destinationEnvironment that can bypass production-approval elevation.`,
+      );
+    }
+  }
+}

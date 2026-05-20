@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
-import { TemplateRegistry } from "./registry.js";
+import { TemplateRegistry, assertNoPaddedParams } from "./registry.js";
 import { resolveBinary } from "./resolve-binary.js";
 
 // validateParams tests for vercel-env-add
@@ -311,4 +311,40 @@ test("supabase-edge-secret-set: additionalArgs splices --project-ref into argv w
   assert.deepEqual(t.additionalArgs?.({ name: "X" }) ?? [], []);
   assert.deepEqual(t.additionalArgs?.({ name: "X", project_ref: "abcdefghijklmnop" }), ["--project-ref", "abcdefghijklmnop"]);
   assert.equal(t.destinationEnvironment?.({ name: "X", project_ref: "abcdefghijklmnop" }), "abcdefghijklmnop");
+});
+
+// assertNoPaddedParams tests
+
+test("assertNoPaddedParams accepts unpadded values and an empty params object", () => {
+  assert.doesNotThrow(() => assertNoPaddedParams({}));
+  assert.doesNotThrow(() => assertNoPaddedParams({ name: "X", env: "staging" }));
+  assert.doesNotThrow(() => assertNoPaddedParams({ name: "X", env: "" })); // empty string is unpadded
+});
+
+test("assertNoPaddedParams rejects a value with leading whitespace (invalid_template_param)", () => {
+  assert.throws(
+    () => assertNoPaddedParams({ env: " staging" }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("assertNoPaddedParams rejects a value with trailing whitespace", () => {
+  assert.throws(
+    () => assertNoPaddedParams({ project_ref: "abc " }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("assertNoPaddedParams rejects whitespace-only values (closes the '   ' bypass)", () => {
+  assert.throws(
+    () => assertNoPaddedParams({ env: "   " }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
+});
+
+test("assertNoPaddedParams rejects ' production ' specifically (the user's PoC for production-approval bypass)", () => {
+  assert.throws(
+    () => assertNoPaddedParams({ env: " production " }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "invalid_template_param",
+  );
 });
