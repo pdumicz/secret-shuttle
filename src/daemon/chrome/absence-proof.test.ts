@@ -495,3 +495,69 @@ test("absence scan hits when the needle itself contains escapable HTML chars and
     "innerHTML serialization must NOT contain the raw needle — this is the bug class");
   assert.deepEqual(make(doc)(NEEDLE), { found: true, inconclusive: false });
 });
+
+// --- §6.1 round-8: NON-ALLOWLISTED ATTRIBUTE fail-OPEN regression coverage --
+// BASELINE_SCAN_FN folds EVERY attribute via getAttributeNames()/getAttribute()
+// into the daemon-only `observable` blob. ABSENCE_SCAN_FN previously only
+// scanned an allowlist of attribute names (value/placeholder/title/aria-label/
+// data-*) — so a captured value lingering in any non-allowlisted attribute
+// (x-secret/custom-foo/etc.) post-hide would pass absence → auto-resume → the
+// resumed agent could read it via getAttribute('x-secret'). Round-8 closes
+// the asymmetry: ABSENCE scans EVERY attribute, aligning with BASELINE.
+// Strictly more {hit:true} paths, strictly fewer {found:false} outcomes —
+// monotonic toward fail-closed; cannot regress a previously-clean page.
+
+// (p) THE FAIL-OPEN REGRESSION GUARD: secret in a NON-ALLOWLISTED attribute
+// (x-secret) on a light-DOM element. Before the round-8 fix the allowlist
+// skipped this attribute and ABSENCE returned {found:false}. After, every
+// attribute is scanned and {found:true}.
+test("absence scan hits on a NON-ALLOWLISTED attribute (x-secret) on a light-DOM element [regression: fail-OPEN, §6.1 round-8 symmetric with BASELINE all-attribute fold]", () => {
+  const doc = richDoc({
+    children: [{
+      tagName: "DIV",
+      attributes: [{ name: "x-secret", value: "lingering sek value" }],
+      children: [],
+      shadowRoot: null,
+    }],
+  });
+  assert.deepEqual(runScan(doc), { found: true, inconclusive: false });
+});
+
+// (q) THE FAIL-OPEN REGRESSION GUARD (shadow + escapable chars): secret with
+// escapable HTML chars (`&`, `<`) in a NON-ALLOWLISTED attribute (custom-attr)
+// on an open-shadow-root child. Before round-8, allowlist skipped the attribute
+// AND shadowRoot.innerHTML HTML-escapes the attribute value (so the union of
+// textContent/innerHTML in the round-7 shadow gate also misses the raw needle).
+// After, the per-element attribute walk inside the shadow descendant catches
+// it via getAttribute()/.value (raw, unescaped).
+test("absence scan hits when an open-shadow child has a captured value with escapable chars in a non-allowlisted attribute [§6.1 round-8 symmetric with BASELINE]", () => {
+  const NEEDLE = "tok&<v";
+  const ESCAPED = "tok&amp;&lt;v"; // how innerHTML would serialize attribute
+  const make = new Function("document", `return (${ABSENCE_SCAN_FN});`) as
+    (d: unknown) => (s: string) => { found?: boolean; inconclusive?: boolean };
+  const doc = richDoc({
+    children: [{
+      tagName: "MY-HOST",
+      attributes: null,
+      children: [],
+      shadowRoot: {
+        // Round-7 shadow gate folds BOTH textContent and innerHTML. Both are
+        // HTML-escaped here so neither contains the raw needle — proving the
+        // per-element attribute walk is what catches this case.
+        textContent: "",
+        innerHTML: `<div custom-attr="${ESCAPED}"></div>`,
+        children: [{
+          tagName: "DIV",
+          attributes: [{ name: "custom-attr", value: NEEDLE }],
+          children: [],
+          shadowRoot: null,
+        }],
+      },
+    }],
+  });
+  // Sanity: confirm both shadow-gate surfaces miss the raw needle (so any
+  // {found:true} must come from the per-element attribute walk).
+  assert.equal(`<div custom-attr="${ESCAPED}"></div>`.includes(NEEDLE), false,
+    "innerHTML serialization HTML-escapes attribute values — must not contain raw needle");
+  assert.deepEqual(make(doc)(NEEDLE), { found: true, inconclusive: false });
+});

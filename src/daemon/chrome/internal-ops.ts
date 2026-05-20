@@ -319,12 +319,17 @@ export const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
         if (!el) continue;
         if (++n > 200000) return { inconclusive:true };
         if (el.attributes) {
-          for (const a of el.attributes) {
-            const nm = a.name;
-            if (nm === "value" || nm === "placeholder" || nm === "title" || nm === "aria-label" || nm.indexOf("data-") === 0) {
+          // §6.1 round-8: scan EVERY attribute value, not just an allowlist. Aligns
+          // ABSENCE with BASELINE_SCAN_FN's all-attribute fold (no asymmetry: the
+          // captured value lingering in any non-allowlisted attribute like x-secret/
+          // custom-foo must fail the absence proof, else auto-resume would let the
+          // resumed agent read it via getAttribute). Strictly more {hit:true} paths,
+          // never fewer (monotonic toward fail-closed). Any throw → inconclusive.
+          try {
+            for (const a of el.attributes) {
               if (hit(a.value)) return { hit:true };
             }
-          }
+          } catch (e) { return { inconclusive:true }; }
         }
         if ((el.tagName === "INPUT" || el.tagName === "TEXTAREA") && hit(el.value)) return { hit:true };
         try { if (el.isContentEditable && hit(el.innerText)) return { hit:true }; } catch (e) {}
