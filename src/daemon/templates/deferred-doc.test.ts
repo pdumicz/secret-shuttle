@@ -23,6 +23,14 @@ test("docs/templates-deferred.md does NOT misrepresent any deferred template as 
   for (const shipped of [
     "vercel-env-add", "github-actions-secret-set", "cloudflare-secret-put", "supabase-edge-secret-set",
   ]) {
-    assert.equal(md.includes(shipped), false, `${shipped} is shipped — it does not belong in templates-deferred.md`);
+    // Match the shipped id only when it appears as a standalone template id
+    // (wrapped in backticks as a heading or inline code), not as a prefix of a
+    // longer deferred-variant name such as github-actions-env-secret-set or
+    // github-actions-org-secret-set.
+    assert.doesNotMatch(
+      md,
+      new RegExp("`" + shipped + "`"),
+      `${shipped} is shipped — it does not belong in templates-deferred.md`,
+    );
   }
 });

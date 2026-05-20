@@ -12,8 +12,8 @@ export interface TemplateDefinition {
   secret_delivery: "stdin" | "tmp_env_file_0600";
   required_params: string[];
   requires_approval_when_production: boolean;
-  validateParams?: (params: Record<string, string>) => void;
-  destinationEnvironment?: (params: Record<string, string>) => string;
+  validateParams?: (params: Readonly<Record<string, string>>) => void;
+  destinationEnvironment?: (params: Readonly<Record<string, string>>) => string;
   /**
    * Only consumed when secret_delivery === "tmp_env_file_0600". Names the argv
    * slot for the daemon-written 0600 env-file path. The string is param-expanded
@@ -31,7 +31,7 @@ export interface TemplateDefinition {
    * destinationEnvironment shown to the human in the approval UI cannot
    * diverge from what the child process actually writes to.
    */
-  additionalArgs?: (params: Record<string, string>) => string[];
+  additionalArgs?: (params: Readonly<Record<string, string>>) => string[];
 }
 
 export class TemplateRegistry {

@@ -7,6 +7,18 @@ and is unsafe by construction. This document records templates we have
 considered and **deferred**, with the specific reason and the gate that would
 re-open consideration.
 
+## `github-actions-env-secret-set`
+
+**Why deferred:** GitHub Environment-scoped secrets (`gh secret set <name> --env <env-name> --repo <owner/repo>`) require a per-scope template variant because the argv shape differs from the repo-scoped variant. Phase 4 ships only the repo-scoped template (github-actions-secret-set); mixing the `--env` flag into a single optional-params template would mean the human-approved destination (`destinationEnvironment(params)`) could diverge from the actual argv unless the flag is wired through. The fix-template-scope-args commit (post-Phase-4) chose **rejection** over conditional-args composition for github specifically, because `--env` requires `--repo` while `--org` excludes `--repo` — a single static `args[]` cannot safely express both. A dedicated Environment-scoped template will ship with a fixed argv vector once the per-variant [P2b] gate is verified against current `gh`.
+
+**Re-open gate:** [P2b] verifies `gh secret set --env <env-name> --repo <owner/repo>` works on current `gh` releases (it should — this is documented behavior).
+
+## `github-actions-org-secret-set`
+
+**Why deferred:** GitHub Organization-scoped secrets (`gh secret set <name> --org <org-name> [--visibility ...]`) also require a per-scope template variant. Same rationale as `github-actions-env-secret-set` (mutually-exclusive argv shape vs the repo-scoped default).
+
+**Re-open gate:** [P2b] verifies `gh secret set --org <org-name>` works on current `gh` releases and decides whether the visibility flag (`--visibility all|private|selected`) should be a required-param.
+
 ## `railway-variable-set`
 
 **Why deferred:** the Railway CLI (`railway variables --set KEY=VALUE`) forces

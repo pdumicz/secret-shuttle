@@ -282,6 +282,36 @@ test("runTemplate (stdin): additionalArgs are spliced into the child argv (cloud
   }
 });
 
+test("runTemplate freezes input.params — a callback that mutates throws (TypeError in strict mode)", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const pathModule = await import("node:path");
+  const tmp = await mkdtemp(pathModule.join(tmpdir(), "ss-rt-freeze-"));
+  try {
+    const { runTemplate } = await import("./run.js");
+    let captured: unknown = undefined;
+    await assert.rejects(
+      runTemplate({
+        template: {
+          id: "stub-mut", description: "", binary: process.execPath,
+          args: ["-e", "0"],
+          secret_delivery: "stdin",
+          required_params: ["name"],
+          requires_approval_when_production: false,
+          // Buggy callback tries to mutate params; freeze must turn this into a throw.
+          validateParams: (p) => { try { (p as Record<string, string>)["name"] = "MUTATED"; } catch (e) { captured = e; throw e; } },
+        },
+        params: { name: "STRIPE_KEY" },
+        secret: "x",
+      }),
+      (e: unknown) => e instanceof TypeError,
+    );
+    assert.ok(captured instanceof TypeError, "mutation must throw TypeError under strict mode (frozen object)");
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test("runTemplate (tmp_env_file_0600): additionalArgs are spliced BEFORE the value_arg (supabase-like)", async () => {
   const { mkdtemp, readFile, rm, writeFile, chmod, mkdir } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");

@@ -1,6 +1,9 @@
 import { ShuttleError } from "../../../shared/errors.js";
 import type { TemplateDefinition } from "../registry.js";
 
+const ENV_ORG_REJECTION =
+  "github-actions-secret-set only supports repo-scoped secrets. For environment-scoped (--env) or org-scoped (--org) secrets, use the dedicated templates (planned follow-up); do not pass env/org to this template.";
+
 // gh secret set <name> --repo <owner/repo>   (value from stdin)
 //
 // Spec §9 names this template. The [P2b] gate (Task 11) verifies the argv
@@ -48,10 +51,7 @@ export const githubActionsSecretSet: TemplateDefinition = {
       );
     }
     if (env !== "") {
-      throw new ShuttleError(
-        "invalid_template_param",
-        "github-actions-secret-set only supports repo-scoped secrets. For environment-scoped (--env) or org-scoped (--org) secrets, use the dedicated templates (planned follow-up); do not pass env/org to this template.",
-      );
+      throw new ShuttleError("invalid_template_param", ENV_ORG_REJECTION);
     }
     if (org !== "" && !/^[A-Za-z0-9._-]{1,100}$/.test(org)) {
       throw new ShuttleError(
@@ -60,10 +60,7 @@ export const githubActionsSecretSet: TemplateDefinition = {
       );
     }
     if (org !== "") {
-      throw new ShuttleError(
-        "invalid_template_param",
-        "github-actions-secret-set only supports repo-scoped secrets. For environment-scoped (--env) or org-scoped (--org) secrets, use the dedicated templates (planned follow-up); do not pass env/org to this template.",
-      );
+      throw new ShuttleError("invalid_template_param", ENV_ORG_REJECTION);
     }
   },
 };

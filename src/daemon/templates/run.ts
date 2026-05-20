@@ -33,6 +33,15 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
     }
   }
 
+  // Defense-in-depth: freeze params so a buggy/malicious template callback
+  // (validateParams, destinationEnvironment, additionalArgs) cannot mutate
+  // the object and create a divergence between what the human approved
+  // (destinationEnvironment) and what the child actually receives (argv /
+  // env-file NAME). The whole point of this layer is that the human's
+  // consent matches the executed action. Object.freeze in ESM throws on
+  // mutation attempts (strict mode), so this is the catch-mutation primitive.
+  Object.freeze(input.params);
+
   input.template.validateParams?.(input.params);
 
   // Re-verify the hash to close the TOCTOU window between approval and exec.
