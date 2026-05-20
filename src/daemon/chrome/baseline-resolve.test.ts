@@ -46,6 +46,27 @@ interface El {
    * guard short-circuits cleanly — strictly monotonic).
    */
   __shadow?: { children: El[]; textContent: string; innerHTML?: string };
+  /**
+   * §6.1 round-9: <template>.content is a script-readable DocumentFragment.
+   * Mirrors real DOM: `template.content.textContent` (concatenated subtree
+   * text — raw bytes, like documentElement.textContent), `template.content
+   * .children` (element children, walked by the inert-DFS branch), and
+   * `template.content` itself (existence-checked by the BASELINE/ABSENCE
+   * template block). The template ELEMENT's `innerHTML` (also a property on
+   * the host element, distinct from `content.innerHTML`) serializes the
+   * fragment — that is what BASELINE_SCAN_FN reads alongside content
+   * .textContent. Omitted → no template content (closed/no fragment),
+   * preserving every pre-existing test.
+   */
+  content?: { textContent?: string; children?: El[]; innerHTML?: string };
+  /**
+   * §6.1 round-9: a template's `element.innerHTML` IS the serialized content
+   * fragment (real DOM behavior). Defined directly on the template element
+   * so BASELINE_SCAN_FN's `el.innerHTML` read sees the serialization. For
+   * non-template elements this stays undefined — the fn's
+   * `typeof === "string"` guard short-circuits.
+   */
+  innerHTML?: string;
 }
 // Minimal outerHTML serializer for the shim: <TAG attr="v">children/text</TAG>
 function serializeOuterHTML(e: El): string {
@@ -754,4 +775,108 @@ test("BASELINE_SCAN_FN: a shadow-text secret containing escapable HTML chars (& 
   assert.ok(typeof b.observable === "string", "observable must be a string");
   assert.ok(b.observable.includes(SECRET),
     "observable must contain the RAW shadow text-node secret (folded shadowRoot.textContent) — innerHTML alone HTML-escapes and misses it");
+});
+
+// ---- NEW §6.1 round-9: <template>.content fold (symmetric with shadow) ------
+// <template> elements have a `.content` DocumentFragment holding parsed-but-
+// inert children. It IS script-readable: `template.content.querySelector(...)
+// .getAttribute(...)`, `template.content.firstChild.data` (comments), etc.
+// Before round-9, BASELINE_SCAN_FN's DFS NEVER entered the template content
+// (template.children is empty; the fragment's children live in `.content
+// .children`). `root.outerHTML` serializes template content but HTML-escapes
+// text, so `outerHTML.includes(rawSecret)` misses any value containing
+// `& < > " '`. Symmetric with the shadow rounds: fold BOTH raw `content
+// .textContent` AND the template's `innerHTML` (a property on the host
+// element that serializes the fragment), and traverse content descendants
+// under an `inTemplate` flag so their readableValue + every attribute land
+// in the observable blob — but they are NEVER capture candidates (template
+// content is inert / never rendered / never interactive). Strictly additive
+// / monotonic / fail-closed; cannot regress a legit capture.
+
+test("BASELINE_SCAN_FN: a captured value in a <template>.content descendant attribute (e.g., <template><span x-secret=\"tok&<v\"></span></template>) is folded into observable via the per-element attribute scan (§6.1 round-9 symmetric with shadow)", () => {
+  // The inner <span>'s `x-secret` attribute holds a value with escapable HTML
+  // chars (`&`, `<`). Before round-9 the DFS never entered template.content,
+  // and root.outerHTML's HTML-encoded serialization misses the RAW needle.
+  // After: the DFS pushes content.children with inTemplate=true; the per-
+  // element attribute walk folds every attribute value into observable RAW.
+  const SECRET = "tok&<v";
+  const inner = el("span", { __attrs: { "x-secret": SECRET } });
+  const tpl = el("template", {
+    content: { textContent: "", children: [inner], innerHTML: `<span x-secret="tok&amp;&lt;v"></span>` },
+    innerHTML: `<span x-secret="tok&amp;&lt;v"></span>`, // template's element.innerHTML serializes the fragment (HTML-encoded)
+  });
+  const bRoot = el("div", { children: [tpl, el("input", { type: "text", value: "" })] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: { key: string; safety: string; fp: string }[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  // Sanity: template's element.innerHTML HTML-encodes — the RAW needle is NOT in it,
+  // so any hit must come from the per-element attribute walk on the inert descendant.
+  assert.equal(`<span x-secret="tok&amp;&lt;v"></span>`.includes(SECRET), false,
+    "HTML-encoded template innerHTML must NOT contain the raw needle — proves attribute walk is the path");
+  assert.ok(b.observable.includes(SECRET),
+    "observable must contain the RAW captured value inside the template-content descendant attribute (§6.1 round-9)");
+});
+
+test("BASELINE_SCAN_FN: a captured value in a <template>.content comment is folded into observable via template.innerHTML (§6.1 round-9)", () => {
+  // The secret lives only as a comment inside the template's content
+  // fragment. content.textContent excludes comments; the template ELEMENT's
+  // innerHTML (the fragment's serialization) includes comments verbatim
+  // (no HTML escaping inside comments). Before round-9 BASELINE never read
+  // template.innerHTML or traversed template content → observable missed it
+  // → §6.1 reject misses → fail-OPEN. After: template.innerHTML fold catches.
+  const SECRET = "whsec_TEMPLATE_COMMENT_NEEDLE_round9";
+  const tpl = el("template", {
+    content: { textContent: "", children: [], innerHTML: `<!-- ${SECRET} -->` },
+    innerHTML: `<!-- ${SECRET} -->`,
+  });
+  const bRoot = el("div", { children: [tpl, el("input", { type: "text", value: "" })] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  assert.ok(b.observable.includes(SECRET),
+    "observable must contain the template-content comment secret (folded template.innerHTML)");
+});
+
+test("BASELINE_SCAN_FN: a captured value as plain text in <template>.content (with escapable chars) is folded into observable via raw content.textContent (§6.1 round-9)", () => {
+  // The secret contains all four canonical escapable HTML chars. The template
+  // ELEMENT's innerHTML HTML-encodes them — so `innerHTML.includes(SECRET)` is
+  // FALSE. Only the RAW content.textContent restores raw-byte coverage. This
+  // exactly mirrors the round-7 shadow text-node case — symmetric.
+  const SECRET = "whsec_T&P<L\"E"; // contains all canonical escapable chars
+  const ESCAPED = "whsec_T&amp;P&lt;L&quot;E"; // how innerHTML serializes the text node
+  const tpl = el("template", {
+    content: { textContent: SECRET, children: [], innerHTML: ESCAPED },
+    innerHTML: ESCAPED,
+  });
+  const bRoot = el("div", { children: [tpl, el("input", { type: "text", value: "" })] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: unknown[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  assert.equal(ESCAPED.includes(SECRET), false,
+    "HTML-encoded template innerHTML must NOT contain the raw needle — proves content.textContent is the path");
+  assert.ok(b.observable.includes(SECRET),
+    "observable must contain the RAW template-content text-node secret (folded content.textContent) — innerHTML alone HTML-escapes and misses it");
+});
+
+test("BASELINE_SCAN_FN: <template>.content descendant elements are NOT capture candidates (inert; inTemplate flag, §6.1 round-9)", () => {
+  // Template content is inert: never rendered, never focusable, never interactive.
+  // The fix MUST add the descendants to the observable blob (so a captured value
+  // lingering there fails the §6.1 reject) without adding them to `entries` (so
+  // the post-reveal exactly-one-transition gate never picks an inert element as
+  // the chosen field). The inTemplate flag enforces this.
+  const INERT_TEXT = "an inert template span value";
+  const innerSpan = el("span", { __id: "inert-span", textContent: INERT_TEXT });
+  const tpl = el("template", {
+    __id: "tpl-host",
+    content: { textContent: INERT_TEXT, children: [innerSpan], innerHTML: `<span>${INERT_TEXT}</span>` },
+    innerHTML: `<span>${INERT_TEXT}</span>`,
+  });
+  const bRoot = el("div", { children: [tpl] });
+  const b = makeBaseline(bRoot)(bRoot) as { ok: boolean; entries: { key: string; safety: string; fp: string }[]; readableFps: string[]; observable: string };
+  assert.equal(b.ok, true, "ok must be true");
+  // observable MUST include the inert text (so §6.1 reject can fail-closed against it).
+  assert.ok(b.observable.includes(INERT_TEXT),
+    "observable must contain the inert template-content descendant text (folded)");
+  // NO entry should carry a path segment ".t" (template-content traversal): inert
+  // descendants are walked for byte-folding only, never added as candidates.
+  const templateEntries = b.entries.filter((e) => e.key.includes(".t"));
+  assert.equal(templateEntries.length, 0,
+    "no candidate may come from a template-content descendant — they are inert (inTemplate=true)");
 });

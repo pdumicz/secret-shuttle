@@ -201,7 +201,23 @@ interface ShimNode {
   // Pre-existing round-5 tests pass `innerHTML` mirroring `textContent` (real
   // DOM: a plain text node serializes to its data in innerHTML).
   shadowRoot?: { textContent?: string; innerHTML?: string; children: ShimNode[] } | null;
-  content?: { textContent?: string } | null;
+  // §6.1 round-9: <template>.content is a script-readable DocumentFragment.
+  // Pre-round-9 the shim only modeled `.textContent` (concatenated subtree
+  // text). Round-9 closes the BOTH-gates fail-OPEN where a captured value
+  // lived in a template-content descendant attribute (DFS never entered) or
+  // a template-content comment (textContent excludes comments). Symmetric
+  // with the shadow shape: `.textContent` (raw subtree text), `.innerHTML`
+  // (serialized markup — includes comments at any depth), and `.children`
+  // (element children, walked for per-element attribute/value/text checks).
+  // Pre-existing test (i) only set `.textContent`; the new optional fields
+  // default to undefined → fn's `typeof === "string"` guard short-circuits.
+  content?: { textContent?: string; innerHTML?: string; children?: ShimNode[] } | null;
+  // §6.1 round-9: the template ELEMENT's `innerHTML` (a property on the host
+  // element distinct from `content.innerHTML`) serializes the fragment. Real
+  // DOM: <template>.innerHTML === the serialized content. ABSENCE_SCAN_FN
+  // reads `el.innerHTML` on the template host alongside `el.content
+  // .textContent`. Non-template ShimNodes leave this undefined.
+  innerHTML?: string;
   children?: ShimNode[];
 }
 interface RichOpts {
@@ -560,4 +576,77 @@ test("absence scan hits when an open-shadow child has a captured value with esca
   assert.equal(`<div custom-attr="${ESCAPED}"></div>`.includes(NEEDLE), false,
     "innerHTML serialization HTML-escapes attribute values — must not contain raw needle");
   assert.deepEqual(make(doc)(NEEDLE), { found: true, inconclusive: false });
+});
+
+// --- §6.1 round-9: <template>.content fail-OPEN regression coverage ---------
+// <template> elements have a `.content` DocumentFragment holding parsed-but-
+// inert children. It IS script-readable (`template.content.querySelector(...)
+// .getAttribute(...)`, `template.content.firstChild.data` for comments).
+// Pre-round-9 ABSENCE_SCAN_FN only checked `template.content.textContent`:
+// textContent EXCLUDES comments AND attribute values. A captured value
+// lingering in a template-content descendant attribute (e.g., x-secret) or
+// a template-content comment would pass absence → auto-resume → resumed
+// agent reads it via template.content.querySelector(...).getAttribute(...).
+// Symmetric with the shadow rounds: check BOTH content.textContent (catches
+// escapable-char text) AND template.innerHTML (catches comments + markup),
+// then push content.children so the per-element attribute + value loops
+// scan every descendant. Strictly more {hit:true} paths — monotonic toward
+// fail-closed; cannot regress a previously-clean page.
+
+// (r) THE FAIL-OPEN REGRESSION GUARD: secret in a NON-ALLOWLISTED attribute
+// on a descendant of <template>.content. Before round-9 the DFS never entered
+// template content → ABSENCE returned {found:false} → fail-OPEN. After: the
+// DFS pushes content.children; the per-element attribute walk catches it.
+test("absence scan hits on a NON-ALLOWLISTED attribute (x-secret) on a <template>.content descendant element [regression: fail-OPEN, §6.1 round-9 symmetric with BASELINE]", () => {
+  const NEEDLE = "tok&<v";
+  const ESCAPED = "tok&amp;&lt;v";
+  const make = new Function("document", `return (${ABSENCE_SCAN_FN});`) as
+    (d: unknown) => (s: string) => { found?: boolean; inconclusive?: boolean };
+  const doc = richDoc({
+    children: [{
+      tagName: "TEMPLATE",
+      attributes: null,
+      children: [],
+      shadowRoot: null,
+      content: {
+        textContent: "",                                                 // excludes attribute values
+        innerHTML: `<span x-secret="${ESCAPED}"></span>`,                // HTML-encodes the attribute value
+        children: [{
+          tagName: "SPAN",
+          attributes: [{ name: "x-secret", value: NEEDLE }],             // RAW, unescaped — caught by per-element attribute walk
+          children: [],
+          shadowRoot: null,
+        }],
+      },
+      innerHTML: `<span x-secret="${ESCAPED}"></span>`,
+    }],
+  });
+  // Sanity: confirm both template-element surfaces miss the raw needle (so any
+  // {found:true} must come from the per-element attribute walk after the DFS push).
+  assert.equal(`<span x-secret="${ESCAPED}"></span>`.includes(NEEDLE), false,
+    "HTML-encoded template.innerHTML must NOT contain the raw needle — proves attribute walk is the path");
+  assert.deepEqual(make(doc)(NEEDLE), { found: true, inconclusive: false });
+});
+
+// (s) THE FAIL-OPEN REGRESSION GUARD: secret as a comment node inside
+// template.content. content.textContent excludes comments — pre-round-9
+// ABSENCE missed it (returned {found:false}). Comments serialize verbatim
+// into the template's innerHTML, so the round-9 fold catches them.
+test("absence scan hits on a comment node inside <template>.content [regression: fail-OPEN, §6.1 round-9 symmetric with shadow-comment]", () => {
+  const NEEDLE = "whsec_TEMPLATE_COMMENT_ABSENCE_round9";
+  const doc = richDoc({
+    children: [{
+      tagName: "TEMPLATE",
+      attributes: null,
+      children: [],
+      shadowRoot: null,
+      content: {
+        textContent: "",                       // excludes comments → round-5 surface misses
+        innerHTML: `<!-- ${NEEDLE} -->`,       // comment serializes verbatim → round-9 catches
+        children: [],
+      },
+      innerHTML: `<!-- ${NEEDLE} -->`,
+    }],
+  });
+  assert.deepEqual(runScan(doc, NEEDLE), { found: true, inconclusive: false });
 });

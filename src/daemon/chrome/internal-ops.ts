@@ -334,7 +334,30 @@ export const ABSENCE_SCAN_FN = `function(secret){ /* __ABSENCE__ */
         if ((el.tagName === "INPUT" || el.tagName === "TEXTAREA") && hit(el.value)) return { hit:true };
         try { if (el.isContentEditable && hit(el.innerText)) return { hit:true }; } catch (e) {}
         if ((el.tagName === "SCRIPT" || el.tagName === "STYLE" || el.tagName === "NOSCRIPT") && hit(el.textContent)) return { hit:true };
-        if (el.tagName === "TEMPLATE") { try { if (el.content && hit(el.content.textContent)) return { hit:true }; } catch (e) { return { inconclusive:true }; } }
+        if (el.tagName === "TEMPLATE" && el.content) {
+          // §6.1 round-9: <template>.content is script-readable and inert.
+          // Check BOTH raw content.textContent (catches escapable-char text)
+          // AND innerHTML (catches comments + markup at any depth) — symmetric
+          // with the shadow block above. Read innerHTML from BOTH the host
+          // element (template.innerHTML === serialized fragment in real DOM)
+          // AND content.innerHTML (DocumentFragment's own serialization) — they
+          // yield the same string in real DOM, but reading both is strictly
+          // monotonic and covers any environment where only one is exposed
+          // (e.g., test shims). Then push content.children so the DFS continues
+          // into the descendants and the R8 per-element all-attribute +
+          // INPUT/TEXTAREA value + contentEditable checks catch any captured
+          // value lingering inside.
+          try {
+            if (hit(el.content.textContent)) return { hit:true };
+            if (hit(el.innerHTML)) return { hit:true };
+            if (hit(el.content.innerHTML)) return { hit:true };
+          } catch (e) { return { inconclusive:true }; }
+          try {
+            if (el.content.children) {
+              for (const c of el.content.children) stack.push(c);
+            }
+          } catch (e) { return { inconclusive:true }; }
+        }
         if (el.shadowRoot) {
           // Open shadow roots are script-readable (incl. by the resumed agent
           // via host.shadowRoot.textContent / host.shadowRoot.innerHTML /
@@ -449,7 +472,7 @@ export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
     if (typeof outerHtml !== "string" || outerHtml.length > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
     var obsParts = [outerHtml];
     var obsLen = outerHtml.length;
-    var entries = [], readableFpsSet = {}, stack = [{ el: root, path: "0", inControl: false }], n = 0;
+    var entries = [], readableFpsSet = {}, stack = [{ el: root, path: "0", inControl: false, inTemplate: false }], n = 0;
     while (stack.length) {
       var cur = stack.pop(); var el = cur.el;
       if (!el || el.nodeType !== 1) continue;
@@ -476,9 +499,13 @@ export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
           }
         }
       } catch (e) { return { ok:false, entries:[], readableFps:[], observable:"" }; }
-      // Part B: an element is a candidate only if NOT inside a control subtree.
+      // Part B: an element is a candidate only if NOT inside a control subtree
+      // AND not inside a <template>.content fragment (§6.1 round-9: template
+      // content is inert / never rendered / never interactive — bytes still
+      // fold into observable for the §6.1 reject, but they can never be the
+      // chosen capture target).
       var selfControl = (kind(el) === "button" || kind(el) === "link" || el.tagName.toLowerCase() === "label");
-      if (!cur.inControl && isCandidate(el)) {
+      if (!cur.inControl && !cur.inTemplate && isCandidate(el)) {
         var safe = isSafeState(el);
         entries.push({ key: cur.path, safety: safe ? "safe" : "readable", fp: h(readableValue(el)) });
       }
@@ -515,9 +542,56 @@ export const BASELINE_SCAN_FN = `function(){ /* __BASELINE__ */
           }
         } catch (e) { return { ok:false, entries:[], readableFps:[], observable:"" }; }
         var sc = el.shadowRoot.children;
-        for (var i = 0; i < sc.length; i++) stack.push({ el: sc[i], path: cur.path + ".s" + i, inControl: childInControl });
+        for (var i = 0; i < sc.length; i++) stack.push({ el: sc[i], path: cur.path + ".s" + i, inControl: childInControl, inTemplate: cur.inTemplate });
       }
-      if (el.children) { for (var j = 0; j < el.children.length; j++) stack.push({ el: el.children[j], path: cur.path + "." + j, inControl: childInControl }); }
+      // §6.1 round-9: <template>.content is a script-readable DocumentFragment
+      // (reachable via template.content.querySelector(...).getAttribute(...),
+      // template.content.textContent, template.content.childNodes[*].data) but
+      // template.children is empty and root.outerHTML HTML-escapes its descendants'
+      // text, so the DFS otherwise misses it. Fold BOTH raw content.textContent
+      // (catches escapable-char text and direct text descendants) AND innerHTML
+      // (catches comments + descendant element markup + attribute names) —
+      // symmetric with the shadow block above. Read innerHTML from BOTH the host
+      // element (template.innerHTML === serialized fragment in real DOM) AND
+      // content.innerHTML (DocumentFragment's own serialization) — they yield the
+      // same string in real DOM, but reading both is strictly monotonic and covers
+      // any environment where only one is exposed (e.g., test shims). Size-bounded
+      // against the same running obsLen; any throw → fail closed.
+      if (el.tagName.toLowerCase() === "template" && el.content) {
+        try {
+          var ttc = el.content.textContent;
+          if (typeof ttc === "string" && ttc !== "") {
+            obsLen += 1 + ttc.length;
+            if (obsLen > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
+            obsParts.push(ttc);
+          }
+          var tih = el.innerHTML;
+          if (typeof tih === "string" && tih !== "") {
+            obsLen += 1 + tih.length;
+            if (obsLen > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
+            obsParts.push(tih);
+          }
+          var tcih = el.content.innerHTML;
+          if (typeof tcih === "string" && tcih !== "") {
+            obsLen += 1 + tcih.length;
+            if (obsLen > OBS_CAP) return { ok:false, entries:[], readableFps:[], observable:"" };
+            obsParts.push(tcih);
+          }
+        } catch (e) { return { ok:false, entries:[], readableFps:[], observable:"" }; }
+        // Push content descendant elements so the per-element loop folds their
+        // readableValue + every attribute into the blob. Mark inTemplate=true so
+        // they're NEVER capture candidates (template content is inert / never
+        // rendered / never interactive).
+        try {
+          var tc2 = el.content.children;
+          if (tc2) {
+            for (var ti = 0; ti < tc2.length; ti++) {
+              stack.push({ el: tc2[ti], path: cur.path + ".t" + ti, inControl: cur.inControl, inTemplate: true });
+            }
+          }
+        } catch (e) { return { ok:false, entries:[], readableFps:[], observable:"" }; }
+      }
+      if (el.children) { for (var j = 0; j < el.children.length; j++) stack.push({ el: el.children[j], path: cur.path + "." + j, inControl: childInControl, inTemplate: cur.inTemplate }); }
     }
     var readableFpsArr = Object.keys(readableFpsSet);
     var observable = obsParts.join("\\x00");
