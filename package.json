@@ -13,7 +13,7 @@
     "!dist/**/*.test.d.ts",
     "!dist/**/*.js.map",
     "!dist/**/*.tsbuildinfo",
-    "skills",
+    "skills/secret-shuttle/SKILL.md",
     "agents",
     "docs",
     "!docs/superpowers/**",
