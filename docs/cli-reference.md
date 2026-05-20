@@ -86,7 +86,7 @@ Returns `{ "matches": true | false, ... }` without printing either value.
 
 ## `secret-shuttle template list`
 
-Lists vetted templates.
+Lists vetted templates. The daemon never executes anything except a registered template; an agent cannot inject argv or stdin around them.
 
 ## `secret-shuttle template run <template-id>`
 
@@ -97,7 +97,16 @@ secret-shuttle template run vercel-env-add \
   --param environment=production
 ```
 
-Built-in templates today: `vercel-env-add`.
+Each template delivers the secret to the provider CLI either via **true stdin** (the value is written to the child's stdin and never appears anywhere else) or via a daemon-owned **`0600` env-file** (the daemon creates `~/.secret-shuttle/tmp/<random>.env` with mode `0600` containing exactly `NAME=VALUE\n`, passes the path as `--env-file <path>`, and unlinks the file in a `finally`; a startup-force + periodic sweep additionally clears anything left by an abnormally-killed prior run). The secret value never appears in the child's argv or env; only the random env-file path appears in argv when `tmp_env_file_0600` delivery is used (the path is non-secret).
+
+Built-in templates today:
+
+- **`vercel-env-add`** — `vercel env add <name> <environment>`. Delivery: **stdin**. Required params: `name=`, `environment=` (one of `production`, `preview`, `development`). `destinationEnvironment` from `environment`.
+- **`github-actions-secret-set`** — `gh secret set <name> --repo <owner/repo>`. Delivery: **stdin**. Required params: `name=`, `repo=` (`owner/repo`). Optional: `env` (a GitHub Environment; carried into the approval UI as the destination), `org`. `destinationEnvironment` is `env` when set, else `repo`.
+- **`cloudflare-secret-put`** — `wrangler secret put <name>`. Delivery: **stdin**. Required params: `name=`. Optional: `env` (Wrangler environment). `destinationEnvironment` is `env` when set, else `production`.
+- **`supabase-edge-secret-set`** — `supabase secrets set --env-file <path>`. Delivery: **`tmp_env_file_0600`** (the Supabase CLI does not accept true stdin portably; `/dev/stdin` is not available on Windows). Required params: `name=`. Optional: `project_ref`. `destinationEnvironment` is `project_ref` when set, else `production`.
+
+Deferred templates (`railway-variable-set`, `netlify-env-set`, `clerk-env-set`) and the reopen criteria are documented in [docs/templates-deferred.md](./templates-deferred.md).
 
 ## `secret-shuttle browser start`
 
