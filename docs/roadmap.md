@@ -16,7 +16,7 @@ Daemon-owned vault key (passphrase + scrypt envelope), one-shot context-bound ap
 
 ## V4 — Platform Helpers
 
-Stripe, Supabase, Clerk, GitHub Actions, Cloudflare, Railway adapters as additional templates and approval flows.
+Stripe, Supabase, Clerk, GitHub Actions, Cloudflare, Railway adapters as additional templates and approval flows. Templates ship **only** when the provider CLI accepts the secret via true stdin or a `0600` daemon-written env-file; templates that would force the secret onto argv are recorded in [docs/templates-deferred.md](./templates-deferred.md) with the reopen criteria.
 
 ## V5 — Integrations
 
