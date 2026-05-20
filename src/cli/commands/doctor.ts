@@ -35,7 +35,23 @@ export function formatDoctorText(report: DoctorReport): string {
     // (defensive: an older daemon predates the agentic_browser block).
     const ab = (health.agentic_browser as Record<string, unknown> | undefined) ?? undefined;
     const available = ab !== undefined && ab.available === true;
-    lines.push(`agentic flows: ${available ? "available" : "unavailable (start browser)"}`);
+    if (available) {
+      lines.push(`agentic flows: available`);
+    } else {
+      // Differentiate the cause when the agentic_browser block is present.
+      // If the field is absent (older daemon), fall back to the generic advice.
+      let advice: string;
+      if (ab !== undefined) {
+        const browserStarted = ab.browser_started === true;
+        const proxyActive = ab.proxy_active === true;
+        if (!browserStarted) advice = "start browser";
+        else if (!proxyActive) advice = "restart browser (proxy down)";
+        else advice = "unavailable";
+      } else {
+        advice = "start browser";
+      }
+      lines.push(`agentic flows: unavailable (${advice})`);
+    }
   }
   return lines.join("\n") + "\n";
 }

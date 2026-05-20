@@ -73,3 +73,25 @@ test("formatDoctorText omits the agentic-flows line when health is null (daemon 
   });
   assert.doesNotMatch(out, /agentic flows:/);
 });
+
+test("formatDoctorText reports 'restart browser (proxy down)' when browser is started but proxy is inactive", () => {
+  const out = formatDoctorText({
+    daemon_reachable: true,
+    daemon_error: null,
+    socket_file_mode: "0600",
+    socket_file_mode_ok: true,
+    health: {
+      ...baseHealth,
+      browser_started: true,
+      proxy_active: false,
+      agentic_browser: {
+        available: false,
+        browser_started: true,
+        proxy_active: false,
+        handles_supported: true,
+        marks_active: 0,
+      },
+    },
+  });
+  assert.match(out, /agentic flows:\s+unavailable \(restart browser \(proxy down\)\)/);
+});
