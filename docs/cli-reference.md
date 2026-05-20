@@ -133,3 +133,24 @@ Metadata-only views, scoped by `--env` / `--source` for `list`.
 ## `secret-shuttle use-as-stdin`
 
 Refused in Secure Mode. Returns error `removed_in_secure_mode`. Use `template run` instead.
+
+## `secret-shuttle doctor`
+
+Reports whether the daemon, vault, browser, policy, and local files are in a safe state. Text mode prints labelled lines; `--json` emits machine-readable JSON wrapping the full `/v1/health` response under `health`.
+
+The `agentic flows:` line in the text output reports `available` when the daemon's browser is started AND the CDP proxy is active AND the daemon build supports handles (always true after Phases 1–3). When that line is `unavailable (start browser)`, run `secret-shuttle browser start` to enable the agentic browser flows (`inject-submit`, `reveal-capture`). The same flag is exposed under `health.agentic_browser.available` in `--json` mode.
+
+## `secret-shuttle agent install <claude|codex|cursor|copilot>`
+
+Installs the canonical Secret Shuttle skill into the project's current working directory. Per target:
+
+- `claude` → `.claude/skills/secret-shuttle/SKILL.md` (wholesale overwrite — Secret Shuttle owns this file).
+- `codex` → `AGENTS.md` (marker-managed snippet between `<!-- secret-shuttle:begin -->` / `<!-- secret-shuttle:end -->`; preserves the rest of the file; re-running replaces only the marked block).
+- `cursor` → `.cursor/rules/secret-shuttle.mdc` (wholesale overwrite).
+- `copilot` → `.github/copilot-instructions.md` (marker-managed snippet, same convention as codex).
+
+The skill content is the bundled `skills/secret-shuttle/SKILL.md` shipped with the package — installs do not hit the network. Writes are atomic (temp + rename) and idempotent (a second run with identical input produces a byte-identical file). The command operates exclusively on `process.cwd()`; it never writes to your home directory or any global path.
+
+## `secret-shuttle agent print-skill-url`
+
+Prints the raw GitHub URL of the canonical SKILL.md on one line of stdout, suitable for pasting into any agent that supports a remote skill URL. The URL is derived from the `repository` field in the shipped `package.json` (no hardcoded URLs — defense against fork/rename drift). Override the default `main` branch with `--branch <name>` or `--ref <name>`.

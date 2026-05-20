@@ -53,6 +53,26 @@ secret-shuttle inspect ss://local/prod/INTERNAL_CRON_SECRET
 
 For the full browser walkthrough see [examples/stripe-to-vercel/walkthrough.md](examples/stripe-to-vercel/walkthrough.md).
 
+## For Agents
+
+If you're configuring an agent to use Secret Shuttle, paste this raw skill URL into the agent (it's the canonical operating manual):
+
+```
+https://raw.githubusercontent.com/pdumicz/secret-shuttle/main/skills/secret-shuttle/SKILL.md
+```
+
+If you have the CLI installed locally, run one of these from your project root and the platform-specific instructions file is written for you:
+
+```bash
+secret-shuttle agent install claude    # → .claude/skills/secret-shuttle/SKILL.md
+secret-shuttle agent install codex     # → AGENTS.md snippet (marker-managed)
+secret-shuttle agent install cursor    # → .cursor/rules/secret-shuttle.mdc
+secret-shuttle agent install copilot   # → .github/copilot-instructions.md snippet (marker-managed)
+secret-shuttle agent print-skill-url   # → the raw URL (one line, paste it)
+```
+
+Snippet targets (AGENTS.md, .github/copilot-instructions.md) wrap the Secret Shuttle block in `<!-- secret-shuttle:begin -->` / `<!-- secret-shuttle:end -->` markers — re-running `agent install` only replaces the marked block, never the surrounding content.
+
 ## Templates Instead of Arbitrary Commands
 
 ```bash
@@ -95,6 +115,7 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 
 ## Docs
 
+- [skills/secret-shuttle/SKILL.md](skills/secret-shuttle/SKILL.md) — the canonical agent operating manual
 - [docs/security-model.md](docs/security-model.md)
 - [docs/threat-model.md](docs/threat-model.md)
 - [docs/cli-reference.md](docs/cli-reference.md)
