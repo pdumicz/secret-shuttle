@@ -164,7 +164,7 @@ test("tmp_env_file_0600: unlinks the env-file on success", async () => {
         required_params: [], requires_approval_when_production: false,
         value_arg_template: "--env-file={{__env_file_path__}}",
       },
-      params: {},
+      params: { name: "TEST_NAME" },
       secret: "x",
       tmpDir: tmp,
     });
@@ -190,7 +190,7 @@ test("tmp_env_file_0600: unlinks the env-file even when the child exits non-zero
         required_params: [], requires_approval_when_production: false,
         value_arg_template: "--env-file={{__env_file_path__}}",
       },
-      params: {},
+      params: { name: "TEST_NAME" },
       secret: "x",
       tmpDir: tmp,
     });

@@ -79,7 +79,13 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
   // The env-file NAME is the template's "name" param (every tmp_env_file_0600
   // template declares "name" as a required param; the per-template
   // validateParams enforces the character class). The value is the secret.
-  const envVarName = input.params["name"] ?? "SECRET";
+  const envVarName = input.params["name"];
+  if (typeof envVarName !== "string" || envVarName === "") {
+    throw new ShuttleError(
+      "template_definition_invalid",
+      "tmp_env_file_0600 templates must accept a 'name' param (used as the env-file NAME).",
+    );
+  }
 
   const { path: envFilePath } = writeSecretEnvFile({
     name: envVarName,
