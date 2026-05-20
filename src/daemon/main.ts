@@ -33,6 +33,33 @@ async function main(): Promise<void> {
   // The token must never reach daemon-spawned children (templates, Chrome).
   scrubDaemonSecretsFromEnv();
   const services = new DaemonServices();
+  // Tmp-dir crash-safety (spec §9): ensure 0700 owner-only dir exists, then
+  // delete any leftover files from a prior abnormally-ended run, then start a
+  // periodic sweep (30s interval, 60s max age) that .unref()s so it never
+  // keeps the event loop alive.
+  const { mkdirSync, statSync } = await import("node:fs");
+  try {
+    mkdirSync(services.tmpDir, { recursive: true, mode: 0o700 });
+  } catch {
+    // best-effort; the sweep handles a missing dir as a no-op
+  }
+  // Fail-closed: if the dir exists with the wrong mode (e.g. an attacker
+  // pre-created a world-readable tmp dir), refuse to start.
+  try {
+    const mode = statSync(services.tmpDir).mode & 0o777;
+    if (mode !== 0o700) {
+      process.stderr.write(`Refusing to start: ${services.tmpDir} is mode ${mode.toString(8)}, expected 0700.\n`);
+      process.exit(1);
+    }
+  } catch {
+    // dir absent → fine; the next file create will recreate via the sweep no-op path
+  }
+  const { sweepTmpDir } = await import("./templates/sweep-tmp.js");
+  await sweepTmpDir({ tmpDir: services.tmpDir, force: true });
+  services.sweepTimer = setInterval(() => {
+    void sweepTmpDir({ tmpDir: services.tmpDir, maxAgeMs: 60_000 });
+  }, 30_000);
+  services.sweepTimer.unref();
   const server = new DaemonServer({ token });
   let actualPort = 0;
   registerRoutes(server, services, () => actualPort);
@@ -43,6 +70,10 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     await writeDaemonAudit({ action: "lock", ok: true, message: "daemon shutdown" });
     services.lock.lock();
+    if (services.sweepTimer !== null) {
+      clearInterval(services.sweepTimer);
+      services.sweepTimer = null;
+    }
     await removeSocketFile();
     await server.close();
     process.exit(0);

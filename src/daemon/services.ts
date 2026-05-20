@@ -10,6 +10,7 @@ import type { CdpClient } from "./chrome/cdp-client.js";
 import type { ProxyServer } from "./proxy/cdp-proxy.js";
 import { randomUUID } from "node:crypto";
 import { writeDaemonAudit } from "./audit.js";
+import { getShuttlePaths } from "../shared/config.js";
 
 export interface UnlockSession {
   id: string;
@@ -39,6 +40,8 @@ export class UnlockSessions {
 
 export class DaemonServices {
   readonly lock = new LockedVaultState();
+  readonly tmpDir: string = getShuttlePaths().daemonTmpPath;
+  sweepTimer: NodeJS.Timeout | null = null;
   readonly vault = new Vault(() => this.lock.requireKey());
   readonly approvals = new ApprovalStore({
     onEvent: (e) => {
