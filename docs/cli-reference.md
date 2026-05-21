@@ -102,11 +102,11 @@ Each template delivers the secret to the provider CLI either via **true stdin** 
 Built-in templates today:
 
 - **`vercel-env-add`** — `vercel env add <name> <environment>`. Delivery: **stdin**. Required params: `name=`, `environment=` (one of `production`, `preview`, `development`). `destinationEnvironment` from `environment`.
-- **`github-actions-secret-set`** — `gh secret set <name> --repo <owner/repo>`. Delivery: **stdin**. Required params: `name=`, `repo=` (`owner/repo`). Optional: `env` (a GitHub Environment; carried into the approval UI as the destination), `org`. `destinationEnvironment` is `env` when set, else `repo`.
+- **`github-actions-secret-set`** — `gh secret set <name> --repo <owner/repo>`. Delivery: **stdin**. Required params: `name=`, `repo=` (`owner/repo`). `destinationEnvironment` is always `repo`. Environment-scoped (`--env`) and org-scoped (`--org`) secrets are **rejected** with `invalid_template_param`: GitHub's per-scope argv is mutually-exclusive (`--env` requires `--repo`, `--org` excludes `--repo`), so one template cannot safely express both shapes without risking a divergence between the human-approved destination and the executed argv. The per-scope follow-ups (`github-actions-env-secret-set`, `github-actions-org-secret-set`) are tracked in [docs/templates-deferred.md](./templates-deferred.md).
 - **`cloudflare-secret-put`** — `wrangler secret put <name>`. Delivery: **stdin**. Required params: `name=`. Optional: `env` (Wrangler environment). `destinationEnvironment` is `env` when set, else `production`.
 - **`supabase-edge-secret-set`** — `supabase secrets set --env-file <path>`. Delivery: **`tmp_env_file_0600`** (the Supabase CLI does not accept true stdin portably; `/dev/stdin` is not available on Windows). Required params: `name=`. Optional: `project_ref`. `destinationEnvironment` is `project_ref` when set, else `production`.
 
-Deferred templates (`railway-variable-set`, `netlify-env-set`, `clerk-env-set`) and the reopen criteria are documented in [docs/templates-deferred.md](./templates-deferred.md).
+Deferred templates (`github-actions-env-secret-set`, `github-actions-org-secret-set`, `railway-variable-set`, `netlify-env-set`, `clerk-env-set`) and the reopen criteria are documented in [docs/templates-deferred.md](./templates-deferred.md).
 
 ## `secret-shuttle browser start`
 
