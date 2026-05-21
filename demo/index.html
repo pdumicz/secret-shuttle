@@ -1,0 +1,1736 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=1280" />
+  <title>Secret Shuttle — Developer Walkthrough</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /* ── Design tokens ─────────────────────────────────────────────── */
+    :root {
+      --bg-stage: #0e0f12;
+      --bg-side: #f5f1e8;
+      --bg-side-2: #faf6ec;
+
+      --ink-strong: #1a1410;
+      --ink-body:   #2d2519;
+      --ink-muted:  #6b5f4a;
+      --ink-faint:  #a89876;
+
+      --accent:      #b8770f;
+      --accent-2:    #8f5a0a;
+      --accent-soft: #f3e9d2;
+
+      --gap-bg:     #fff7e8;
+      --gap-border: #ecc678;
+      --gap-text:   #7a3e00;
+
+      --rule:        #e8e0c9;
+      --rule-strong: #d1c69f;
+
+      --win-radius: 11px;
+      --win-shadow:
+        0 36px 90px -30px rgba(0,0,0,0.65),
+        0 22px 40px -18px rgba(0,0,0,0.45),
+        0 0 0 0.5px rgba(255,255,255,0.07);
+      --tl-red:    #ff5f57;
+      --tl-yellow: #febc2e;
+      --tl-green:  #28c840;
+
+      /* Terminal — tuned closer to Claude Code's actual palette */
+      --term-bg:         #1a1a1c;
+      --term-header:     #2c2c2e;
+      --term-text:       #d8d8db;
+      --term-faint:      #8c8c92;
+      --term-user:       #f6c878;       /* user prompt — warm */
+      --term-tool:       #c39bff;       /* tool call symbol — purple */
+      --term-tool-name:  #f0e6ff;
+      --term-result:     #b5d49a;       /* tool result text — green-grey */
+      --term-result-dim: #7d8c70;
+      --term-ok:         #7ce38b;
+      --term-warn:       #ffcd6b;
+      --term-err:        #ff6b6b;
+      --term-rule:       #2a2a2d;
+      --term-cursor:     #e6c78a;
+
+      --br-header: #efece4;
+      --br-rule:   #d8d2bf;
+      --br-addr:   #ffffff;
+      --br-ink:    #2a2a2a;
+
+      --ap-bg:        #ffffff;
+      --ap-header:    #f7f6f1;
+      --ap-rule:      #e7e3d4;
+      --ap-row-label: #6b6253;
+      --ap-warn-bg:   #fdecea;
+      --ap-warn-fg:   #9c2616;
+
+      --font-display: "Fraunces", "Iowan Old Style", "Palatino", Georgia, serif;
+      --font-body:    -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+      --font-mono:    "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    }
+
+    /* ── Reset ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; min-height: 720px; }
+    body {
+      font-family: var(--font-body);
+      color: var(--ink-body);
+      background: var(--bg-stage);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      overflow: hidden;
+      min-width: 1100px;
+    }
+    button { font-family: inherit; cursor: pointer; }
+    code, kbd, pre { font-family: var(--font-mono); }
+    body:focus { outline: none; }
+
+    /* ── App shell ─────────────────────────────────────────────────── */
+    .app {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      height: 100vh;
+      min-height: 720px;
+    }
+
+    /* ── Side panel ────────────────────────────────────────────────── */
+    .side {
+      background:
+        radial-gradient(120% 80% at 0% 0%, var(--bg-side-2) 0%, var(--bg-side) 55%, #efe9d8 100%);
+      border-right: 1px solid var(--rule);
+      display: flex;
+      flex-direction: column;
+      padding: 28px 30px 24px;
+      position: relative;
+      overflow: hidden;
+    }
+    .side::before {
+      content: "";
+      position: absolute; inset: 0;
+      background-image:
+        radial-gradient(rgba(120,90,40,0.05) 1px, transparent 1.2px),
+        radial-gradient(rgba(120,90,40,0.04) 1px, transparent 1.2px);
+      background-size: 3px 3px, 7px 7px;
+      background-position: 0 0, 1px 2px;
+      opacity: .7;
+      pointer-events: none;
+    }
+    .side > * { position: relative; }
+
+    .brand {
+      display: flex; align-items: center; gap: 10px;
+      font-family: var(--font-display);
+      font-weight: 500;
+      font-size: 17px;
+      color: var(--ink-strong);
+      letter-spacing: -0.01em;
+    }
+    .brand-mark {
+      width: 22px; height: 22px;
+      border-radius: 6px;
+      background: var(--ink-strong);
+      color: var(--bg-side-2);
+      display: grid; place-items: center;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .brand-sub {
+      color: var(--ink-muted);
+      font-family: var(--font-body);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-left: auto;
+    }
+
+    .progress {
+      margin-top: 22px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .progress-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: var(--ink-muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .progress-meta b { color: var(--ink-strong); font-weight: 600; }
+    .progress-bar {
+      height: 3px;
+      background: var(--rule);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      width: 0;
+      transition: width .55s cubic-bezier(.2,.7,.2,1);
+    }
+
+    .scene-meta {
+      display: none;
+      flex-direction: column;
+      gap: 16px;
+      margin-top: 22px;
+      flex: 1 1 auto;
+      animation: panel-in .55s cubic-bezier(.2,.7,.2,1) both;
+      min-height: 0;
+    }
+    .scene-meta.active { display: flex; }
+    @keyframes panel-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    .tag {
+      align-self: flex-start;
+      font-size: 10.5px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-2);
+      background: var(--accent-soft);
+      padding: 3px 9px;
+      border-radius: 999px;
+      border: 1px solid #e6d8b3;
+    }
+    .title {
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 144, "SOFT" 30;
+      font-weight: 360;
+      font-size: 34px;
+      line-height: 1.08;
+      letter-spacing: -0.015em;
+      color: var(--ink-strong);
+      margin: 0;
+    }
+    .title em {
+      font-style: italic;
+      font-weight: 380;
+      color: var(--accent-2);
+    }
+    .copy {
+      font-size: 14px;
+      line-height: 1.55;
+      color: var(--ink-body);
+      margin: 0;
+    }
+    .copy code {
+      font-size: 12px;
+      background: rgba(184,119,15,0.10);
+      color: var(--accent-2);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-family: var(--font-mono);
+    }
+    .watch {
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--ink-muted);
+      padding: 9px 14px 10px 14px;
+      border-left: 2px solid var(--rule-strong);
+    }
+    .watch b { color: var(--ink-strong); font-weight: 600; margin-right: 4px; }
+    .watch code { font-size: 11px; background: rgba(184,119,15,0.08); color: var(--accent-2); padding: 1px 4px; border-radius: 3px; font-family: var(--font-mono); }
+
+    .gap {
+      margin-top: auto;
+      background: var(--gap-bg);
+      border: 1px solid var(--gap-border);
+      border-radius: 8px;
+      padding: 12px 14px 14px;
+      color: var(--gap-text);
+      position: relative;
+    }
+    .gap-label {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .gap-label::before {
+      content: "";
+      width: 6px; height: 6px;
+      background: var(--gap-text);
+      border-radius: 50%;
+    }
+    .gap-body { font-size: 12.5px; line-height: 1.45; color: #6f3a05; }
+    .gap-body i { color: #4d2700; font-style: italic; }
+    .gap-body code { font-size: 11px; background: rgba(184,119,15,0.10); color: var(--accent-2); padding: 1px 4px; border-radius: 3px; font-family: var(--font-mono); }
+
+    .nav {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-top: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--rule);
+    }
+    .nav-btn {
+      background: transparent;
+      border: 1px solid var(--rule-strong);
+      color: var(--ink-strong);
+      padding: 7px 13px;
+      border-radius: 6px;
+      font-size: 12.5px;
+      font-weight: 500;
+      display: inline-flex; align-items: center; gap: 8px;
+      transition: background .15s ease, transform .12s ease, border-color .15s ease;
+    }
+    .nav-btn:hover:not(:disabled) {
+      background: var(--ink-strong); color: var(--bg-side-2);
+      border-color: var(--ink-strong);
+    }
+    .nav-btn:active:not(:disabled) { transform: translateY(1px); }
+    .nav-btn:disabled { opacity: 0.35; cursor: default; }
+    .nav-btn.primary {
+      background: var(--ink-strong); color: var(--bg-side-2);
+      border-color: var(--ink-strong);
+    }
+    .nav-btn.primary:hover:not(:disabled) {
+      background: var(--accent-2); border-color: var(--accent-2);
+    }
+    .key-hint {
+      font-size: 10.5px;
+      color: var(--ink-faint);
+      letter-spacing: 0.04em;
+      display: flex; gap: 6px; align-items: center;
+    }
+    .kbd {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 1px 5px;
+      border: 1px solid var(--rule-strong);
+      border-bottom-width: 2px;
+      border-radius: 4px;
+      color: var(--ink-muted);
+      background: var(--bg-side-2);
+    }
+
+    /* ── Stage (right pane) ────────────────────────────────────────── */
+    .stage {
+      position: relative;
+      background:
+        radial-gradient(85% 65% at 50% -10%, #1c1f25 0%, var(--bg-stage) 60%, #07080a 100%);
+      overflow: hidden;
+    }
+    .stage::before {
+      content: "";
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(40% 30% at 50% 100%, rgba(184,119,15,0.06), transparent 60%),
+        linear-gradient(180deg, transparent 70%, rgba(0,0,0,0.4) 100%);
+      pointer-events: none;
+    }
+    .stage::after {
+      content: "";
+      position: absolute; inset: 0;
+      background-image:
+        radial-gradient(rgba(255,255,255,0.025) 1px, transparent 1.2px);
+      background-size: 3px 3px;
+      pointer-events: none;
+      mix-blend-mode: overlay;
+    }
+
+    .scene-stage {
+      position: absolute;
+      inset: 0;
+      display: none;
+      animation: stage-in .55s cubic-bezier(.2,.7,.2,1) both;
+    }
+    .scene-stage.active { display: block; }
+    @keyframes stage-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: none; }
+    }
+    /* For "centered solo window" scenes, override to use flex */
+    .scene-stage[data-layout="center"] { display: none; }
+    .scene-stage[data-layout="center"].active {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 60px 48px;
+    }
+
+    /* small caption above the stage windows */
+    .scene-caption {
+      position: absolute;
+      top: 22px; left: 28px;
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      color: rgba(243,233,210,0.55);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      display: flex; align-items: center; gap: 10px;
+      z-index: 5;
+    }
+    .scene-caption::before {
+      content: "";
+      width: 22px; height: 1px;
+      background: rgba(243,233,210,0.35);
+    }
+
+    /* ── macOS window chrome (shared) ──────────────────────────────── */
+    .win {
+      background: var(--term-bg);
+      border-radius: var(--win-radius);
+      box-shadow: var(--win-shadow);
+      overflow: hidden;
+    }
+    .win-bar {
+      display: flex; align-items: center;
+      padding: 8px 12px;
+      gap: 8px;
+      position: relative;
+    }
+    .tl { display: flex; gap: 6px; flex: 0 0 auto; z-index: 2; }
+    .tl span {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      display: block;
+      box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.2);
+    }
+    .tl .r { background: var(--tl-red); }
+    .tl .y { background: var(--tl-yellow); }
+    .tl .g { background: var(--tl-green); }
+    .win-title {
+      position: absolute;
+      left: 0; right: 0;
+      text-align: center;
+      font-size: 11.5px;
+      color: var(--term-faint);
+      pointer-events: none;
+      letter-spacing: 0.01em;
+      font-weight: 500;
+    }
+
+    /* Terminal */
+    .term .win-bar {
+      background: linear-gradient(180deg, #3a3a3c 0%, var(--term-header) 100%);
+      border-bottom: 1px solid #000;
+    }
+    .term .win-title { color: #c7c7cc; }
+    .term-body {
+      padding: 16px 20px 18px;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: var(--term-text);
+    }
+    /* Claude Code line types */
+    .term-body .line { display: flex; gap: 0; white-space: pre-wrap; word-break: break-word; }
+    .term-body .line + .line { margin-top: 2px; }
+    .term-body .group + .group { margin-top: 10px; }
+
+    /* user message: "> ..." in warm/amber, content slightly muted */
+    .user-msg {
+      color: var(--term-user);
+      font-weight: 500;
+    }
+    .user-msg .marker { color: var(--accent); margin-right: 8px; font-weight: 600; }
+
+    /* assistant text: plain white */
+    .assistant {
+      color: var(--term-text);
+    }
+    .assistant .em { color: var(--term-ok); font-weight: 500; }
+    .assistant .warn { color: var(--term-warn); }
+
+    /* tool call: ⏺ symbol + tool name in parens + args */
+    .tool-call {
+      color: var(--term-tool-name);
+      font-weight: 500;
+    }
+    .tool-call .glyph {
+      color: var(--term-tool);
+      margin-right: 9px;
+      font-weight: 700;
+    }
+    .tool-call .tname { color: var(--term-tool); font-weight: 600; }
+    .tool-call .args { color: var(--term-text); font-weight: 400; }
+
+    /* tool result: indented with ⎿ */
+    .tool-result {
+      color: var(--term-result);
+      padding-left: 14px;
+      position: relative;
+    }
+    .tool-result .glyph {
+      color: var(--term-result-dim);
+      position: absolute;
+      left: 0; top: 0;
+    }
+    .tool-result .ok { color: var(--term-ok); }
+    .tool-result .warn { color: var(--term-warn); }
+    .tool-result .dim { color: var(--term-result-dim); }
+    .tool-result .json { color: var(--term-text); }
+    .tool-result .json .k { color: #9ec3ff; }
+    .tool-result .json .s { color: #ffcd9c; }
+    .tool-result .json .n { color: #ffcd6b; }
+    .tool-result .json .b { color: #c596ff; }
+
+    /* status line — fainter */
+    .status { color: var(--term-faint); }
+
+    .term-body .cursor {
+      display: inline-block;
+      width: 8px; height: 1em;
+      background: var(--term-cursor);
+      vertical-align: -2px;
+      margin-left: 2px;
+      animation: blink 1.05s steps(2, end) infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* Browser */
+    .browser { background: #ffffff; }
+    .browser .win-bar {
+      background: linear-gradient(180deg, #f6f3ec 0%, var(--br-header) 100%);
+      border-bottom: 1px solid var(--br-rule);
+      padding-bottom: 6px;
+    }
+    .browser-chrome {
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 12px 8px;
+      background: var(--br-header);
+      border-bottom: 1px solid var(--br-rule);
+    }
+    .nav-arrows { display: flex; gap: 4px; color: #8e8e93; }
+    .nav-arrows span {
+      width: 22px; height: 22px;
+      display: grid; place-items: center;
+      border-radius: 5px;
+      font-size: 13px;
+    }
+    .nav-arrows span.disabled { color: #c7c7cc; }
+    .addr {
+      flex: 1;
+      background: var(--br-addr);
+      border: 1px solid var(--br-rule);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--br-ink);
+      display: flex; align-items: center; gap: 6px;
+      min-width: 0;
+    }
+    .addr .lock { color: #4b9b58; font-size: 10px; }
+    .addr .path { color: #6c6c70; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .browser-body {
+      background: #ffffff;
+      color: var(--br-ink);
+      font-size: 13px;
+      position: relative;
+      min-height: 270px;
+    }
+
+    /* Approval card */
+    .approval .win-bar {
+      background: linear-gradient(180deg, #fbfaf5 0%, var(--ap-header) 100%);
+      border-bottom: 1px solid var(--ap-rule);
+    }
+    .approval .win-title { color: #6b6253; font-weight: 500; }
+    .approval { background: var(--ap-bg); }
+    .approval-body {
+      background: var(--ap-bg);
+      color: var(--ink-body);
+      padding: 16px 18px 16px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .approval-body h2 {
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 144, "SOFT" 20;
+      font-weight: 380;
+      font-size: 19px;
+      margin: 0 0 4px;
+      color: var(--ink-strong);
+      letter-spacing: -0.01em;
+    }
+    .approval-action {
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--ink-strong);
+      padding: 10px 12px;
+      background: #faf8f1;
+      border: 1px solid var(--ap-rule);
+      border-radius: 6px;
+      margin: 6px 0 10px;
+    }
+    .approval-action b, .approval-action code {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      background: rgba(184,119,15,0.10);
+      color: var(--accent-2);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+    .row {
+      display: flex; justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px dashed var(--ap-rule);
+      font-size: 12.5px;
+      gap: 12px;
+    }
+    .row:last-of-type { border-bottom: 0; }
+    .row .label { color: var(--ap-row-label); flex-shrink: 0; }
+    .row .v {
+      font-weight: 500;
+      color: var(--ink-strong);
+      font-family: var(--font-body);
+      text-align: right;
+      word-break: break-all;
+    }
+    .row .v code {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      background: #f3eede;
+      padding: 1px 5px;
+      border-radius: 3px;
+      color: var(--ink-strong);
+    }
+    .approval-warn {
+      margin-top: 10px;
+      background: var(--ap-warn-bg);
+      color: var(--ap-warn-fg);
+      border: 1px solid #f5c8c1;
+      border-radius: 6px;
+      padding: 9px 11px;
+      font-size: 11.5px;
+      font-weight: 500;
+      line-height: 1.4;
+    }
+    .approval-details { margin-top: 8px; }
+    .approval-details summary {
+      cursor: pointer;
+      font-size: 11.5px;
+      color: var(--ap-row-label);
+      padding: 3px 0;
+      user-select: none;
+      list-style: none;
+    }
+    .approval-details summary::before {
+      content: "▸ ";
+      color: var(--ink-faint);
+      display: inline-block;
+    }
+    .approval-details[open] > summary::before { content: "▾ "; }
+    .approval-actions {
+      display: flex; gap: 8px;
+      margin-top: 14px;
+    }
+    .ap-btn {
+      flex: 1;
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      border: 0;
+      box-shadow: inset 0 -1px 0 rgba(0,0,0,0.12);
+      transition: filter .15s ease, transform .12s ease;
+    }
+    .ap-btn:hover { filter: brightness(1.05); }
+    .ap-btn:active { transform: translateY(1px); }
+    .ap-approve { background: #0a7a4c; color: #fff; }
+    .ap-deny    { background: #c1382e; color: #fff; }
+
+    /* Approval "already approved" stamp */
+    .approved-stamp {
+      position: absolute;
+      top: 10px; right: 14px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #0a7a4c;
+      background: #eaf6ee;
+      border: 1px solid #b8dec5;
+      padding: 3px 7px;
+      border-radius: 4px;
+      z-index: 5;
+    }
+
+    /* Unlock card */
+    .unlock .win-bar {
+      background: linear-gradient(180deg, #fbfaf5 0%, var(--ap-header) 100%);
+      border-bottom: 1px solid var(--ap-rule);
+    }
+    .unlock .win-title { color: #6b6253; font-weight: 500; }
+    .unlock { background: #ffffff; }
+    .unlock-body {
+      padding: 20px 22px 22px;
+      background: #ffffff;
+    }
+    .unlock-body h2 {
+      font-family: var(--font-display);
+      font-variation-settings: "opsz" 144, "SOFT" 20;
+      font-weight: 380;
+      font-size: 20px;
+      margin: 0 0 4px;
+      color: var(--ink-strong);
+      letter-spacing: -0.01em;
+    }
+    .unlock-body p {
+      font-size: 12.5px;
+      color: var(--ink-muted);
+      margin: 0 0 12px;
+      line-height: 1.45;
+    }
+    .unlock-input {
+      width: 100%;
+      padding: 8px 11px;
+      font-family: var(--font-mono);
+      font-size: 14px;
+      letter-spacing: 0.25em;
+      border: 1px solid var(--ap-rule);
+      border-radius: 6px;
+      color: var(--ink-strong);
+      background: #faf8f1;
+      outline: none;
+    }
+    .unlock-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .unlock-btn {
+      margin-top: 10px;
+      padding: 8px 18px;
+      background: #0a7a4c;
+      color: #fff;
+      border: 0;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    /* Blind overlay */
+    .blind {
+      position: absolute; inset: 0;
+      background:
+        linear-gradient(180deg, rgba(14,15,18,0.42), rgba(14,15,18,0.62)),
+        repeating-linear-gradient(45deg, rgba(255,255,255,0.025) 0 14px, rgba(255,255,255,0) 14px 28px);
+      backdrop-filter: blur(6px) saturate(50%);
+      -webkit-backdrop-filter: blur(6px) saturate(50%);
+      display: flex; align-items: center; justify-content: center;
+      color: #f3e9d2;
+      pointer-events: none;
+    }
+    .blind-badge {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 14px;
+      border: 1px solid rgba(243,233,210,0.25);
+      border-radius: 999px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      background: rgba(0,0,0,0.45);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .blind-badge .dot {
+      width: 8px; height: 8px;
+      background: #ff6b6b;
+      border-radius: 50%;
+      box-shadow: 0 0 0 4px rgba(255,107,107,0.18);
+      animation: pulse 1.8s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 4px rgba(255,107,107,0.18); }
+      50%      { box-shadow: 0 0 0 8px rgba(255,107,107,0.04); }
+    }
+
+    /* Mark labels (scene 6) */
+    .mark {
+      position: absolute;
+      display: flex; align-items: center; gap: 6px;
+      background: var(--accent);
+      color: #fff;
+      padding: 3px 7px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.03em;
+      box-shadow: 0 6px 14px rgba(0,0,0,0.25);
+      z-index: 3;
+    }
+    .mark::before {
+      content: "";
+      width: 6px; height: 6px;
+      background: #fff;
+      border-radius: 50%;
+    }
+    .mark-box {
+      position: absolute;
+      border: 1.5px dashed var(--accent);
+      border-radius: 4px;
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    /* Mocked site surfaces (Stripe / Vercel) */
+    .site {
+      padding: 18px 22px 20px;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+      color: #1a1a1a;
+    }
+    .site-head {
+      display: flex; align-items: center; gap: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #ececec;
+    }
+    .site-head .logo {
+      width: 26px; height: 26px;
+      border-radius: 6px;
+      display: grid; place-items: center;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+      font-family: var(--font-display);
+    }
+    .site-head .name { font-weight: 600; font-size: 13px; }
+    .site-head .crumb { color: #888; font-size: 12px; margin-left: 6px; }
+    .site-h1 {
+      font-size: 16px;
+      margin: 12px 0 4px;
+      font-weight: 600;
+    }
+    .site-sub { color: #777; font-size: 12px; margin-bottom: 12px; }
+
+    .form-row {
+      display: flex; flex-direction: column; gap: 5px;
+      margin-bottom: 12px;
+    }
+    .form-row label {
+      font-size: 11.5px;
+      font-weight: 500;
+      color: #444;
+    }
+    .form-row input {
+      padding: 7px 9px;
+      border: 1px solid #d4d4d4;
+      border-radius: 5px;
+      font-size: 12.5px;
+      font-family: var(--font-mono);
+      color: #222;
+      background: #fff;
+    }
+    .form-row input.dotted {
+      letter-spacing: 0.4em;
+      color: #aaa;
+    }
+    .form-row .hint {
+      font-size: 11px;
+      color: #888;
+    }
+
+    .pill-button {
+      padding: 6px 11px;
+      border-radius: 999px;
+      border: 1px solid #d4d4d4;
+      background: #fff;
+      font-size: 11.5px;
+      color: #333;
+      font-weight: 500;
+    }
+    .pill-primary {
+      background: #000;
+      color: #fff;
+      border-color: #000;
+    }
+    .pill-row { display: flex; gap: 8px; align-items: center; }
+
+    .env-pill {
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10.5px;
+      background: #f0f0f0;
+      color: #555;
+      font-weight: 500;
+    }
+    .env-prod { background: #efe6ff; color: #5b21b6; }
+
+    .secret-block {
+      display: flex; flex-direction: column; gap: 10px;
+      padding: 12px;
+      border: 1px solid #ececec;
+      border-radius: 8px;
+      background: #fafafa;
+      margin-top: 6px;
+    }
+    .secret-line { display: flex; align-items: center; gap: 10px; }
+    .secret-line .label-mini {
+      font-size: 10.5px; color: #777;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .secret-line .value {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: #444;
+      background: #fff;
+      border: 1px solid #ececec;
+      padding: 6px 9px;
+      border-radius: 5px;
+      flex: 1;
+    }
+    .secret-line .value.hidden { color: #999; letter-spacing: 0.3em; }
+    .reveal-btn {
+      padding: 5px 11px;
+      background: #635bff;
+      color: #fff;
+      border: 0;
+      border-radius: 5px;
+      font-size: 11.5px;
+      font-weight: 600;
+    }
+
+    /* ── PER-SCENE LAYOUTS ─────────────────────────────────────────── */
+    /* Scenes 1, 2, 4, 9 use data-layout="center" (flex centered) */
+
+    /* Scene 3 — terminal left, unlock window right */
+    .scene-stage[data-scene="3"] .term {
+      position: absolute;
+      top: 88px; left: 40px;
+      width: 480px;
+    }
+    .scene-stage[data-scene="3"] .unlock {
+      position: absolute;
+      top: 178px; right: 64px;
+      width: 340px;
+      z-index: 2;
+    }
+
+    /* Scene 5 — terminal top-left, approval cards on right (first marked approved) */
+    .scene-stage[data-scene="5"] .term {
+      position: absolute;
+      top: 70px; left: 36px;
+      width: 480px;
+    }
+    .scene-stage[data-scene="5"] .approval-a {
+      position: absolute;
+      top: 88px; right: 158px;
+      width: 380px;
+      z-index: 2;
+      transform: rotate(-1.2deg);
+      opacity: 0.92;
+    }
+    .scene-stage[data-scene="5"] .approval-b {
+      position: absolute;
+      top: 200px; right: 36px;
+      width: 400px;
+      z-index: 3;
+      transform: rotate(0.8deg);
+    }
+
+    /* Scene 6 — terminal left, browser right (with marks) */
+    .scene-stage[data-scene="6"] .term {
+      position: absolute;
+      top: 70px; left: 36px;
+      width: 380px;
+    }
+    .scene-stage[data-scene="6"] .browser {
+      position: absolute;
+      top: 88px; right: 36px;
+      width: 540px;
+    }
+
+    /* Scene 7 — terminal top-left small, browser center, approval right */
+    .scene-stage[data-scene="7"] .term {
+      position: absolute;
+      top: 70px; left: 28px;
+      width: 320px;
+    }
+    .scene-stage[data-scene="7"] .browser {
+      position: absolute;
+      top: 100px; left: 230px;
+      width: 460px;
+      z-index: 2;
+    }
+    .scene-stage[data-scene="7"] .approval {
+      position: absolute;
+      top: 72px; right: 28px;
+      width: 420px;
+      z-index: 3;
+    }
+
+    /* Scene 8 — same shape as 7 */
+    .scene-stage[data-scene="8"] .term {
+      position: absolute;
+      top: 70px; left: 28px;
+      width: 320px;
+    }
+    .scene-stage[data-scene="8"] .browser {
+      position: absolute;
+      top: 130px; left: 230px;
+      width: 460px;
+      z-index: 2;
+    }
+    .scene-stage[data-scene="8"] .approval {
+      position: absolute;
+      top: 72px; right: 28px;
+      width: 420px;
+      z-index: 3;
+    }
+
+    /* Scene 9 — terminal centered, with a bottom strip */
+    .scene-stage[data-scene="9"] .term {
+      max-width: 680px;
+    }
+    .final-strip {
+      position: absolute;
+      bottom: 28px; left: 32px; right: 32px;
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+      padding: 14px 18px;
+      background: rgba(243,233,210,0.06);
+      border: 1px solid rgba(243,233,210,0.12);
+      border-radius: 10px;
+      color: #f3e9d2;
+      font-size: 12.5px;
+    }
+    .final-strip .meta { color: rgba(243,233,210,0.65); }
+    .final-strip .ref {
+      font-family: var(--font-mono);
+      color: #f3e9d2;
+      background: rgba(0,0,0,0.4);
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11.5px;
+    }
+
+    /* Responsive guard */
+    @media (max-width: 1200px) {
+      .app { grid-template-columns: 340px 1fr; }
+      .scene-stage[data-scene="5"] .approval-a,
+      .scene-stage[data-scene="5"] .approval-b { width: 360px; }
+      .scene-stage[data-scene="7"] .browser,
+      .scene-stage[data-scene="8"] .browser { width: 420px; }
+      .scene-stage[data-scene="7"] .approval,
+      .scene-stage[data-scene="8"] .approval { width: 380px; }
+    }
+  </style>
+</head>
+<body tabindex="0">
+  <div class="app">
+
+    <!-- ────────────────────────── SIDE PANEL ────────────────────────── -->
+    <aside class="side">
+      <div class="brand">
+        <div class="brand-mark">ss</div>
+        <span>Secret Shuttle</span>
+        <span class="brand-sub">Demo</span>
+      </div>
+
+      <div class="progress">
+        <div class="progress-meta">
+          <span>Scene <b id="scene-num">01</b> / 09</span>
+          <span id="scene-name">The pain</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      </div>
+
+      <!-- Scene 01 -->
+      <div class="scene-meta" data-scene="1">
+        <span class="tag">stuck</span>
+        <h1 class="title">"…I need the secret. Can you <em>paste</em> it?"</h1>
+        <p class="copy">The dev finished a Stripe integration in their agent. Time to ship. They ask Claude Code to deploy to prod — and immediately hit the secret wall.</p>
+        <p class="copy">Pasting a webhook signing secret into a chat is how secrets land in scrollback, git history, and <code>~/.zsh_history</code>. Nobody wants that, but the path of least resistance is exactly that.</p>
+        <div class="watch"><b>Watch for →</b> Claude refuses to handle the secret itself, then bounces the work back to the human. No good options.</div>
+        <div class="gap">
+          <div class="gap-label">Gap to spot</div>
+          <div class="gap-body">Does the dev <i>know</i> why pasting is bad? A "why this matters" one-liner could land Secret Shuttle in 5 seconds vs 5 minutes of search.</div>
+        </div>
+      </div>
+
+      <!-- Scene 02 -->
+      <div class="scene-meta" data-scene="2">
+        <span class="tag">curious</span>
+        <h1 class="title">A bridge — <em>refs</em>, not values.</h1>
+        <p class="copy">The dev points Claude at the Secret Shuttle skill URL. Claude reads it, summarises the model: a local daemon holds the vault, the agent works through refs like <code>ss://stripe/prod/…</code>, and only the human sees raw values during approval.</p>
+        <div class="watch"><b>Watch for →</b> The dev tells the agent. The agent doesn't proactively suggest it (yet).</div>
+        <div class="gap">
+          <div class="gap-label">Gap to spot</div>
+          <div class="gap-body">How does the dev <i>actually</i> hear about Secret Shuttle? Skill registries? Cursor / Codex marketplaces? A "Claude recommended it" path is the dream — but only if every agent ships with awareness of it.</div>
+        </div>
+      </div>
+
+      <!-- Scene 03 -->
+      <div class="scene-meta" data-scene="3">
+        <span class="tag">setting up</span>
+        <h1 class="title">Install, daemon, <em>passphrase</em>.</h1>
+        <p class="copy">Claude installs the package, starts the daemon, and calls <code>unlock</code>. The CLI never reads the passphrase. A local web window opens — the human types it directly into the daemon's UI.</p>
+        <div class="watch"><b>Watch for →</b> First-time unlock = "create passphrase" mode. Same window, different verb.</div>
+        <div class="gap">
+          <div class="gap-label">Gap to spot</div>
+          <div class="gap-body">Is the difference between "create" and "enter" obvious enough in the unlock window? Today the only signal is one line of copy.</div>
+        </div>
+      </div>
+
+      <!-- Scene 04 -->
+      <div class="scene-meta" data-scene="4">
+        <span class="tag">wiring agent</span>
+        <h1 class="title">Teach the agent the <em>protocol</em>.</h1>
+        <p class="copy">One command writes the Secret Shuttle skill into the project. From here, the agent knows the order — <code>doctor</code> first, prefer <code>template run</code>, never log raw values, surface <code>manual_recovery_required</code> to the human.</p>
+        <div class="watch"><b>Watch for →</b> The same command exists for <code>codex</code>, <code>cursor</code>, <code>copilot</code> — marker-managed so it doesn't clobber the rest of the file.</div>
+        <div class="gap">
+          <div class="gap-label">Gap to spot</div>
+          <div class="gap-body">Does Claude actually re-read its skills mid-session, or does it need a new session to pick the file up? The demo should be honest if it's the latter.</div>
+        </div>
+      </div>
+
+      <!-- Scene 05 -->
+      <div class="scene-meta" data-scene="5">
+        <span class="tag">first win</span>
+        <h1 class="title">Generate &amp; push — <em>two clicks</em>.</h1>
+        <p class="copy">The dev asks for an <code>INTERNAL_CRON_SECRET</code> in prod, on Vercel. Claude runs <code>doctor</code>, <code>generate</code>, then <code>template run vercel-env-add</code>. Two approval cards in sequence — generate, then publish.</p>
+        <div class="watch"><b>Watch for →</b> Each approval is scoped to a single action. No grant is wider than what the human just OK'd.</div>
+        <div class="gap">
+          <div class="gap-label">Gap to spot</div>
+          <div class="gap-body">Two approval clicks for one user intent — is that friction worth it for the audit trail, or could there be a single "this whole intent" composite approval?</div>
+        </div>
+      </div>
+
+      <!-- Scene 06 -->
+      <div class="scene-meta" data-scene="6">
+        <span class="tag">marking targets</span>
+        <h1 class="title">Browser opens. <em>Marks</em> get placed.</h1>
+        <p class="copy">For the Stripe webhook handoff, Claude runs <code>browser start</code>. A daemon-owned Chrome window opens. Claude navigates to the webhook settings, then marks the reveal button and the secret field by opaque label.</p>
+        <div class="watch"><b>Watch for →</b> The daemon stores only structural metadata for each mark — no selectors, no DOM text, nothing the agent can fingerprint.</div>
+        <div class="gap">
+          <div class="gap-label">Gap to spot</div>
+          <div class="gap-body">The <code>mark pick</code> choreography (run command, then click in the browser) is delicate. Worth a per-agent runbook so agents don't fumble the dance.</div>
+        </div>
+      </div>
+
+      <!-- Scene 07 -->
+      <div class="scene-meta" data-scene="7">
+        <span class="tag">blind mode 🔒</span>
+        <h1 class="title">Reveal. Capture. <em>Verify gone.</em></h1>
+        <p class="copy">Claude calls <code>reveal-capture</code>. The daemon takes the wheel — blind mode engages, the daemon clicks reveal, captures the bytes from the marked scope, hides them, and proves the value is absent from every observable surface before resuming.</p>
+        <div class="watch"><b>Watch for →</b> The approval card shows the reveal label, capture mode, hide handle, and an explicit auto-resume disclosure (red).</div>
+        <div class="gap">
+          <div class="gap-label">Gap to spot</div>
+          <div class="gap-body">How does the dev <i>visually</i> know blind mode is on? Today it's CLI status. A daemon-painted overlay in Chrome itself would be reassuring.</div>
+        </div>
+      </div>
+
+      <!-- Scene 08 -->
+      <div class="scene-meta" data-scene="8">
+        <span class="tag">handoff</span>
+        <h1 class="title">Inject. Submit. <em>Hand back.</em></h1>
+        <p class="copy">Same browser, now on Vercel. Claude marks the value field + Save button, then calls <code>inject-submit</code> with a success marker. The daemon writes the secret, clicks save, waits for the marker, proves the secret is gone, and only then hands observation back.</p>
+        <div class="watch"><b>Watch for →</b> The agent never sees the value. The argv never carries it. The success text is what the human approved.</div>
+        <div class="gap">
+          <div class="gap-label">Gap to spot</div>
+          <div class="gap-body">Marked field + marked submit + success text is a lot of ceremony. For the four templated providers, <code>template run</code> is much less work — should it be the default the skill steers agents toward?</div>
+        </div>
+      </div>
+
+      <!-- Scene 09 -->
+      <div class="scene-meta" data-scene="9">
+        <span class="tag">done</span>
+        <h1 class="title">All green. <em>No one saw it.</em></h1>
+        <p class="copy">Doctor reports a clean state. The Stripe webhook signing secret is in Vercel production env. The dev never saw the raw value. The agent never saw it. No argv, no env, no log line, no chat transcript ever carried the bytes.</p>
+        <div class="watch"><b>Watch for →</b> The closing summary references the secret by <code>ss://</code> ref and fingerprint — that's the agent's vocabulary from now on.</div>
+        <div class="gap">
+          <div class="gap-label">Gap to spot</div>
+          <div class="gap-body">Where does the dev go next? Rotation? More providers? A "what now" CTA in the CLI itself would close the loop — right now the demo ends, the product is silent.</div>
+        </div>
+      </div>
+
+      <div class="nav">
+        <button class="nav-btn" id="back" disabled>← Back</button>
+        <span class="key-hint">
+          <span class="kbd">←</span><span class="kbd">→</span>
+        </span>
+        <button class="nav-btn primary" id="next">Next →</button>
+      </div>
+    </aside>
+
+    <!-- ────────────────────────── STAGE ─────────────────────────────── -->
+    <section class="stage">
+
+      <!-- Scene 1: terminal solo — the pain -->
+      <div class="scene-stage active" data-scene="1" data-layout="center">
+        <div class="scene-caption">scene 01 — claude code · ~/projects/myapp</div>
+        <div class="win term" style="width:680px">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">~/projects/myapp — claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line user-msg"><span class="marker">&gt;</span><span>let's deploy this to prod. you'll need to set the STRIPE_WEBHOOK_SECRET and a couple of vercel env vars</span></div>
+            </div>
+            <div class="group">
+              <div class="line assistant"><span>I can wire up the Vercel deployment, but I shouldn't put production secrets into my context.</span></div>
+              <div class="line assistant" style="margin-top:8px"><span>Once Vercel is deployed, I'll list the env var keys you need to set. You'll have to paste the actual values into the Vercel dashboard (or share them with me only if you accept that they'll appear in this conversation).</span></div>
+            </div>
+            <div class="group">
+              <div class="line user-msg"><span class="marker">&gt;</span><span>…there's gotta be a better way<span class="cursor"></span></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 2: terminal solo — discovery -->
+      <div class="scene-stage" data-scene="2" data-layout="center">
+        <div class="scene-caption">scene 02 — claude code · reading the skill</div>
+        <div class="win term" style="width:680px">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">~/projects/myapp — claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line user-msg"><span class="marker">&gt;</span><span>wait — I heard about secret-shuttle. set it up so I don't have to babysit secrets in chat</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">WebFetch</span><span class="args">(raw.githubusercontent.com/.../SKILL.md)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  Fetched 3,481 bytes — "agent operating manual"</span></div>
+            </div>
+            <div class="group">
+              <div class="line assistant"><span>Got it. Quick model:</span></div>
+              <div class="line assistant" style="margin-top:6px"><span>  • Local daemon owns a vault, unlocked by a passphrase</span></div>
+              <div class="line assistant"><span>    <span class="em">you</span> (not me) type into a local web window.</span></div>
+              <div class="line assistant" style="margin-top:4px"><span>  • I work through refs like</span></div>
+              <div class="line assistant"><span>    <span class="em">ss://stripe/prod/STRIPE_WEBHOOK_SECRET</span> — never the raw value.</span></div>
+              <div class="line assistant" style="margin-top:4px"><span>  • Production actions open an approval window in your browser. You approve there. <span class="warn">No CLI bypass.</span></span></div>
+              <div class="line assistant" style="margin-top:4px"><span>  • For Vercel, GitHub Actions, Cloudflare, Supabase I use shipped templates — the secret reaches the CLI on stdin or a 0600 env-file. Never argv, never env.</span></div>
+              <div class="line assistant" style="margin-top:8px"><span>Want me to install it?</span></div>
+            </div>
+            <div class="group">
+              <div class="line user-msg"><span class="marker">&gt;</span><span>yes<span class="cursor"></span></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 3: terminal + unlock window -->
+      <div class="scene-stage" data-scene="3">
+        <div class="scene-caption">scene 03 — installing · unlocking the vault</div>
+
+        <div class="win term">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">~/projects/myapp — claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(npm install -g secret-shuttle)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  + secret-shuttle@0.1.1</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  added 1 package in 3.2s</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle daemon start)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="json">  { <span class="k">"started"</span>: <span class="b">true</span>, <span class="k">"pid"</span>: <span class="n">8421</span> }</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle unlock)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  Opening unlock window in your browser…</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  (I cannot read the passphrase. Type it into the window →)</span></div>
+            </div>
+            <div class="group">
+              <div class="line status">waiting<span class="cursor"></span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="win unlock">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">Unlock Secret Shuttle</div>
+          </div>
+          <div class="unlock-body">
+            <h2>Create a vault passphrase</h2>
+            <p>This protects every secret you'll store. The CLI never sees it. Lose it and the vault is unrecoverable.</p>
+            <input class="unlock-input" type="password" value="••••••••••••" disabled />
+            <button class="unlock-btn">Create &amp; unlock</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 4: terminal solo — agent install -->
+      <div class="scene-stage" data-scene="4" data-layout="center">
+        <div class="scene-caption">scene 04 — installing the agent skill</div>
+        <div class="win term" style="width:680px">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">~/projects/myapp — claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle agent install claude)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="json">  {</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="json">    <span class="k">"written"</span>: <span class="s">".claude/skills/secret-shuttle/SKILL.md"</span>,</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="json">    <span class="k">"bytes"</span>: <span class="n">3481</span>,</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="json">    <span class="k">"mode"</span>: <span class="s">"wholesale"</span></span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="json">  }</span></div>
+            </div>
+            <div class="group">
+              <div class="line assistant"><span class="status">Other agents are one command away:</span></div>
+              <div class="line assistant" style="margin-top:4px"><span class="status">  secret-shuttle agent install codex     # AGENTS.md</span></div>
+              <div class="line assistant"><span class="status">  secret-shuttle agent install cursor    # .cursor/rules/secret-shuttle.mdc</span></div>
+              <div class="line assistant"><span class="status">  secret-shuttle agent install copilot   # .github/copilot-instructions.md</span></div>
+            </div>
+            <div class="group">
+              <div class="line assistant"><span>Skill loaded. From here I'll follow the protocol — <span class="em">doctor first</span>, prefer template over browser, never log raw values, surface <span class="warn">manual_recovery_required</span> if the daemon can't prove the secret is gone.</span></div>
+              <div class="line assistant" style="margin-top:6px"><span>Ready for the next request.</span></div>
+            </div>
+            <div class="group">
+              <div class="line user-msg"><span class="marker">&gt;</span><span class="cursor"></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 5: terminal + two approval cards (1st marked approved) -->
+      <div class="scene-stage" data-scene="5">
+        <div class="scene-caption">scene 05 — first quick win · generate + push to vercel</div>
+
+        <div class="win term">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">~/projects/myapp — claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line user-msg"><span class="marker">&gt;</span><span>generate an INTERNAL_CRON_SECRET for prod and add it to vercel</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle doctor --json)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  daemon_reachable: </span><span class="ok">true</span><span class="dim"> · unlocked: </span><span class="ok">true</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  agentic_browser.available: false (not needed)</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle generate \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--name INTERNAL_CRON_SECRET --env production \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--kind random_32_bytes \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--allow-domain vercel.com \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--allow-action use_as_stdin)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="warn">  approval_required → opening UI</span></div>
+            </div>
+            <div class="group">
+              <div class="line status">…waiting for approval (1 of 2)<span class="cursor"></span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- approval A — generate (approved, behind, with stamp) -->
+        <div class="win approval approval-a">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">Secret Shuttle Approval</div>
+          </div>
+          <div class="approved-stamp">✓ approved</div>
+          <div class="approval-body">
+            <h2>Secret Shuttle</h2>
+            <div class="approval-action">Generate and store a new secret <b>ss://local/prod/INTERNAL_CRON_SECRET</b> (production)</div>
+            <div class="row"><span class="label">Environment</span><span class="v">production</span></div>
+            <div class="row"><span class="label">Injectable into</span><span class="v">vercel.com</span></div>
+            <div class="row"><span class="label">Action scope</span><span class="v">use_as_stdin</span></div>
+          </div>
+        </div>
+
+        <!-- approval B — template run (foreground) -->
+        <div class="win approval approval-b">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">Secret Shuttle Approval</div>
+          </div>
+          <div class="approval-body">
+            <h2>Secret Shuttle</h2>
+            <div class="approval-action">Run template <b>vercel-env-add</b> with secret <b>ss://local/prod/INTERNAL_CRON_SECRET</b></div>
+            <div class="row"><span class="label">Environment</span><span class="v">production</span></div>
+            <div class="row"><span class="label">Template</span><span class="v">vercel-env-add</span></div>
+            <div class="row"><span class="label">param: name</span><span class="v"><code>INTERNAL_CRON_SECRET</code></span></div>
+            <div class="row"><span class="label">param: environment</span><span class="v"><code>production</code></span></div>
+            <details class="approval-details">
+              <summary>Technical details</summary>
+              <div class="row"><span class="label">Binary</span><span class="v"><code>/usr/local/bin/vercel</code></span></div>
+              <div class="row"><span class="label">Binary sha256</span><span class="v"><code>1b4f…0e7d</code></span></div>
+              <div class="row"><span class="label">Delivery</span><span class="v"><code>stdin</code></span></div>
+            </details>
+            <div class="approval-actions">
+              <button class="ap-btn ap-deny">Deny</button>
+              <button class="ap-btn ap-approve">Approve</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 6: terminal + browser (stripe with marks) -->
+      <div class="scene-stage" data-scene="6">
+        <div class="scene-caption">scene 06 — daemon-owned chrome · marking the reveal + field</div>
+
+        <div class="win term">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line user-msg"><span class="marker">&gt;</span><span>ok now the stripe webhook → vercel one</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle browser start)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="json">  { <span class="k">"started"</span>: <span class="b">true</span>,</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="json">    <span class="k">"proxy_url"</span>: <span class="s">"ws://127.0.0.1:7421/cdp/9c…"</span> }</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Browser</span><span class="args">(open https://dashboard.stripe.com/webhooks)</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle browser mark pick --as reveal-btn)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  (click the reveal button →)</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="ok">  ▸ marked: reveal-btn</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(... mark pick --as webhook-secret-field)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="ok">  ▸ marked: webhook-secret-field</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  ready for reveal-capture<span class="cursor"></span></span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="win browser">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">Stripe Dashboard — daemon-managed Chrome</div>
+          </div>
+          <div class="browser-chrome">
+            <div class="nav-arrows"><span>‹</span><span class="disabled">›</span></div>
+            <div class="addr"><span class="lock">🔒</span>dashboard.stripe.com<span class="path">/webhooks/we_1NaKx2…</span></div>
+            <div class="nav-arrows"><span>⟳</span></div>
+          </div>
+          <div class="browser-body site" style="position:relative">
+            <div class="site-head">
+              <div class="logo" style="background:#635bff">S</div>
+              <div class="name">Stripe</div>
+              <div class="crumb">Developers › Webhooks › we_1NaKx2…</div>
+            </div>
+            <h3 class="site-h1">Endpoint signing secret</h3>
+            <p class="site-sub">Stripe signs the webhook event body with this secret. Verify the signature before processing.</p>
+            <div class="secret-block">
+              <div class="secret-line">
+                <span class="label-mini">Signing secret</span>
+                <span class="value hidden">whsec_••••••••••••••••••••••••••••</span>
+                <button class="reveal-btn" id="stripe-reveal-btn">Reveal</button>
+              </div>
+            </div>
+            <p class="site-sub" style="margin-top:12px">Signing secrets begin with <code>whsec_</code> and are 38 characters.</p>
+
+            <!-- mark overlays (absolute positioned over the form) -->
+            <div class="mark-box" style="left:99px; top:165px; width:248px; height:33px"></div>
+            <div class="mark" style="left:99px; top:140px">webhook-secret-field</div>
+            <div class="mark-box" style="left:354px; top:165px; width:74px; height:33px"></div>
+            <div class="mark" style="left:354px; top:140px">reveal-btn</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 7: terminal + browser (blind) + approval (reveal-capture) -->
+      <div class="scene-stage" data-scene="7">
+        <div class="scene-caption">scene 07 — reveal-capture · daemon takes the wheel</div>
+
+        <div class="win term">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle reveal-capture \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--name STRIPE_WEBHOOK_SECRET \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--env production --source stripe \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--reveal-handle reveal-btn \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--field-handle webhook-secret-field \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--allow-domain dashboard.stripe.com \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--allow-domain vercel.com)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="warn">  approval_required → opening UI</span></div>
+            </div>
+            <div class="group">
+              <div class="line status">🔒 blind mode active</div>
+              <div class="line status">agent observation suspended<span class="cursor"></span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="win browser">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">Stripe — daemon-managed Chrome</div>
+          </div>
+          <div class="browser-chrome">
+            <div class="nav-arrows"><span>‹</span><span class="disabled">›</span></div>
+            <div class="addr"><span class="lock">🔒</span>dashboard.stripe.com<span class="path">/webhooks/we_1NaKx2…</span></div>
+            <div class="nav-arrows"><span>⟳</span></div>
+          </div>
+          <div class="browser-body site" style="position:relative">
+            <div class="site-head">
+              <div class="logo" style="background:#635bff">S</div>
+              <div class="name">Stripe</div>
+              <div class="crumb">Developers › Webhooks › we_1NaKx2…</div>
+            </div>
+            <h3 class="site-h1">Endpoint signing secret</h3>
+            <div class="secret-block">
+              <div class="secret-line">
+                <span class="label-mini">Signing secret</span>
+                <span class="value hidden">whsec_••••••••••••••••••••••••••••</span>
+                <button class="reveal-btn">Reveal</button>
+              </div>
+            </div>
+            <div class="blind">
+              <div class="blind-badge"><span class="dot"></span>BLIND · agent observation suspended</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="win approval">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">Secret Shuttle Approval</div>
+          </div>
+          <div class="approval-body">
+            <h2>Secret Shuttle</h2>
+            <div class="approval-action">Click <b>reveal-btn</b> on <b>dashboard.stripe.com</b>, capture into <b>ss://stripe/prod/STRIPE_WEBHOOK_SECRET</b> (from <b>webhook-secret-field</b>, mode <code>field</code>), hide it, and auto-resume only if the secret is verified gone.</div>
+            <div class="row"><span class="label">Environment</span><span class="v">production</span></div>
+            <div class="row"><span class="label">URL host</span><span class="v"><code>dashboard.stripe.com</code></span></div>
+            <div class="row"><span class="label">Injectable into</span><span class="v">stripe.com, vercel.com</span></div>
+            <div class="row"><span class="label">Capture mode</span><span class="v"><code>field</code></span></div>
+            <details class="approval-details">
+              <summary>Technical details</summary>
+              <div class="row"><span class="label">Browser target</span><span class="v"><code>page/9c…f2</code></span></div>
+              <div class="row"><span class="label">Reveal fp</span><span class="v"><code>fp:b3a…d2</code></span></div>
+              <div class="row"><span class="label">Field fp</span><span class="v"><code>fp:f7e…11</code></span></div>
+            </details>
+            <div class="approval-warn">Approving authorizes auto-resume only if the secret is verified gone (capture and absence checks pass). If not, blind mode stays on.</div>
+            <div class="approval-actions">
+              <button class="ap-btn ap-deny">Deny</button>
+              <button class="ap-btn ap-approve">Approve</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 8: terminal + browser (vercel, blind) + approval (inject-submit) -->
+      <div class="scene-stage" data-scene="8">
+        <div class="scene-caption">scene 08 — inject-submit · daemon writes, clicks save, hands back</div>
+
+        <div class="win term">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line assistant"><span>Captured. <span class="em">value_visible_to_agent: false</span>. Navigating to Vercel env vars…</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(... browser mark focused --as value-field)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="ok">  ▸ marked</span></div>
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(... browser mark pick --as save-button)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="ok">  ▸ marked</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle inject-submit \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--field-handle value-field \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--submit-handle save-button \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--success-text "Environment Variable Added" \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--domain vercel.com)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="warn">  approval_required → opening UI<span class="cursor"></span></span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="win browser">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">Vercel — daemon-managed Chrome</div>
+          </div>
+          <div class="browser-chrome">
+            <div class="nav-arrows"><span>‹</span><span class="disabled">›</span></div>
+            <div class="addr"><span class="lock">🔒</span>vercel.com<span class="path">/acme/myapp/settings/environment-variables</span></div>
+            <div class="nav-arrows"><span>⟳</span></div>
+          </div>
+          <div class="browser-body site" style="position:relative">
+            <div class="site-head">
+              <div class="logo" style="background:#000">▲</div>
+              <div class="name">Vercel</div>
+              <div class="crumb">acme / myapp › Settings › Env Vars</div>
+            </div>
+            <h3 class="site-h1">Add Environment Variable</h3>
+            <div class="form-row">
+              <label>Key</label>
+              <input value="STRIPE_WEBHOOK_SECRET" />
+            </div>
+            <div class="form-row">
+              <label>Value</label>
+              <input class="dotted" value="••••••••••••••••••••••••••" />
+              <span class="hint">whsec_… (38 chars)</span>
+            </div>
+            <div class="pill-row">
+              <span class="env-pill env-prod">production</span>
+              <button class="pill-button pill-primary">Save</button>
+              <button class="pill-button">Cancel</button>
+            </div>
+            <div class="blind">
+              <div class="blind-badge"><span class="dot"></span>BLIND · agent observation suspended</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="win approval">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">Secret Shuttle Approval</div>
+          </div>
+          <div class="approval-body">
+            <h2>Secret Shuttle</h2>
+            <div class="approval-action">Inject <b>ss://stripe/prod/STRIPE_WEBHOOK_SECRET</b> into <b>value-field</b> on <b>vercel.com</b>, click <b>save-button</b>, wait for success, and auto-resume only if the secret is verified gone.</div>
+            <div class="row"><span class="label">Environment</span><span class="v">production</span></div>
+            <div class="row"><span class="label">URL host</span><span class="v"><code>vercel.com</code></span></div>
+            <div class="row"><span class="label">Injectable into</span><span class="v">stripe.com, vercel.com</span></div>
+            <div class="row"><span class="label">Success marker</span><span class="v"><code>Environment Variable Added</code></span></div>
+            <details class="approval-details">
+              <summary>Technical details</summary>
+              <div class="row"><span class="label">Browser target</span><span class="v"><code>page/8a…21</code></span></div>
+              <div class="row"><span class="label">Field fp</span><span class="v"><code>fp:c91…83</code></span></div>
+              <div class="row"><span class="label">Submit fp</span><span class="v"><code>fp:5e2…07</code></span></div>
+            </details>
+            <div class="approval-warn">Approving authorizes auto-resume only if the secret is verified gone (success and absence checks pass). If not, blind mode stays on.</div>
+            <div class="approval-actions">
+              <button class="ap-btn ap-deny">Deny</button>
+              <button class="ap-btn ap-approve">Approve</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scene 9: terminal centered — doctor + summary -->
+      <div class="scene-stage" data-scene="9" data-layout="center">
+        <div class="scene-caption">scene 09 — all green · the loop closes</div>
+        <div class="win term" style="width:680px">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">~/projects/myapp — claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line assistant"><span>Injected and submitted. <span class="em">absence_proof: passed</span>. Observation auto-resumed.</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle doctor)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  daemon:           </span><span class="ok">running (pid 8421)</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  vault:            </span><span class="ok">unlocked</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  browser:          </span><span class="ok">ready (proxy active)</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  policy:           </span><span class="ok">ok (allow-list scoped)</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  local files:      </span><span class="ok">ok (0600)</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  agentic flows:    </span><span class="ok">available</span></div>
+            </div>
+            <div class="group">
+              <div class="line assistant"><span>Done.</span></div>
+              <div class="line assistant" style="margin-top:6px"><span>Stripe webhook signing secret is now in Vercel production env. You never saw the value. I never saw the value. It never appeared in any argv, env var, log line, or chat transcript.</span></div>
+              <div class="line assistant" style="margin-top:6px"><span>  stored at:   <span class="em">ss://stripe/prod/STRIPE_WEBHOOK_SECRET</span></span></div>
+              <div class="line assistant"><span>  fingerprint: <span class="em">sha256:9c7…f2a</span></span></div>
+              <div class="line assistant" style="margin-top:6px"><span>Next time you need a secret, just ask.</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="final-strip">
+          <div class="meta">Shipped without seeing it →</div>
+          <div class="ref">ss://stripe/prod/STRIPE_WEBHOOK_SECRET</div>
+          <div class="meta">fingerprint:</div>
+          <div class="ref">sha256:9c7…f2a</div>
+        </div>
+      </div>
+
+    </section>
+  </div>
+
+  <script>
+    (function () {
+      const TOTAL = 9;
+      const NAMES = [
+        "The pain",
+        "Discovery",
+        "Install + unlock",
+        "Agent skill install",
+        "First quick win",
+        "Browser + marks",
+        "Reveal-capture",
+        "Inject-submit",
+        "Doctor + done",
+      ];
+
+      let scene = 1;
+
+      const $sceneNum  = document.getElementById("scene-num");
+      const $sceneName = document.getElementById("scene-name");
+      const $fill      = document.getElementById("progress-fill");
+      const $back      = document.getElementById("back");
+      const $next      = document.getElementById("next");
+      const $metas     = document.querySelectorAll(".scene-meta");
+      const $stages    = document.querySelectorAll(".scene-stage");
+
+      function render() {
+        $sceneNum.textContent  = String(scene).padStart(2, "0");
+        $sceneName.textContent = NAMES[scene - 1];
+        $fill.style.width = (scene / TOTAL * 100) + "%";
+
+        $metas.forEach(el => el.classList.toggle("active", Number(el.dataset.scene) === scene));
+        $stages.forEach(el => el.classList.toggle("active", Number(el.dataset.scene) === scene));
+
+        $back.disabled = scene === 1;
+        $next.disabled = scene === TOTAL;
+        $next.textContent = scene === TOTAL ? "End" : "Next →";
+      }
+
+      function go(delta) {
+        const target = Math.min(Math.max(scene + delta, 1), TOTAL);
+        if (target === scene) return;
+        scene = target;
+        render();
+      }
+
+      $back.addEventListener("click", () => go(-1));
+      $next.addEventListener("click", () => go(+1));
+
+      // Listen on both document and window for robustness, especially in iframes.
+      function handleKey(e) {
+        const t = e.target;
+        if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.key === "ArrowRight" || e.key === " " || e.key === "PageDown") { e.preventDefault(); go(+1); }
+        else if (e.key === "ArrowLeft" || e.key === "PageUp")                { e.preventDefault(); go(-1); }
+        else if (e.key === "Home")                                            { e.preventDefault(); scene = 1; render(); }
+        else if (e.key === "End")                                             { e.preventDefault(); scene = TOTAL; render(); }
+        else if (/^[1-9]$/.test(e.key))                                       { e.preventDefault(); scene = Number(e.key); render(); }
+      }
+      document.addEventListener("keydown", handleKey);
+      window.addEventListener("keydown", handleKey);
+
+      // Claim focus so keys arrive — body has tabindex="0".
+      window.addEventListener("load", () => {
+        document.body.focus();
+        // Also re-focus when the user clicks anywhere outside an input
+        document.addEventListener("click", (e) => {
+          const t = e.target;
+          if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLButtonElement) return;
+          document.body.focus();
+        });
+      });
+
+      render();
+    })();
+  </script>
+</body>
+</html>
