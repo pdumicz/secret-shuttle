@@ -37,3 +37,20 @@ export function optBool(o: Record<string, unknown>, f: string): boolean | undefi
   if (typeof v !== "boolean") bad(f, "must be a boolean");
   return v;
 }
+
+export function optStringRecord(
+  o: Record<string, unknown>,
+  f: string,
+): Record<string, string> | undefined {
+  const v = o[f];
+  if (v === undefined) return undefined;
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    bad(f, "must be a string-to-string record");
+  }
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof val !== "string") bad(f, `value for "${k}" must be a string`);
+    out[k] = val;
+  }
+  return out;
+}

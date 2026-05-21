@@ -10,16 +10,9 @@ import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { ShuttleError } from "../../../shared/errors.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
+import { asObject, optBool, optString, optStringRecord, reqString } from "../validate.js";
 
 const registry = new TemplateRegistry();
-
-interface RunBody {
-  template_id: string;
-  ref: string;
-  params?: Record<string, string>;
-  approval_id?: string;
-  wait_for_approval?: boolean;
-}
 
 export function registerTemplates(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/templates/list", () => ({
@@ -33,31 +26,44 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
 
   server.addRoute("POST", "/v1/templates/run", async (_req, raw) => {
     services.lock.requireKey();
-    const b = raw as RunBody;
+
+    // Validate request body shape before everything else.  These throws fire
+    // outside the try/audit block — matching the inject-submit / reveal-capture
+    // pattern, where client-side malformed bodies (bad_request) do not write
+    // template_run audit records.  The previous `raw as RunBody` cast could
+    // surface a non-string params value as a downstream 500 (e.g. .trim() on
+    // a number inside validateParams).
+    const o = asObject(raw);
+    const templateId = reqString(o, "template_id");
+    const ref = reqString(o, "ref");
+    const params = optStringRecord(o, "params") ?? {};
+    const approvalId = optString(o, "approval_id");
+    const waitForApproval = optBool(o, "wait_for_approval");
+
     // Hoisted so the catch block can include them in the failure audit record.
     let effectiveEnv: string | undefined;
     let destEnv: string | undefined;
     try {
-      const tpl = registry.get(b.template_id);
-      const secret = await services.vault.getSecret(b.ref);
+      const tpl = registry.get(templateId);
+      const secret = await services.vault.getSecret(ref);
       assertSecretActionAllowed(secret, "use_as_stdin");
 
       // Reject padded params before everything else — before validateParams,
       // before destinationEnvironment, before the approval binding is built.
       // Padding creates a raw-vs-trimmed divergence that can bypass the
       // production-approval check (see assertNoPaddedParams in registry.ts).
-      assertNoPaddedParams(b.params ?? {});
+      assertNoPaddedParams(params);
 
       // Validate template params before creating the approval grant so a human
       // is never prompted for a structurally invalid request.
-      tpl.validateParams?.(b.params ?? {});
+      tpl.validateParams?.(params);
 
       // Compute the effective environment BEFORE binary resolution so the
       // approval gate fires first — even when the secret is development-classed
       // but the template destination is production (e.g. vercel-env-add with
       // environment=production).  The approval_required error must surface before
       // an unsafe_binary_path error when both conditions hold.
-      destEnv = tpl.destinationEnvironment?.(b.params ?? {});
+      destEnv = tpl.destinationEnvironment?.(params);
       effectiveEnv =
         secret.environment === "production" || destEnv === "production"
           ? "production"
@@ -90,7 +96,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         target_id: null,
         field_fingerprint: null,
         template_id: tpl.id,
-        template_params: b.params ?? {},
+        template_params: params,
         template_binary_path: absolute,
         template_binary_sha256: sha256,
       };
@@ -101,8 +107,8 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         store: services.approvals,
         binding,
         daemonPort: daemonPortRef(),
-        ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
-        ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
+        ...(approvalId !== undefined ? { approvalIdFromClient: approvalId } : {}),
+        ...(waitForApproval === false ? { waitMs: 0 } : {}),
       });
 
       // Now that the human has approved, surface any binary resolution failure.
@@ -111,7 +117,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
 
       const result = await runTemplate({
         template: { ...tpl, binary: absolute as string },
-        params: b.params ?? {},
+        params,
         secret: secret.value,
         expectedSha256: sha256 as string,
         tmpDir: services.tmpDir,
@@ -139,10 +145,10 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         action: "template_run",
         ok: false,
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
-        ...(b.ref !== undefined ? { ref: b.ref } : {}),
+        ref,
         ...(effectiveEnv !== undefined ? { environment: effectiveEnv } : {}),
         ...(destEnv !== undefined ? { destination_environment: destEnv } : {}),
-        ...(b.template_id !== undefined ? { template_id: b.template_id } : {}),
+        template_id: templateId,
       });
       throw err;
     }

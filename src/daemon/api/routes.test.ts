@@ -557,6 +557,75 @@ test("POST /v1/templates/run rejects padded params with invalid_template_param B
   });
 });
 
+// Body-schema validation tests — close the unchecked-cast Minor from the
+// Round 7 re-review (templates route used `raw as RunBody` so non-string
+// param values, non-object params, and missing required fields produced
+// either downstream 500s or misleading error codes).  All malformed bodies
+// must surface as 400 bad_request without auditing or creating an approval.
+
+test("POST /v1/templates/run with non-string params value returns 400 bad_request (no 500 crash)", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "STRIPE_KEY", environment: "development", kind: "random_32_bytes",
+    });
+    const approvalsBefore = (ctx.services.approvals as unknown as { grants: Map<string, unknown> }).grants.size;
+    const r = await call(ctx, "POST", "/v1/templates/run", {
+      template_id: "vercel-env-add",
+      ref: "ss://local/dev/STRIPE_KEY",
+      // Non-string value would previously crash inside validateParams when it
+      // called `.trim()` on the number, surfacing as a 500 unexpected_error.
+      params: { name: 123, environment: "development" },
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "bad_request");
+    const approvalsAfter = (ctx.services.approvals as unknown as { grants: Map<string, unknown> }).grants.size;
+    assert.equal(approvalsAfter, approvalsBefore, "no approval should be created for a malformed body");
+  });
+});
+
+test("POST /v1/templates/run with non-object params (array) returns 400 bad_request", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "STRIPE_KEY", environment: "development", kind: "random_32_bytes",
+    });
+    const r = await call(ctx, "POST", "/v1/templates/run", {
+      template_id: "vercel-env-add",
+      ref: "ss://local/dev/STRIPE_KEY",
+      params: ["bad-shape"],
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "bad_request");
+  });
+});
+
+test("POST /v1/templates/run with missing template_id returns 400 bad_request (not template_not_found)", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await call(ctx, "POST", "/v1/templates/run", {
+      ref: "ss://local/dev/X",
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "bad_request");
+  });
+});
+
+test("POST /v1/templates/run with missing ref returns 400 bad_request", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await call(ctx, "POST", "/v1/templates/run", {
+      template_id: "vercel-env-add",
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "bad_request");
+  });
+});
+
 // Fix 1 tests — blind end requires human approval
 
 test("blind end requires human approval and is not agent-controlled", async () => {

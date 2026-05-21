@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
-import { asObject, reqString, optStringArray } from "./validate.js";
+import { asObject, reqString, optStringArray, optStringRecord } from "./validate.js";
 
 test("asObject rejects non-objects with bad_request", () => {
   assert.throws(() => asObject(null), (e) => e instanceof ShuttleError && e.code === "bad_request");
@@ -20,4 +20,47 @@ test("optStringArray validates element types", () => {
   assert.equal(optStringArray({}, "d"), undefined);
   assert.throws(() => optStringArray({ d: [1] }, "d"), (e) => e instanceof ShuttleError);
   assert.deepEqual(optStringArray({ d: ["a"] }, "d"), ["a"]);
+});
+
+test("optStringRecord rejects non-object shapes with bad_request", () => {
+  assert.throws(
+    () => optStringRecord({ p: null }, "p"),
+    (e) => e instanceof ShuttleError && e.code === "bad_request",
+  );
+  assert.throws(
+    () => optStringRecord({ p: [] }, "p"),
+    (e) => e instanceof ShuttleError && e.code === "bad_request",
+  );
+  assert.throws(
+    () => optStringRecord({ p: "not-an-object" }, "p"),
+    (e) => e instanceof ShuttleError && e.code === "bad_request",
+  );
+  assert.throws(
+    () => optStringRecord({ p: 42 }, "p"),
+    (e) => e instanceof ShuttleError && e.code === "bad_request",
+  );
+});
+
+test("optStringRecord rejects non-string values and names the offending key", () => {
+  assert.throws(
+    () => optStringRecord({ p: { name: 123 } }, "p"),
+    (e) =>
+      e instanceof ShuttleError &&
+      e.code === "bad_request" &&
+      e.message.includes("p") &&
+      e.message.includes("name"),
+  );
+  assert.throws(
+    () => optStringRecord({ p: { ok: "x", bad: null } }, "p"),
+    (e) =>
+      e instanceof ShuttleError &&
+      e.code === "bad_request" &&
+      e.message.includes("bad"),
+  );
+});
+
+test("optStringRecord returns undefined when missing and the record on happy path", () => {
+  assert.equal(optStringRecord({}, "p"), undefined);
+  assert.deepEqual(optStringRecord({ p: {} }, "p"), {});
+  assert.deepEqual(optStringRecord({ p: { a: "x", b: "y" } }, "p"), { a: "x", b: "y" });
 });
