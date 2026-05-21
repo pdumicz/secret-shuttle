@@ -2,6 +2,10 @@
 
 Let AI agents use secrets without seeing them.
 
+[**▶ Walk through the demo →**](https://pdumicz.github.io/secret-shuttle/demo/)  ·  9-scene click-through of a dev shipping a Stripe webhook secret to Vercel prod without ever seeing the value.
+
+[![Secret Shuttle demo — reveal-capture scene](demo/preview.png)](https://pdumicz.github.io/secret-shuttle/demo/)
+
 > **Status: 0.1.1 — early prototype. Do not trust this with real production secrets yet.**
 >
 > Secure Mode V2 (daemon-owned vault, CDP proxy, approval UI) has landed on `main`. It has been through several rounds of adversarial security review with fixes, but it has **not** been independently audited or released as a versioned package. Treat it as an early prototype: use only with test accounts and throwaway secrets.
