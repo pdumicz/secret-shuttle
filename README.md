@@ -93,14 +93,19 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 - `ss://source/env/name` refs
 - Generate, capture (focused field / selection), inject, compare — all routed through the daemon
 - Inject runs inside a daemon-managed blind window (no manual `blind start`)
+- Agentic blind transactions: `inject-submit` writes a stored secret into a marked field, clicks the marked submit control, waits for the approved success marker, and proves the raw secret is absent from every daemon-observable surface before auto-resuming. `reveal-capture` clicks a marked reveal control, captures the now-visible bytes from a marked field or ancestor container, hides them, and writes them to the vault only after the absence proof passes
+- `secret-shuttle browser mark focused|pick --as <label>` records fields/controls before blind mode by opaque label; only non-secret element metadata is stored
 - Vault-keyed HMAC fingerprints; production `compare` is approval-gated + rate-limited
 - Fail-closed domain policy (empty allow-list = injectable nowhere); approvals show the scope
-- `secret-shuttle doctor` health-check (daemon, vault, browser, policy, local files)
+- Approval-integrity invariant: scope params with leading/trailing whitespace are rejected, so the destination the human approves always matches the argv that actually executes
+- `secret-shuttle doctor` health-check (daemon, vault, browser, policy, local files, agentic-flows availability)
 - Daemon bearer token is scrubbed from the daemon and all child process envs
 - Approval UI with one-shot, context-bound grants for production actions
 - Daemon-owned Chrome over `--remote-debugging-pipe`
 - Filtered WebSocket CDP proxy that blocks screenshots, DOM, accessibility, runtime, console, log, and network-body reads during blind mode
-- Built-in `vercel-env-add` command template
+- Built-in templates (stdin delivery): `vercel-env-add`, `github-actions-secret-set`, `cloudflare-secret-put`
+- Built-in template (daemon-owned `0600` env-file delivery with crash-safe startup + periodic sweep): `supabase-edge-secret-set`
+- `secret-shuttle agent install <claude|codex|cursor|copilot>` writes the canonical Secret Shuttle skill into your project; `secret-shuttle agent print-skill-url` prints the raw GitHub URL for any agent that accepts a remote skill URL
 - Exact-by-default domain matching (`*.example.com` for wildcards)
 - Migration command: `secret-shuttle migrate secure-vault`
 
@@ -108,10 +113,11 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 
 - OS-keychain or hardware-backed key storage
 - Team vaults, cloud sync, MCP server, browser extension
-- Platform-specific helpers for Stripe, Supabase, Clerk, GitHub Actions, Cloudflare, Railway
+- Real-page browser gates ([P2a] PENDING): treat Stripe `reveal-capture` and Vercel `inject-submit` as best-effort until each provider's manual gate outcome is recorded — the absence proof stays conservatively fail-closed regardless, so "best-effort" means "auto-resume may not succeed on every page", not "the secret may leak"
+- Template argv-vs-`--help` gates ([P2b] PENDING): the shipped templates' argv vectors have not been verified against the current `gh` / `wrangler` / `supabase` `--help` output on a per-release basis
+- Deferred provider templates (`github-actions-env-secret-set`, `github-actions-org-secret-set`, `railway-variable-set`, `netlify-env-set`, `clerk-env-set`) — see [docs/templates-deferred.md](docs/templates-deferred.md) for the reason and re-open criteria
 - Signed desktop binaries
 - Secret rotation / import / export workflows
-- Templates beyond `vercel-env-add`
 
 ## Docs
 

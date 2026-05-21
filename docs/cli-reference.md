@@ -74,6 +74,21 @@ secret-shuttle inject-submit \
 
 Before blind mode, mark the field and submit control with `secret-shuttle browser mark focused|pick --as <label>`; the daemon then owns the whole transaction (the agent's browser access is severed while the secret is on the page). The daemon injects the stored secret into the marked field, clicks the marked submit control, waits for the approved success marker, and proves the raw secret is absent from every daemon-observable surface. It always requires human approval through the daemon UI (it authorizes auto-resume; `--approval-id` / `--no-wait` work as elsewhere); the approval UI shows the field/submit labels, the success marker, and an explicit auto-resume disclosure. Observation auto-resumes only if the success marker was observed and the absence proof passed; otherwise blind mode stays active and the response is `next: "manual_recovery_required"`, which the agent must surface to the human to run `secret-shuttle blind end` — the agent must not resume itself. The handles are revalidated and the submit handle must be on the same page/target + domain as the field handle (fail-closed), and the secret's `allowed_actions` must include `inject_submit` (no implicit grant from `inject_into_field`). Responses are enum-only and never contain the raw secret or any observed page text. Whether auto-resume succeeds in practice on a given provider's pages is best-effort; if a site forces manual recovery the secret was still written safely under blind mode and `secret-shuttle blind end` is the recovery. Unlike `inject`, which only writes the secret into the focused field and leaves a human to save and end blind manually, `inject-submit` also clicks submit, verifies success, and auto-resumes only if the secret is proven gone.
 
+## `secret-shuttle reveal-capture`
+
+```bash
+secret-shuttle reveal-capture \
+  --name STRIPE_WEBHOOK_SECRET \
+  --env production \
+  --source stripe \
+  --reveal-handle reveal-btn \
+  --field-handle webhook-secret-field \
+  --hide-handle hide-btn \
+  --allow-domain dashboard.stripe.com
+```
+
+Before blind mode, mark the reveal control and either the secret field (mode `field`) or a stable ancestor (`--container-handle <label> --capture focused-after-reveal`, mode `container`) with `secret-shuttle browser mark focused|pick --as <label>`; optionally mark a hide control with `--hide-handle` (if omitted, the daemon blanks every page after capture). The daemon owns the whole transaction — the agent's browser access is severed before the reveal click. The daemon clicks the marked reveal control, captures the now-visible secret from the marked scope, clicks the marked hide control (or blanks pages), and proves the captured raw bytes are absent from every daemon-observable surface before auto-resuming. The approval UI shows the reveal label, capture mode + scope label, the hide label (if any), and an explicit auto-resume disclosure. Observation auto-resumes only if the absence proof passes; otherwise blind mode stays active and the response is `next: "manual_recovery_required"`, which the agent must surface to the human to run `secret-shuttle blind end` — the agent must not resume itself. The reveal/field/container/hide handles are revalidated and must all share the same page/target + domain (fail-closed). Responses are enum-only and never contain the raw secret or any observed page text. Whether the capture succeeds on a given provider's page is best-effort; if a site forces manual recovery the secret was never revealed to the agent and `secret-shuttle blind end` is the recovery. Unlike `capture`, which records a secret from a field a human has already revealed, `reveal-capture` performs the reveal click itself under blind mode and writes the captured bytes into the vault only after proving they are gone from every observable surface.
+
 ## `secret-shuttle compare`
 
 ```bash
@@ -125,6 +140,19 @@ To override the Chrome binary, create `~/.secret-shuttle/daemon.config.json` (mo
 ```
 
 before running `secret-shuttle daemon start`. The agent cannot influence this file through the CLI/API. When `chromeSha256` is set, the daemon refuses to launch if the binary's hash does not match.
+
+## `secret-shuttle browser mark focused | pick`
+
+```bash
+secret-shuttle browser mark focused --as webhook-secret-field
+secret-shuttle browser mark pick --as save-button --timeout-ms 30000
+```
+
+Marks a UI element for the daemon to reference under blind mode by an opaque label. `focused` records whatever is the document's `activeElement` at the moment of the call. `pick` activates the browser's element-inspect overlay so a human clicks the target — no page event is dispatched and no DOM is read back to the agent. Use these to mark a field + submit control before `inject-submit`, or a reveal control + field/container (+ optional hide control) before `reveal-capture`. The label is opaque; the daemon stores only non-secret element metadata (frame ID, page key, structural attributes) and uses the mark to locate the element again under blind mode. `--timeout-ms` applies to `pick` only (default 30000, cap 120000).
+
+## `secret-shuttle browser marks`
+
+Lists active marks. Returns non-secret metadata only — labels, frame IDs, target/domain bindings, and expiry. No selectors, no DOM text, no attribute values that could carry user input.
 
 ## `secret-shuttle list | inspect`
 
