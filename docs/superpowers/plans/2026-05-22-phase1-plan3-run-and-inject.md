@@ -1355,7 +1355,7 @@ class CollectingWriter implements OutputWriter {
   stdoutChunks: Buffer[] = [];
   stderrChunks: Buffer[] = [];
   exitCode: number | null = null;
-  errors: Array<{ code: string; message: string }> = [];
+  errors: Array<{ code: string; message: string; exit_code?: number }> = [];
 
   writeStdout(chunk: Buffer): void {
     this.stdoutChunks.push(chunk);
@@ -1366,7 +1366,7 @@ class CollectingWriter implements OutputWriter {
   writeExit(code: number): void {
     this.exitCode = code;
   }
-  writeError(err: { code: string; message: string }): void {
+  writeError(err: { code: string; message: string; exit_code?: number }): void {
     this.errors.push(err);
   }
   stdout(): string {
@@ -1416,7 +1416,7 @@ test("spawnAndStream: forwards non-zero exit codes", async () => {
   assert.equal(w.exitCode, 42);
 });
 
-test("spawnAndStream: missing binary writes spawn_failed error + exit 127", async () => {
+test("spawnAndStream: missing binary writes spawn_failed error + exit 127 (both error.exit_code and writeExit)", async () => {
   const w = new CollectingWriter();
   await spawnAndStream({
     cmd: "/totally/nonexistent/binary",
@@ -1428,6 +1428,10 @@ test("spawnAndStream: missing binary writes spawn_failed error + exit 127", asyn
   assert.equal(w.exitCode, 127);
   assert.equal(w.errors.length, 1);
   assert.equal(w.errors[0]!.code, "spawn_failed");
+  // The error itself must carry exit_code 127 so the CLI overrides the
+  // spawn_failed registry default (TRANSIENT=1) and exits with the POSIX
+  // command-not-found convention.
+  assert.equal(w.errors[0]!.exit_code, 127, "writeError must include exit_code: 127");
 });
 
 test("spawnAndStream: env vars are injected verbatim (shell:false; no expansion)", async () => {
@@ -1517,7 +1521,15 @@ export interface OutputWriter {
   writeStdout(chunk: Buffer): void;
   writeStderr(chunk: Buffer): void;
   writeExit(code: number): void;
-  writeError(err: { code: string; message: string }): void;
+  /**
+   * Surface a structured daemon-side error mid-stream. `exit_code` is optional;
+   * when present, it OVERRIDES the registry default on the CLI side via
+   * daemonErrorFromPayload. This matters for spawn_failed: the registry default
+   * is 1 (TRANSIENT), but POSIX convention for "command not found" is 127 —
+   * we want `secret-shuttle run -- missing-binary` to exit 127 like
+   * `op run` / `doppler run`.
+   */
+  writeError(err: { code: string; message: string; exit_code?: number }): void;
 }
 
 export interface SpawnInput {
@@ -1570,6 +1582,7 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
       input.outputWriter.writeError({
         code: "spawn_failed",
         message: e instanceof Error ? e.message : String(e),
+        exit_code: 127, // POSIX convention for "command not found" / "command cannot execute"
       });
       input.outputWriter.writeExit(127);
       resolve();
@@ -1599,7 +1612,7 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
       if (exited) return;
       exited = true;
       if (killTimer !== undefined) clearTimeout(killTimer);
-      input.outputWriter.writeError({ code: "spawn_failed", message: err.message });
+      input.outputWriter.writeError({ code: "spawn_failed", message: err.message, exit_code: 127 });
       input.outputWriter.writeExit(127);
       resolve();
     });
@@ -2177,6 +2190,42 @@ test("POST /v1/run/resolve: audit log gains a per-ref entry per run (success pat
 });
 
 // -----------------------------------------------------------------------------
+// spawn_failed wire contract
+// -----------------------------------------------------------------------------
+
+test("POST /v1/run/resolve: missing binary → stream error carries exit_code 127 + exit line is 127", async () => {
+  // Regression for: spawner emits writeExit(127) but the CLI throws streamError
+  // before applying the exit line, so the ShuttleError's exitCode would fall
+  // back to the spawn_failed registry default (TRANSIENT=1). Net effect:
+  // `secret-shuttle run -- missing-binary` would exit 1, not the POSIX-
+  // canonical 127. Fixed by carrying exit_code on the error stream line —
+  // daemonErrorFromPayload then preserves it through ShuttleError.exitCode.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [],
+      env: [],
+      command: "/this/binary/does/not/exist/anywhere",
+      args: [],
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 200, "spawn_failed surfaces IN the stream, not as a pre-stream HTTP error");
+    const errorLine = r.lines.find((l) => "error" in l) as
+      | { error: { code: string; message: string; exit_code?: number } }
+      | undefined;
+    assert.ok(errorLine, "expected an `error` stream line for spawn_failed");
+    assert.equal(errorLine.error.code, "spawn_failed");
+    assert.equal(
+      errorLine.error.exit_code,
+      127,
+      "error stream line MUST carry exit_code: 127 so the CLI exits with 127, not 1",
+    );
+    const exitLine = r.lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 127, "exit stream line must also be 127");
+  });
+});
+
+// -----------------------------------------------------------------------------
 // Cancellation
 // -----------------------------------------------------------------------------
 
@@ -2608,7 +2657,16 @@ export function registerRunResolveRoute(
       },
       writeError(err) {
         if (!isWritable()) return;
-        res.write(JSON.stringify({ error: { code: err.code, message: err.message } }) + "\n");
+        // Forward exit_code on the wire so the CLI's daemonErrorFromPayload
+        // path picks it up — without this, spawn_failed would fall back to
+        // the registry default (TRANSIENT=1) and `run -- missing-binary`
+        // would exit 1 instead of the POSIX-canonical 127.
+        const errorPayload: { code: string; message: string; exit_code?: number } = {
+          code: err.code,
+          message: err.message,
+        };
+        if (err.exit_code !== undefined) errorPayload.exit_code = err.exit_code;
+        res.write(JSON.stringify({ error: errorPayload }) + "\n");
       },
     };
 
@@ -2712,7 +2770,7 @@ import { registerRunResolveRoute } from "./routes/run-resolve.js";
 registerRunResolveRoute(server, services, daemonPortRef);
 ```
 
-- [ ] **Step 9: Run route tests — expect PASS** (18 tests including the cross-stream-leak regression, 5 strict-validation cases, and 2 pre-spawn failure-audit cases)
+- [ ] **Step 9: Run route tests — expect PASS** (19 tests including the cross-stream-leak regression, 5 strict-validation cases, 2 pre-spawn failure-audit cases, and the spawn_failed exit-code-127 wire contract)
 
 ```bash
 npm run build && node --test "dist/daemon/api/routes/run-resolve.test.js"
@@ -3969,7 +4027,7 @@ before sending so the daemon's HOME check is meaningful."
 
 ### Task E1: Full suite verification
 
-- [ ] **Step 1:** `npm test` — all pass (expect ~605 baseline + ~92 new tests across A1 (13), B0 (4), B1 (5), B2 (registry count update), B3 (5), B4 (12), B5 spawner (8), B5 route (18), C1 (3), D1 template (9), D1 route (13), D2 (3) = **~697 total**).
+- [ ] **Step 1:** `npm test` — all pass (expect ~605 baseline + ~93 new tests across A1 (13), B0 (4), B1 (5), B2 (registry count update), B3 (5), B4 (12), B5 spawner (8), B5 route (19), C1 (3), D1 template (9), D1 route (13), D2 (3) = **~698 total**).
 - [ ] **Step 2:** `npm run typecheck` — pass.
 - [ ] **Step 3:** `npm run check-pack` — pass.
 - [ ] **Step 4: Smoke tests**
