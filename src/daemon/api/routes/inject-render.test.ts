@@ -405,3 +405,37 @@ test("POST /v1/inject/render with output_path='-' marks the audit entry value_vi
     }
   });
 });
+
+test("POST /v1/inject/render: failed stdout passthrough does NOT mark value_visible_to_agent true", async () => {
+  // Regression for the prior over-reporting fix: valueVisibleToAgent must
+  // reflect whether the CLI actually received plaintext, not whether the
+  // request asked for stdout passthrough. A failed production-ref render
+  // with wait_for_approval=false should still audit as
+  // value_visible_to_agent=false because no rendered bytes ever left the daemon.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "production", name: "PROD_K", value: "v",
+    });
+    const r = await call(ctx, "POST", "/v1/inject/render", {
+      template: `k: ${ref}`,
+      output_path: "-",
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error_code: string }).error_code, "approval_required");
+    const auditPath = path.join(ctx.home, "audit.jsonl");
+    const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
+    const matches = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.action === "inject_render" && e.ref === ref);
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0]!.ok, false);
+    assert.equal(matches[0]!.error_code, "approval_required");
+    assert.equal(
+      matches[0]!.value_visible_to_agent,
+      false,
+      "failed stdout passthrough must NOT report plaintext exposure",
+    );
+  });
+});

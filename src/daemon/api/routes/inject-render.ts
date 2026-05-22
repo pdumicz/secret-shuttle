@@ -28,17 +28,18 @@ export function registerInjectRenderRoute(
 
     const parsed = parseTemplate(template);
 
-    // Compute once — stdout-passthrough mode surfaces plaintext in the response
-    // body, so the agent (and anything that sees the HTTP response) can read it.
-    const valueVisibleToAgent = outputPath === "-";
-
     // Per-ref audit at the END must always fire — declare these outside the try
     // so the finally block sees them. `resolved` may still be undefined if the
     // resolveRefs() throw fires (deleted ref → secret_not_found); the finally
     // block tolerates that.
+    // valueVisibleToAgent tracks ACTUAL exposure: it stays false until we are
+    // about to return rendered content in the response body (stdout-passthrough
+    // success path). Any failure — including a failed `inject -o -` — leaves it
+    // false because no plaintext ever reached the CLI.
     let resolved: Awaited<ReturnType<typeof services.vault.resolveRefs>> | undefined;
     let auditOk = false;
     let auditErrorCode: string | undefined;
+    let valueVisibleToAgent = false;
 
     try {
       resolved = await services.vault.resolveRefs(parsed.refs);
@@ -84,7 +85,10 @@ export function registerInjectRenderRoute(
 
       if (outputPath === "-") {
         // Stdout-passthrough mode — return content in response body.
+        // All resolve/policy/approval checks have passed; plaintext is about to
+        // leave the daemon in the response body, so flip the exposure flag now.
         auditOk = true;
+        valueVisibleToAgent = true;
         for (const ref of resolved.keys()) {
           await services.vault.markUsed(ref).catch(() => undefined);
         }
