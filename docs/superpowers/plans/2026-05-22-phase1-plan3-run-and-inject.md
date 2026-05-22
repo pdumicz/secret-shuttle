@@ -1329,6 +1329,7 @@ lookback (maxLen-1 bytes)."
 - Validates `cwd` is an absolute path (CLI is required to send `process.cwd()` — see Task C1). If missing or non-absolute, the route rejects with `missing_param` BEFORE spawning. Never falls back to the daemon's `process.cwd()` and never silently uses `$HOME`.
 - Switches into streaming mode (`content-type: application/x-ndjson`, `flushHeaders()`).
 - Wraps the response writer in TWO independent maskers (one per stream: `stdoutMasker`, `stderrMasker`) so resolved values are stripped before bytes cross the HTTP boundary AND so a held-back stdout tail never gets emitted as stderr (or vice-versa). Each masker is flushed to ITS OWN stream when the child exits.
+- **Writer guards.** Every writer method (`writeStdout` / `writeStderr` / `writeExit` / `writeError`) checks `!responseClosed && !res.destroyed && !res.writableEnded` before calling `res.write` / `res.end`. The spawner ALWAYS calls `writeExit` once the child exits — including on the cancellation path, when the response is already closed — so without these guards Node emits `ERR_STREAM_WRITE_AFTER_END` and the daemon process can crash. `responseClosed` is set inside `res.on("close")` alongside `abortController.abort()`.
 - Wires `res.on("close", () => abortController.abort())` so a CLI Ctrl-C or socket disconnect kills the child.
 - On the child's exit, calls `markUsed(ref)` for every successfully resolved ref and writes one audit entry per ref `{ action: "run", ok: <child_exit === 0>, ref, environment }`.
 - **Pre-spawn failure audit.** The audit policy is:
@@ -2179,7 +2180,7 @@ test("POST /v1/run/resolve: audit log gains a per-ref entry per run (success pat
 // Cancellation
 // -----------------------------------------------------------------------------
 
-test("POST /v1/run/resolve: CLI disconnect actually kills the daemon-spawned child (no orphan)", async () => {
+test("POST /v1/run/resolve: CLI disconnect actually kills the daemon-spawned child (no orphan, no write-after-end)", async () => {
   // POSIX-only: relies on process.kill(pid, 0) probing. Windows kill semantics
   // are different — skip there.
   if (process.platform === "win32") return;
@@ -2198,6 +2199,13 @@ test("POST /v1/run/resolve: CLI disconnect actually kills the daemon-spawned chi
     // running, because fetch abort returns immediately on the client side
     // regardless of what the daemon does. Probing the actual PID is the only
     // way to prove the child died.
+    //
+    // ADDITIONALLY: we install a one-shot 'uncaughtException' / 'warning'
+    // listener for the duration of the test. The cancellation path calls
+    // writer.writeExit(code) AFTER res has closed (because spawnAndStream
+    // resolves once the SIGTERMed child exits). Without the writer guard
+    // (responseClosed / res.destroyed / res.writableEnded), Node emits
+    // ERR_STREAM_WRITE_AFTER_END or worse. This assertion pins the guard.
     const pidFile = path.join(ctx.home, "child.pid");
     const childScript = `
       const fs = require('node:fs');
@@ -2206,77 +2214,116 @@ test("POST /v1/run/resolve: CLI disconnect actually kills the daemon-spawned chi
       setInterval(() => {}, 60_000);
     `;
 
+    const uncaughtErrors: Error[] = [];
+    const uncaughtWarnings: Error[] = [];
+    const onUncaught = (e: Error): void => { uncaughtErrors.push(e); };
+    const onWarning = (e: Error): void => {
+      // Filter out warnings that aren't relevant to write-after-end. We watch
+      // for ERR_STREAM_WRITE_AFTER_END / ERR_STREAM_DESTROYED specifically.
+      if (/ERR_STREAM_(WRITE_AFTER_END|DESTROYED)/.test(String(e.message))) {
+        uncaughtWarnings.push(e);
+      }
+    };
+    process.on("uncaughtException", onUncaught);
+    process.on("warning", onWarning);
+
     const controller = new AbortController();
     const start = Date.now();
+    let childPid: number | null = null;
 
-    // Kick off the run in the background.
-    const runPromise = (async () => {
-      try {
-        await callStream(
-          ctx,
-          "/v1/run/resolve",
-          {
-            refs: [],
-            env: [],
-            command: process.execPath,
-            args: ["-e", childScript],
-            cwd: process.cwd(),
-          },
-          { signal: controller.signal },
-        );
-      } catch (e) {
-        // fetch raises on abort — expected.
-        assert.match(String((e as Error).name ?? ""), /Abort/i);
-      }
-    })();
-
-    // Wait for the child to come up (i.e. the PID file to exist).
-    const pidDeadline = Date.now() + 10_000;
-    let pidStr: string | null = null;
-    while (Date.now() < pidDeadline) {
-      try {
-        pidStr = await readFile(pidFile, "utf8");
-        if (pidStr.trim().length > 0) break;
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-      }
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.ok(pidStr !== null && pidStr.trim().length > 0, "child failed to write pid file");
-    const childPid = Number.parseInt(pidStr!.trim(), 10);
-    assert.ok(Number.isFinite(childPid) && childPid > 0, "pid file did not contain a valid pid");
-
-    // Sanity: child is actually alive right now.
-    let aliveProbe = true;
-    try { process.kill(childPid, 0); } catch { aliveProbe = false; }
-    assert.equal(aliveProbe, true, "child should be alive before we abort");
-
-    // Cancel the fetch — closes the HTTP socket → daemon res.on('close') fires
-    // → AbortController in the route fires → spawner SIGTERMs the child.
-    controller.abort();
-    await runPromise;
-
-    // Poll until the child PID is gone. 5s SIGTERM grace + small slack.
-    const killDeadline = Date.now() + 8_000;
-    let stillAlive = true;
-    while (Date.now() < killDeadline) {
-      try {
-        process.kill(childPid, 0);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ESRCH") {
-          stillAlive = false;
-          break;
+    try {
+      // Kick off the run in the background.
+      const runPromise = (async () => {
+        try {
+          await callStream(
+            ctx,
+            "/v1/run/resolve",
+            {
+              refs: [],
+              env: [],
+              command: process.execPath,
+              args: ["-e", childScript],
+              cwd: process.cwd(),
+            },
+            { signal: controller.signal },
+          );
+        } catch (e) {
+          // fetch raises on abort — expected.
+          assert.match(String((e as Error).name ?? ""), /Abort/i);
         }
-        throw e;
+      })();
+
+      // Wait for the child to come up (i.e. the PID file to exist).
+      const pidDeadline = Date.now() + 10_000;
+      let pidStr: string | null = null;
+      while (Date.now() < pidDeadline) {
+        try {
+          pidStr = await readFile(pidFile, "utf8");
+          if (pidStr.trim().length > 0) break;
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        }
+        await new Promise((r) => setTimeout(r, 50));
       }
-      await new Promise((r) => setTimeout(r, 50));
+      assert.ok(pidStr !== null && pidStr.trim().length > 0, "child failed to write pid file");
+      childPid = Number.parseInt(pidStr!.trim(), 10);
+      assert.ok(Number.isFinite(childPid!) && childPid! > 0, "pid file did not contain a valid pid");
+
+      // Sanity: child is actually alive right now.
+      let aliveProbe = true;
+      try { process.kill(childPid!, 0); } catch { aliveProbe = false; }
+      assert.equal(aliveProbe, true, "child should be alive before we abort");
+
+      // Cancel the fetch — closes the HTTP socket → daemon res.on('close') fires
+      // → AbortController in the route fires → spawner SIGTERMs the child.
+      controller.abort();
+      await runPromise;
+
+      // Poll until the child PID is gone. 5s SIGTERM grace + small slack.
+      const killDeadline = Date.now() + 8_000;
+      let stillAlive = true;
+      while (Date.now() < killDeadline) {
+        try {
+          process.kill(childPid!, 0);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === "ESRCH") {
+            stillAlive = false;
+            break;
+          }
+          throw e;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const elapsed = Date.now() - start;
+      assert.equal(
+        stillAlive,
+        false,
+        `child PID ${childPid} survived the cancel + grace window (took ${elapsed}ms)`,
+      );
+
+      // Give Node a tick to surface any deferred write-after-end events from
+      // the spawner's post-cancel writeExit call.
+      await new Promise((r) => setImmediate(r));
+      assert.equal(
+        uncaughtErrors.length,
+        0,
+        `uncaught exception(s) after cancel: ${uncaughtErrors.map((e) => e.message).join("; ")}`,
+      );
+      assert.equal(
+        uncaughtWarnings.length,
+        0,
+        `write-after-end warning(s) after cancel: ${uncaughtWarnings.map((e) => e.message).join("; ")}`,
+      );
+    } finally {
+      // Test hygiene: if any assertion above fails, the child interval is
+      // still alive and would survive for ~60s, costing CPU on every repeat
+      // test run. Best-effort SIGKILL.
+      if (childPid !== null) {
+        try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
+      }
+      process.removeListener("uncaughtException", onUncaught);
+      process.removeListener("warning", onWarning);
     }
-    const elapsed = Date.now() - start;
-    assert.equal(
-      stillAlive,
-      false,
-      `child PID ${childPid} survived the cancel + grace window (took ${elapsed}ms)`,
-    );
   });
 });
 ```
@@ -2514,26 +2561,45 @@ export function registerRunResolveRoute(
     res.setHeader("cache-control", "no-store");
     res.flushHeaders();
 
+    // Track whether the client has disconnected. This is the source of truth
+    // for "can we still write to res?" — on cancellation, the chain is:
+    //   client aborts fetch
+    //   → res.on('close') fires (responseClosed = true; abort the spawner)
+    //   → spawner SIGTERMs the child
+    //   → child exits
+    //   → spawnAndStream resolves
+    //   → spawner calls writer.writeExit(code)  ← THIS write must be skipped
+    //
+    // Without these guards, writer.writeExit would call res.write() on a
+    // destroyed socket → Node emits ERR_STREAM_WRITE_AFTER_END / crashes the
+    // daemon if it isn't handled. We belt-and-braces with both the explicit
+    // `responseClosed` flag AND res.destroyed / res.writableEnded checks so we
+    // ALSO skip writes if some other Node-internal path destroys res first.
+    let responseClosed = false;
+    const isWritable = (): boolean =>
+      !responseClosed && !res.destroyed && !res.writableEnded;
+
     const writer: OutputWriter = {
       writeStdout(chunk) {
         const masked = stdoutMasker.process(chunk);
-        if (masked.length > 0) {
-          res.write(JSON.stringify({ stream: "stdout", data: masked.toString("base64") }) + "\n");
-        }
+        if (masked.length === 0 || !isWritable()) return;
+        res.write(JSON.stringify({ stream: "stdout", data: masked.toString("base64") }) + "\n");
       },
       writeStderr(chunk) {
         const masked = stderrMasker.process(chunk);
-        if (masked.length > 0) {
-          res.write(JSON.stringify({ stream: "stderr", data: masked.toString("base64") }) + "\n");
-        }
+        if (masked.length === 0 || !isWritable()) return;
+        res.write(JSON.stringify({ stream: "stderr", data: masked.toString("base64") }) + "\n");
       },
       writeExit(code) {
         // Flush each masker to ITS OWN stream — no cross-stream emission.
+        // Even if the response is closed, we still call masker.flush() so the
+        // masker state resets cleanly; we just don't write the bytes.
         const stdoutFlush = stdoutMasker.flush();
+        const stderrFlush = stderrMasker.flush();
+        if (!isWritable()) return;
         if (stdoutFlush.length > 0) {
           res.write(JSON.stringify({ stream: "stdout", data: stdoutFlush.toString("base64") }) + "\n");
         }
-        const stderrFlush = stderrMasker.flush();
         if (stderrFlush.length > 0) {
           res.write(JSON.stringify({ stream: "stderr", data: stderrFlush.toString("base64") }) + "\n");
         }
@@ -2541,13 +2607,17 @@ export function registerRunResolveRoute(
         res.end();
       },
       writeError(err) {
+        if (!isWritable()) return;
         res.write(JSON.stringify({ error: { code: err.code, message: err.message } }) + "\n");
       },
     };
 
     // CLI disconnect → abort → SIGTERM child (5s grace) → SIGKILL.
     const abortController = new AbortController();
-    res.on("close", () => abortController.abort());
+    res.on("close", () => {
+      responseClosed = true;
+      abortController.abort();
+    });
 
     let childExitCode = 0;
     await spawnAndStream({
