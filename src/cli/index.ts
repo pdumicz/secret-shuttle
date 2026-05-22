@@ -21,6 +21,7 @@ import { statusCommand } from "./commands/status.js";
 import { agentCommand } from "./commands/agent.js";
 import { secretsCommand } from "./commands/secrets/index.js";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
+import { consumePendingDeprecationWarning } from "../shared/deprecation.js";
 
 const program = new Command();
 
@@ -57,6 +58,11 @@ if (process.argv.length <= 2) {
 try {
   await program.parseAsync(process.argv);
 } catch (error) {
-  process.stderr.write(`${JSON.stringify(errorToJson(error), null, 2)}\n`);
+  const errJson = errorToJson(error) as Record<string, unknown>;
+  const warning = consumePendingDeprecationWarning();
+  if (warning !== null) {
+    errJson.warning = warning;
+  }
+  process.stderr.write(`${JSON.stringify(errJson, null, 2)}\n`);
   process.exitCode = error instanceof ShuttleError ? error.exitCode : 1;
 }
