@@ -85,9 +85,8 @@ export class DaemonServer {
     const hostHeader = req.headers["host"];
     const host = Array.isArray(hostHeader) ? (hostHeader[0] ?? "") : (hostHeader ?? "");
     if (!ALLOWED_HOST_PREFIXES.some((p) => host.startsWith(p))) {
-      res.statusCode = 400;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ ok: false, error: { code: "bad_host" } }));
+      // writeError defaults to 400 for ShuttleError, which matches bad_host's HTTP status.
+      this.writeError(res, new ShuttleError("bad_host", `Rejected host: ${host}`));
       return;
     }
 
@@ -97,18 +96,24 @@ export class DaemonServer {
     const expected = Buffer.from(`Bearer ${this.token}`);
     const actual = Buffer.from(auth);
     if (actual.byteLength !== expected.byteLength || !timingSafeEqual(actual, expected)) {
+      // writeError defaults to 400 for ShuttleError; override to 401 for auth failure.
+      const err = new ShuttleError("unauthorized", "Invalid or missing bearer token.");
+      const payload = errorToJson(err);
       res.statusCode = 401;
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ ok: false, error: { code: "unauthorized" } }));
+      res.end(JSON.stringify(payload));
       return;
     }
 
     const key = `${req.method ?? "GET"} ${urlPath}`;
     const handler = this.routes.get(key);
     if (handler === undefined) {
+      // writeError defaults to 400; override to 404 to preserve HTTP semantics.
+      const err = new ShuttleError("not_found", `No route for ${req.method ?? "GET"} ${urlPath}`);
+      const payload = errorToJson(err);
       res.statusCode = 404;
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ ok: false, error: { code: "not_found" } }));
+      res.end(JSON.stringify(payload));
       return;
     }
 

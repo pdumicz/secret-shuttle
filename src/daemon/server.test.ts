@@ -24,6 +24,36 @@ function rawHttpGet(port: number, path: string, headers: Record<string, string>)
   });
 }
 
+/** Like rawHttpGet but parses the JSON body too. Used when we need to assert the response shape. */
+function rawHttpGetWithBody(
+  port: number,
+  path: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; body: unknown }> {
+  return new Promise((resolve, reject) => {
+    const headerLines = Object.entries(headers)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join("\r\n");
+    const request = `GET ${path} HTTP/1.1\r\n${headerLines}\r\nConnection: close\r\n\r\n`;
+    const socket = createConnection({ host: "127.0.0.1", port }, () => {
+      socket.write(request);
+    });
+    let response = "";
+    socket.on("data", (chunk) => { response += chunk.toString(); });
+    socket.on("end", () => {
+      const statusLine = response.split("\r\n")[0] ?? "";
+      const match = /HTTP\/1\.1 (\d+)/.exec(statusLine);
+      const status = match !== null ? parseInt(match[1] ?? "0", 10) : 0;
+      const split = response.indexOf("\r\n\r\n");
+      const bodyText = split >= 0 ? response.slice(split + 4) : "";
+      let body: unknown = null;
+      try { body = bodyText.length > 0 ? JSON.parse(bodyText) : null; } catch { body = bodyText; }
+      resolve({ status, body });
+    });
+    socket.on("error", reject);
+  });
+}
+
 async function httpJson(url: string, init: RequestInit = {}): Promise<{ status: number; body: unknown }> {
   const res = await fetch(url, init);
   const body = res.status === 204 ? null : await res.json();
@@ -164,6 +194,94 @@ test("server reports invalid_json instead of 500 on malformed body", async () =>
     assert.equal(res.status, 400);
     const body = await res.json() as { ok: boolean; error: { code: string } };
     assert.equal(body.error.code, "invalid_json");
+  } finally {
+    await server.close();
+  }
+});
+
+// ─── §5.6 structured-error contract on pre-handler short-circuits ────────────
+// bad_host / unauthorized / not_found must emit the full nested + flat shape
+// (legacy `error: {code, message}` + flat `error_code`, `message`, `hint`,
+// `exit_code`) per spec §5.6. HTTP status codes 400 / 401 / 404 preserved.
+
+test("bad host header → 400 with full §5.6 error contract", async () => {
+  const server = new DaemonServer({ token: "tok" });
+  server.addRoute("GET", "/v1/health", () => ({}));
+  const { port } = await server.listen();
+  try {
+    // Node's fetch (undici) refuses to override Host; raw TCP socket required.
+    const { status, body } = await rawHttpGetWithBody(port, "/v1/health", {
+      Host: "evil.example.com",
+      Authorization: "Bearer tok",
+    });
+    assert.equal(status, 400);
+    const j = body as {
+      ok: boolean;
+      error: { code: string; message: string };
+      error_code: string;
+      message: string;
+      hint: string | null;
+      exit_code: number;
+    };
+    assert.equal(j.ok, false);
+    assert.equal(j.error.code, "bad_host");
+    assert.ok(typeof j.error.message === "string" && j.error.message.length > 0, "nested error.message should be non-empty");
+    assert.equal(j.error_code, "bad_host");
+    assert.ok(typeof j.message === "string" && j.message.length > 0, "flat message should be non-empty");
+    assert.equal(j.exit_code, 4); // EXIT_CODE_PERMISSION
+  } finally {
+    await server.close();
+  }
+});
+
+test("missing bearer token → 401 with full §5.6 error contract", async () => {
+  const server = new DaemonServer({ token: "tok" });
+  server.addRoute("GET", "/v1/health", () => ({}));
+  const { port } = await server.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/health`);
+    assert.equal(res.status, 401);
+    const j = await res.json() as {
+      ok: boolean;
+      error: { code: string; message: string };
+      error_code: string;
+      message: string;
+      hint: string | null;
+      exit_code: number;
+    };
+    assert.equal(j.ok, false);
+    assert.equal(j.error.code, "unauthorized");
+    assert.ok(typeof j.error.message === "string" && j.error.message.length > 0, "nested error.message should be non-empty");
+    assert.equal(j.error_code, "unauthorized");
+    assert.ok(typeof j.message === "string" && j.message.length > 0, "flat message should be non-empty");
+    assert.equal(j.exit_code, 4); // EXIT_CODE_PERMISSION
+  } finally {
+    await server.close();
+  }
+});
+
+test("unknown route → 404 with full §5.6 error contract", async () => {
+  const server = new DaemonServer({ token: "tok" });
+  const { port } = await server.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/nope`, {
+      headers: { Authorization: "Bearer tok" },
+    });
+    assert.equal(res.status, 404);
+    const j = await res.json() as {
+      ok: boolean;
+      error: { code: string; message: string };
+      error_code: string;
+      message: string;
+      hint: string | null;
+      exit_code: number;
+    };
+    assert.equal(j.ok, false);
+    assert.equal(j.error.code, "not_found");
+    assert.ok(typeof j.error.message === "string" && j.error.message.length > 0, "nested error.message should be non-empty");
+    assert.equal(j.error_code, "not_found");
+    assert.ok(typeof j.message === "string" && j.message.length > 0, "flat message should be non-empty");
+    assert.equal(j.exit_code, 3); // EXIT_CODE_NOT_FOUND
   } finally {
     await server.close();
   }

@@ -130,11 +130,13 @@ test("legacy_key_present → not-found with migrate hint", () => {
 });
 
 test("registry total entry count (sanity check)", () => {
-  // 60 from initial A2 seed + 41 added in the P1 coverage fix = 101 total.
+  // 60 from initial A2 seed + 41 added in the P1 coverage fix + 3 added in
+  // Plan 2 Task E1 (bad_host, unauthorized, not_found for server.ts
+  // pre-handler error paths) = 104 total.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 101, `expected 101 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 104, `expected 104 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {

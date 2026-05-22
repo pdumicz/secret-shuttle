@@ -86,6 +86,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   unsupported_secret_kind: { exitCode: EXIT_CODE_USAGE, hint: () => null },
 
   // ── Not found ──────────────────────────────────────────────────────────────
+  not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   secret_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   template_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   approval_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -114,6 +115,8 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   template_tmpdir_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
 
   // ── Permission ─────────────────────────────────────────────────────────────
+  bad_host: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  unauthorized: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   vault_unlock_failed: {
     exitCode: EXIT_CODE_PERMISSION,
     hint: () => "Re-run unlock (passphrase entered in browser window).",
