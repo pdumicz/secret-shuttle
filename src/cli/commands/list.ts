@@ -8,6 +8,7 @@ export function listCommand(): Command {
     .description("(deprecated) Use 'secret-shuttle secrets list' instead.")
     .option("--env <environment>")
     .option("--source <source>")
+    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
     .action(async (options) => {
       withPendingDeprecationWarning("list", "secrets list");
       const body: Record<string, string> = {};

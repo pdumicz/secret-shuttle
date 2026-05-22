@@ -8,6 +8,7 @@ export function secretsListCommand(): Command {
     .option("--env <environment>", "Filter by environment (e.g. production, preview, local).")
     .option("--source <source>", "Filter by source (e.g. stripe, supabase, local).")
     .option("--include-deleted", "Also surface soft-deleted entries (deleted_at set).")
+    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
     .action(async (options) => {
       const body: Record<string, unknown> = {};
       if (options.env !== undefined) body.environment = options.env;

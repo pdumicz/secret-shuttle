@@ -10,6 +10,7 @@ export function secretsRotateCommand(): Command {
     .option("--kind <kind>", "Generation kind for the new secret.", "random_32_bytes")
     .option("--approval-id <id>", "Pre-issued approval id.")
     .option("--no-wait", "Return approval_required without waiting.")
+    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
     .action(async (ref: string, options) => {
       const body: Record<string, unknown> = {
         ref: normalizeRef(ref),

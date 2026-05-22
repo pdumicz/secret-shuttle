@@ -19,6 +19,7 @@ export function generateCommand(): Command {
     .option("--force", "Overwrite an existing secret with the same ref.", false)
     .option("--approval-id <id>", "Pre-issued approval id.")
     .option("--no-wait", "Return approval_required without waiting.")
+    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
     .action(async (options) => {
       withPendingDeprecationWarning("generate", "secrets set");
       const domains = options.allowDomain as string[];

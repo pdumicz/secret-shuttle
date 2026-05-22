@@ -18,7 +18,11 @@ import { injectCommand } from "./inject.js";
  */
 export function internalCommand(): Command {
   const cmd = new Command("internal")
-    .description("Power-user and deprecated commands. Most agents should not need these.");
+    .description("Power-user and deprecated commands. Most agents should not need these.")
+    // Suppress Commander's auto-generated `help [command]` subcommand so
+    // `internal --help` lists exactly the four real commands (compare,
+    // blind, capture, inject). The standard `--help` flag still works.
+    .helpCommand(false);
 
   cmd.addCommand(compareCommand());
   cmd.addCommand(blindCommand());

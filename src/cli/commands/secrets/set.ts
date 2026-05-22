@@ -18,6 +18,7 @@ export function secretsSetCommand(): Command {
     .option("--force", "Overwrite an existing secret with the same ref.", false)
     .option("--approval-id <id>", "Pre-issued approval id (skip the approval window).")
     .option("--no-wait", "Return approval_required without waiting.")
+    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
     .action(async (options) => {
       // Paste mode is not yet supported. (User-facing copy must NOT mention
       // internal plan numbers — say what works now.)

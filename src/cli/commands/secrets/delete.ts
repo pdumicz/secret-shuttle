@@ -9,6 +9,7 @@ export function secretsDeleteCommand(): Command {
     .argument("<ref>", "Secret ref to delete (e.g. ss://stripe/prod/STRIPE_KEY).")
     .option("--approval-id <id>", "Pre-issued approval id.")
     .option("--no-wait", "Return approval_required without waiting.")
+    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
     .action(async (ref: string, options) => {
       const body: Record<string, unknown> = { ref: normalizeRef(ref) };
       if (options.approvalId !== undefined) body.approval_id = options.approvalId;

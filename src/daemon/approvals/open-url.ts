@@ -10,26 +10,26 @@ type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions)
 /**
  * Surface a URL the human must interact with (approval, unlock, etc.).
  *
- * Default behavior (as of 2026-05-22): print the URL to stderr. The previous
- * "spawn `open <url>` for every call" default was unusable in practice —
- * it accumulated browser tabs without bound (one per approval, one per
- * unlock, one per paste, …). Plan 4 ships a proper single-window tab-reuse
- * flow; until then, printing is the safe default.
+ * Default behavior: spawn the platform system opener (`open` on macOS,
+ * `xdg-open` on Linux, `cmd /c start` on Windows) so the URL opens in a
+ * browser tab automatically. This is required for the standard daemon
+ * flow because `secret-shuttle daemon start` launches the daemon with
+ * `stdio: ignore` (see src/daemon/lifecycle.ts) — any stderr fallback
+ * would vanish to /dev/null and users would have no way to approve or
+ * unlock.
  *
- * Set `SECRET_SHUTTLE_OPEN_URL=1` to opt back into the legacy auto-open
- * spawn path. The legacy kill-switch `SECRET_SHUTTLE_NO_OPEN_URL=1` is
- * still honored — it makes openUrl a complete no-op (useful for fully
- * silent test runs).
+ * The legacy kill-switch `SECRET_SHUTTLE_NO_OPEN_URL=1` is honored — it
+ * makes openUrl a complete no-op. The `npm test` wrapper sets it so the
+ * test suite never opens real browser tabs.
+ *
+ * Plan 4 ships a single-window tab-reuse flow to eliminate the tab-spam
+ * vector (one tab per approval/unlock) without breaking the spawn-by-
+ * default contract this function depends on.
  */
 export function openUrl(url: string, opts?: { spawnImpl?: SpawnFn }): void {
-  // Hard mute (legacy kill switch) — completely silent. Used by `npm test`.
+  // Kill switch — completely silent. Used by `npm test` so the suite
+  // doesn't pop browser tabs on every approval flow under test.
   if (process.env.SECRET_SHUTTLE_NO_OPEN_URL === "1") {
-    return;
-  }
-  // Default: print, don't spawn. Opt-in to the legacy auto-open via
-  // SECRET_SHUTTLE_OPEN_URL=1.
-  if (process.env.SECRET_SHUTTLE_OPEN_URL !== "1") {
-    process.stderr.write(`[approval] open this URL to respond: ${url}\n`);
     return;
   }
   const platform = process.platform;
