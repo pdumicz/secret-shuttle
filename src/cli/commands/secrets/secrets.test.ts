@@ -30,3 +30,20 @@ test("secrets get-ref accepts a positional ref argument", () => {
     .registeredArguments.map((a) => a._name);
   assert.deepEqual(argNames, ["ref"]);
 });
+
+test("secrets set requires --name and --env", () => {
+  const cmd = secretsCommand();
+  const set = cmd.commands.find((c) => c.name() === "set");
+  assert.ok(set);
+  const required = set.options.filter((o) => o.required).map((o) => o.long);
+  assert.ok(required.includes("--name"), "set should require --name");
+  assert.ok(required.includes("--env"), "set should require --env");
+});
+
+test("secrets set rejects --kind paste with a clear error (paste mode deferred to Plan 4)", () => {
+  const cmd = secretsCommand();
+  const set = cmd.commands.find((c) => c.name() === "set");
+  assert.ok(set);
+  const kind = set.options.find((o) => o.long === "--kind");
+  assert.ok(kind);
+});
