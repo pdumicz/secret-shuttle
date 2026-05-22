@@ -36,8 +36,14 @@ const KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
  * for any malformed line.
  */
 export function parseEnvFile(content: string): EnvFileParseResult {
+  // Strip a leading UTF-8 BOM if present. Some editors (notably Windows
+  // Notepad) write a BOM at the start of UTF-8 files; without this strip
+  // the BOM would become part of the first line's key, producing a confusing
+  // "invalid key '﻿KEY' " error.
+  let work = content;
+  if (work.charCodeAt(0) === 0xfeff) work = work.slice(1);
   const entries: EnvFileEntry[] = [];
-  const lines = content.split(/\r?\n/);
+  const lines = work.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const lineNum = i + 1;
     const raw = lines[i];

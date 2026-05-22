@@ -92,3 +92,27 @@ test("parseEnvFile: quoted ss:// ref is unquoted and detected as ref (canonicali
   const r = parseEnvFile('STRIPE_KEY="ss://stripe/prod/STRIPE_KEY"\n');
   assert.deepEqual(r.entries, [{ key: "STRIPE_KEY", value: "ss://stripe/prod/STRIPE_KEY", isRef: true }]);
 });
+
+test("parseEnvFile: strips a leading UTF-8 BOM", () => {
+  // Some editors (notably Windows Notepad) prepend a BOM. Without stripping,
+  // the BOM becomes part of the line-1 key and produces a confusing
+  // "invalid key" error.
+  const r = parseEnvFile("﻿PORT=3000\n");
+  assert.deepEqual(r.entries, [{ key: "PORT", value: "3000", isRef: false }]);
+});
+
+test("parseEnvFile: handles CRLF line endings (Windows-style)", () => {
+  const r = parseEnvFile("PORT=3000\r\nLOG_LEVEL=info\r\n");
+  assert.deepEqual(r.entries, [
+    { key: "PORT", value: "3000", isRef: false },
+    { key: "LOG_LEVEL", value: "info", isRef: false },
+  ]);
+});
+
+test("parseEnvFile: bare 'ss://' (no path components) triggers fail-closed throw", () => {
+  // Completes the fail-closed story alongside the trailing-slash case.
+  assert.throws(
+    () => parseEnvFile("BARE=ss://\n"),
+    (err: Error & { code?: string }) => err.code === "env_file_parse_error",
+  );
+});
