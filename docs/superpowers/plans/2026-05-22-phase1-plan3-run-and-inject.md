@@ -1330,7 +1330,12 @@ lookback (maxLen-1 bytes)."
 - Switches into streaming mode (`content-type: application/x-ndjson`, `flushHeaders()`).
 - Wraps the response writer in TWO independent maskers (one per stream: `stdoutMasker`, `stderrMasker`) so resolved values are stripped before bytes cross the HTTP boundary AND so a held-back stdout tail never gets emitted as stderr (or vice-versa). Each masker is flushed to ITS OWN stream when the child exits.
 - Wires `res.on("close", () => abortController.abort())` so a CLI Ctrl-C or socket disconnect kills the child.
-- On the child's exit, calls `markUsed(ref)` for every successfully resolved ref and writes one audit entry per ref `{ action: "run", ok: <child_exit === 0>, ref, environment }`. On any pre-spawn failure, writes per-ref audit with `ok: false` + `error_code`.
+- On the child's exit, calls `markUsed(ref)` for every successfully resolved ref and writes one audit entry per ref `{ action: "run", ok: <child_exit === 0>, ref, environment }`.
+- **Pre-spawn failure audit.** The audit policy is:
+  - `secret_not_found` from `resolveRefs` — write ONE failure entry per ref in the REQUEST `refs` list with `ok: false, error_code: "secret_not_found"`, even though we don't have a `SecretRecord` for the missing ref(s). This records the attempted use; the request-side refs ARE security-relevant (denied use of a real or fictitious ref is a probe worth logging).
+  - `action_not_allowed` from `assertSecretActionAllowed` — write per-ref failure entries with `ok: false, error_code: "action_not_allowed"` for every resolved ref (we have records here, so `environment` can be populated).
+  - Approval failure (`approval_required`, `approval_denied`, `approval_expired`, `approval_timeout`) — write per-ref failure entries with the actual ShuttleError code.
+  - Env-build failure (`secret_not_found` returned by `resolved.get(ref)`) — same per-ref pattern.
 - Calls `res.end()` after `writeExit`.
 
 - [ ] **Step 1: Write the spawner test FIRST**
@@ -2081,6 +2086,57 @@ test("POST /v1/run/resolve: markUsed updates last_used_at after a successful run
   });
 });
 
+test("POST /v1/run/resolve: pre-spawn secret_not_found writes a per-ref FAILURE audit entry", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: ["ss://x/dev/PROBE"],
+      env: [],
+      command: process.execPath,
+      args: ["-e", ""],
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.errorBody as { error_code: string }).error_code, "secret_not_found");
+    // The audit log MUST record the attempted use.
+    const auditPath = path.join(ctx.home, "audit.jsonl");
+    const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
+    const matches = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.action === "run" && e.ref === "ss://x/dev/PROBE");
+    assert.equal(matches.length, 1, "missing-ref probe must be audited");
+    assert.equal(matches[0]!.ok, false);
+    assert.equal(matches[0]!.error_code, "secret_not_found");
+  });
+});
+
+test("POST /v1/run/resolve: action_not_allowed writes a per-ref FAILURE audit entry", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "development", name: "NO_STDIN", value: "x",
+      allowedActions: ["inject_into_field"],
+    });
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [ref],
+      env: [{ key: "NO_STDIN", value: ref, isRef: true }],
+      command: process.execPath,
+      args: ["-e", "console.log('NO')"],
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 400);
+    const auditPath = path.join(ctx.home, "audit.jsonl");
+    const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
+    const matches = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.action === "run" && e.ref === ref);
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0]!.ok, false);
+    assert.equal(matches[0]!.error_code, "action_not_allowed");
+    assert.equal(matches[0]!.environment, "development", "environment is known here — record was resolved");
+  });
+});
+
 test("POST /v1/run/resolve: audit log gains a per-ref entry per run (success path)", async () => {
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
@@ -2100,7 +2156,10 @@ test("POST /v1/run/resolve: audit log gains a per-ref entry per run (success pat
       args: ["-e", "process.exit(0)"],
       cwd: process.cwd(),
     });
-    const auditPath = path.join(ctx.home, "audit.log");
+    // Audit file is named `audit.jsonl` (see src/shared/config.ts:31). The
+    // canonical helper is getShuttlePaths(home).auditLogPath; we inline the
+    // join here to keep the test independent of shared/config imports.
+    const auditPath = path.join(ctx.home, "audit.jsonl");
     const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
     const runEntries = lines
       .map((l) => JSON.parse(l) as Record<string, unknown>)
@@ -2120,36 +2179,104 @@ test("POST /v1/run/resolve: audit log gains a per-ref entry per run (success pat
 // Cancellation
 // -----------------------------------------------------------------------------
 
-test("POST /v1/run/resolve: CLI disconnect kills the child within the grace window", async () => {
-  // POSIX-only: rely on signal-driven exit codes. On Windows the child kill
-  // semantics differ — skip there.
+test("POST /v1/run/resolve: CLI disconnect actually kills the daemon-spawned child (no orphan)", async () => {
+  // POSIX-only: relies on process.kill(pid, 0) probing. Windows kill semantics
+  // are different — skip there.
   if (process.platform === "win32") return;
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+
+    // The child writes its own PID into a known file as the FIRST thing it does,
+    // then sleeps for a long time. The test waits for that PID file to exist
+    // (proves the spawn happened), then aborts the fetch, then polls
+    // process.kill(pid, 0) until it raises ESRCH (proves the daemon's
+    // res.on('close') → AbortController → SIGTERM/SIGKILL chain actually
+    // reached the child).
+    //
+    // Why the PID file matters: a previous draft of this test merely aborted
+    // the fetch and asserted elapsed time. That can pass while the child keeps
+    // running, because fetch abort returns immediately on the client side
+    // regardless of what the daemon does. Probing the actual PID is the only
+    // way to prove the child died.
+    const pidFile = path.join(ctx.home, "child.pid");
+    const childScript = `
+      const fs = require('node:fs');
+      fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+      // Sleep effectively forever; we don't want a benign self-exit to mask a bug.
+      setInterval(() => {}, 60_000);
+    `;
+
     const controller = new AbortController();
     const start = Date.now();
-    // Start a 30s child, then abort after 100ms.
-    setTimeout(() => controller.abort(), 100);
-    try {
-      await callStream(
-        ctx,
-        "/v1/run/resolve",
-        {
-          refs: [],
-          env: [],
-          command: process.execPath,
-          args: ["-e", "setTimeout(() => {}, 30000)"],
-          cwd: process.cwd(),
-        },
-        { signal: controller.signal },
-      );
-    } catch (e) {
-      // fetch raises on abort — that's the expected client side of the cancel.
-      assert.match(String((e as Error).name ?? ""), /Abort/i);
+
+    // Kick off the run in the background.
+    const runPromise = (async () => {
+      try {
+        await callStream(
+          ctx,
+          "/v1/run/resolve",
+          {
+            refs: [],
+            env: [],
+            command: process.execPath,
+            args: ["-e", childScript],
+            cwd: process.cwd(),
+          },
+          { signal: controller.signal },
+        );
+      } catch (e) {
+        // fetch raises on abort — expected.
+        assert.match(String((e as Error).name ?? ""), /Abort/i);
+      }
+    })();
+
+    // Wait for the child to come up (i.e. the PID file to exist).
+    const pidDeadline = Date.now() + 10_000;
+    let pidStr: string | null = null;
+    while (Date.now() < pidDeadline) {
+      try {
+        pidStr = await readFile(pidFile, "utf8");
+        if (pidStr.trim().length > 0) break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(pidStr !== null && pidStr.trim().length > 0, "child failed to write pid file");
+    const childPid = Number.parseInt(pidStr!.trim(), 10);
+    assert.ok(Number.isFinite(childPid) && childPid > 0, "pid file did not contain a valid pid");
+
+    // Sanity: child is actually alive right now.
+    let aliveProbe = true;
+    try { process.kill(childPid, 0); } catch { aliveProbe = false; }
+    assert.equal(aliveProbe, true, "child should be alive before we abort");
+
+    // Cancel the fetch — closes the HTTP socket → daemon res.on('close') fires
+    // → AbortController in the route fires → spawner SIGTERMs the child.
+    controller.abort();
+    await runPromise;
+
+    // Poll until the child PID is gone. 5s SIGTERM grace + small slack.
+    const killDeadline = Date.now() + 8_000;
+    let stillAlive = true;
+    while (Date.now() < killDeadline) {
+      try {
+        process.kill(childPid, 0);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ESRCH") {
+          stillAlive = false;
+          break;
+        }
+        throw e;
+      }
+      await new Promise((r) => setTimeout(r, 50));
     }
     const elapsed = Date.now() - start;
-    // Cancel + 5s SIGTERM grace + slack — should be well under 10s.
-    assert.ok(elapsed < 10_000, `child was not killed promptly (took ${elapsed}ms)`);
+    assert.equal(
+      stillAlive,
+      false,
+      `child PID ${childPid} survived the cancel + grace window (took ${elapsed}ms)`,
+    );
   });
 });
 ```
@@ -2291,11 +2418,15 @@ export function registerRunResolveRoute(
     }
 
     // Resolve every ref. Deleted refs throw secret_not_found here.
+    // SECURITY: audit pre-spawn failures per ref. Denied use of a real OR
+    // fictitious ref is security-relevant (a probe). We don't have full
+    // SecretRecords for missing refs, but we DO have the requested ref string.
     let resolved: Awaited<ReturnType<typeof services.vault.resolveRefs>>;
     try {
       resolved = await services.vault.resolveRefs(body.refs);
     } catch (e) {
-      // No audit yet — secret resolution failed; no ref-touch occurred.
+      const code = e instanceof ShuttleError ? e.code : "unexpected_error";
+      await auditPerRequestedRef(body.refs, false, code);
       writeJsonError(res, 400, e);
       return;
     }
@@ -2306,6 +2437,9 @@ export function registerRunResolveRoute(
         assertSecretActionAllowed(record, "use_as_stdin");
       }
     } catch (e) {
+      const code = e instanceof ShuttleError ? e.code : "unexpected_error";
+      // We have full records here, so audit with environment populated.
+      await auditPerRef(body.refs, resolved, false, code);
       writeJsonError(res, 400, e);
       return;
     }
@@ -2456,6 +2590,26 @@ export function registerRunResolveRoute(
       });
     }
   }
+
+  /**
+   * Audit per requested-ref WITHOUT a resolved-record map. Used when
+   * resolveRefs failed and we have no environment info — we still want to
+   * log the attempted use (a denied or non-existent ref is a probe).
+   */
+  async function auditPerRequestedRef(
+    refs: readonly string[],
+    ok: boolean,
+    errorCode: string | undefined,
+  ): Promise<void> {
+    for (const ref of refs) {
+      await writeDaemonAudit({
+        action: "run",
+        ok,
+        ref,
+        ...(errorCode !== undefined ? { error_code: errorCode } : {}),
+      });
+    }
+  }
 }
 
 /**
@@ -2488,7 +2642,7 @@ import { registerRunResolveRoute } from "./routes/run-resolve.js";
 registerRunResolveRoute(server, services, daemonPortRef);
 ```
 
-- [ ] **Step 9: Run route tests — expect PASS** (16 tests including the cross-stream-leak regression and 5 strict-validation cases)
+- [ ] **Step 9: Run route tests — expect PASS** (18 tests including the cross-stream-leak regression, 5 strict-validation cases, and 2 pre-spawn failure-audit cases)
 
 ```bash
 npm run build && node --test "dist/daemon/api/routes/run-resolve.test.js"
@@ -2642,13 +2796,21 @@ export function runCommand(): Command {
             // Preserve daemon-provided hint + exit_code; reuse Plan 1's helper.
             // Synthesize the canonical payload shape so daemonErrorFromPayload
             // resolves both nested and flat fields consistently.
-            streamError = daemonErrorFromPayload({
+            //
+            // CRITICAL: only include `hint` / `exit_code` when the stream line
+            // actually carries them. daemon-client.ts:42 treats an explicit
+            // `null` hint as "suppress the registry default" — so blindly
+            // sending `hint: null` would override the registry hint for codes
+            // like daemon_not_running, where the registry hint is the whole
+            // point of the new contract.
+            const payload: Record<string, unknown> = {
               error: { code: line.error.code, message: line.error.message },
               error_code: line.error.code,
               message: line.error.message,
-              hint: line.error.hint ?? null,
-              exit_code: line.error.exit_code,
-            });
+            };
+            if (line.error.hint !== undefined) payload.hint = line.error.hint;
+            if (line.error.exit_code !== undefined) payload.exit_code = line.error.exit_code;
+            streamError = daemonErrorFromPayload(payload);
           }
         });
       } catch (e) {
@@ -3264,7 +3426,10 @@ test("POST /v1/inject/render: audit log gains a per-ref entry per render", async
       template: `a: ${refA}\nb: ${refB}\n`,
       output_path: path.join(ctx.home, "audit-test.yml"),
     });
-    const auditPath = path.join(ctx.home, "audit.log");
+    // Audit file is named `audit.jsonl` (see src/shared/config.ts:31). The
+    // canonical helper is getShuttlePaths(home).auditLogPath; we inline the
+    // join here to keep the test independent of shared/config imports.
+    const auditPath = path.join(ctx.home, "audit.jsonl");
     const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
     const renderEntries = lines
       .map((l) => JSON.parse(l) as Record<string, unknown>)
@@ -3734,7 +3899,7 @@ before sending so the daemon's HOME check is meaningful."
 
 ### Task E1: Full suite verification
 
-- [ ] **Step 1:** `npm test` — all pass (expect ~605 baseline + ~90 new tests across A1 (13), B0 (4), B1 (5), B2 (registry count update), B3 (5), B4 (12), B5 spawner (8), B5 route (16), C1 (3), D1 template (9), D1 route (13), D2 (3) = **~695 total**).
+- [ ] **Step 1:** `npm test` — all pass (expect ~605 baseline + ~92 new tests across A1 (13), B0 (4), B1 (5), B2 (registry count update), B3 (5), B4 (12), B5 spawner (8), B5 route (18), C1 (3), D1 template (9), D1 route (13), D2 (3) = **~697 total**).
 - [ ] **Step 2:** `npm run typecheck` — pass.
 - [ ] **Step 3:** `npm run check-pack` — pass.
 - [ ] **Step 4: Smoke tests**
