@@ -463,18 +463,50 @@ This invariant is what makes "delete" actually behave like delete. Every downstr
 
 Production refs require approval, gated through a new `secrets_delete` approval action with matching UI copy.
 
-- [ ] **Step 1: Add `deleted_at?: string` to `SecretRecord`**
+- [ ] **Step 1: Add `deleted_at?: string` to both `SecretRecord` and `AgentSecretMetadata`**
 
-Open `src/vault/types.ts`. Find the `SecretRecord` interface (or type). Add a new optional field:
+Open `src/vault/types.ts`. Both shapes get the same optional field so deleted entries remain identifiable when surfaced via `--include-deleted`:
 
 ```typescript
 export interface SecretRecord {
   // ... existing fields
   deleted_at?: string; // ISO-8601 if soft-deleted; field absent otherwise.
 }
+
+export interface AgentSecretMetadata {
+  // ... existing fields
+  deleted_at?: string; // ISO-8601 if soft-deleted; field absent otherwise.
+}
 ```
 
-If `SecretRecord` is defined as a Zod / similar schema, adapt accordingly.
+**Critical:** also update `toAgentMetadata` at `src/vault/vault.ts:193` so it copies `deleted_at` through (current implementation explicitly enumerates fields, which would strip the new one):
+
+```typescript
+export function toAgentMetadata(secret: SecretRecord): AgentSecretMetadata {
+  return {
+    id: secret.id,
+    ref: secret.ref,
+    name: secret.name,
+    environment: secret.environment,
+    source: secret.source,
+    created_at: secret.created_at,
+    updated_at: secret.updated_at,
+    last_used_at: secret.last_used_at,
+    fingerprint: secret.fingerprint,
+    allowed_domains: [...secret.allowed_domains],
+    allowed_actions: [...secret.allowed_actions],
+    requires_approval: secret.requires_approval,
+    classification: secret.classification,
+    value_visible_to_agent: false,
+    ...(secret.description !== undefined ? { description: secret.description } : {}),
+    ...(secret.deleted_at !== undefined ? { deleted_at: secret.deleted_at } : {}),
+  };
+}
+```
+
+Without the spread for `deleted_at`, `secrets list --include-deleted` returns active and deleted entries that look identical — defeating the audit purpose of the flag.
+
+If `SecretRecord` / `AgentSecretMetadata` are defined as Zod / similar schemas, adapt accordingly (add the optional field to both schemas).
 
 - [ ] **Step 2: Update Vault — extend existing `list` + `inspect` + `getSecret` to filter deleted; add `softDelete`**
 
@@ -604,16 +636,28 @@ test("inspect throws secret_not_found for a soft-deleted ref (metadata API also 
   );
 });
 
-test("list excludes deleted by default; includeDeleted surfaces them as AgentSecretMetadata", async () => {
+test("list excludes deleted by default; includeDeleted surfaces them as AgentSecretMetadata with deleted_at set", async () => {
   const vault = await setUpTestVault({
     secrets: [makeSecret("ss://x/dev/A"), makeSecret("ss://x/dev/B")],
   });
   await vault.softDelete("ss://x/dev/A");
+
+  // Default list: deleted entry absent.
   const visible = await vault.list();
   assert.equal(visible.length, 1);
   assert.equal(visible[0].ref, "ss://x/dev/B");
+  assert.equal(visible[0].deleted_at, undefined, "active entry should NOT carry a deleted_at");
+
+  // include-deleted: both entries present; the deleted one carries deleted_at.
   const all = await vault.list({ includeDeleted: true });
   assert.equal(all.length, 2);
+  const deleted = all.find((s) => s.ref === "ss://x/dev/A");
+  const active = all.find((s) => s.ref === "ss://x/dev/B");
+  assert.ok(deleted, "deleted ref should surface with includeDeleted");
+  assert.ok(typeof deleted.deleted_at === "string" && deleted.deleted_at.length > 0,
+    "deleted entry must carry a non-empty ISO deleted_at so callers can distinguish it");
+  assert.equal(active?.deleted_at, undefined, "active entry must NOT carry a deleted_at");
+
   // CRITICAL: even with includeDeleted, no `value` field — AgentSecretMetadata
   // shape doesn't have one, but assert defensively in case the type ever drifts.
   for (const entry of all) {
@@ -645,21 +689,42 @@ test("softDelete a second time throws secret_not_found (already deleted)", async
 Append to `src/daemon/api/routes/secrets.test.ts` (or wherever `/v1/secrets/list` tests live):
 
 ```typescript
-test("/v1/secrets/list with include_deleted: true returns metadata only (no value field over the wire)", async () => {
+test("/v1/secrets/list with include_deleted: true returns metadata only and tags deleted entries", async () => {
   // Set up an ephemeral daemon with a vault containing one active + one deleted secret.
   // (Use the existing test harness — withDaemonAndVault or similar.)
   // ...
   const r = await daemonRequest("POST", "/v1/secrets/list", { include_deleted: true }) as {
-    secrets: unknown[];
+    secrets: Array<{ ref: string; value?: string; deleted_at?: string }>;
     value_visible_to_agent: boolean;
   };
 
   // Route shape per src/daemon/api/routes/secrets.ts:67 is { secrets, value_visible_to_agent: false }.
   assert.equal(r.value_visible_to_agent, false, "list endpoint contract: value is never visible to agents");
   assert.ok(r.secrets.length >= 2, "should include both active and deleted entries");
+
+  // No raw value field, ever, regardless of include_deleted.
   for (const item of r.secrets) {
-    assert.equal((item as { value?: string }).value, undefined,
+    assert.equal(item.value, undefined,
       "the list endpoint must never serialize value, even with include_deleted");
+  }
+
+  // Deleted entries must be distinguishable from active ones via deleted_at.
+  // (Without this assertion, --include-deleted would surface entries that
+  // look identical to active ones — defeating the audit purpose.)
+  const deleted = r.secrets.filter((s) => s.deleted_at !== undefined);
+  const active = r.secrets.filter((s) => s.deleted_at === undefined);
+  assert.ok(deleted.length >= 1, "at least one entry must carry deleted_at");
+  assert.ok(active.length >= 1, "at least one entry must NOT carry deleted_at");
+});
+
+test("/v1/secrets/list without include_deleted omits deleted entries entirely", async () => {
+  // Same fixture as above; verify default behavior.
+  const r = await daemonRequest("POST", "/v1/secrets/list", {}) as {
+    secrets: Array<{ ref: string; deleted_at?: string }>;
+  };
+  for (const item of r.secrets) {
+    assert.equal(item.deleted_at, undefined,
+      "default list must not include any entry with deleted_at set");
   }
 });
 ```
@@ -2407,6 +2472,14 @@ git commit -m "docs(cli-reference): remove use-as-stdin section; add v0.2.0 surf
 
 ### Task F2: Full test suite verification
 
+**Pre-flight (working-tree hygiene):**
+
+```bash
+git status --short
+```
+
+If the output shows files modified that aren't part of Plan 2's scope (the reviewer specifically noted `demo/index.html` was dirty in a prior round), either commit/stash them on a separate branch BEFORE starting Plan 2 execution, or accept that they'll be entangled with Plan 2's commits. Plan 2 commits should each touch only files inside Plan 2's declared scope — anything else is unrelated work that needs its own commit.
+
 - [ ] **Step 1: Run `npm test`**
 
 Expect ALL pass. If anything fails:
@@ -2472,7 +2545,7 @@ If all the above are green, proceed to F3.
 - Per-command `--help` epilogs with copy-pasteable examples for every public command.
 
 ### Changed
-- Old top-level commands `list`, `inspect`, `generate`, `doctor` remain available as deprecated shims that delegate to their `secrets *` / `status` replacement. Each emits a `[deprecated] ...` line to stderr AND a `warning: { message, deprecated, replacement }` field in JSON output. Scheduled for removal in v0.3.0.
+- Old top-level commands `list`, `inspect`, `generate`, `doctor` remain available as deprecated shims that delegate to their `secrets *` / `status` replacement. JSON output (stdout on success, stderr on failure) always carries a `warning: { message, deprecated, replacement }` field. On success, stderr additionally gets a human-readable `[deprecated] ...` line; on failure, stderr is a single parseable JSON document — no separate human line. Scheduled for removal in v0.3.0.
 - `use-as-stdin` command removed (deprecated in 0.1.x; replaced by `template run`).
 - `src/daemon/server.ts` pre-handler error paths (bad_host, unauthorized, not_found) now emit the full §5.6 structured-error contract instead of the partial legacy shape.
 
