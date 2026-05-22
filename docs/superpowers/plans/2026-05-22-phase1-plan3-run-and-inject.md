@@ -15,7 +15,7 @@
 - **Plan 1 ✅** — Foundation (structured errors + keychain interface).
 - **Plan 2 ✅** — CLI surface (secrets group + status + internal + help + deprecation).
 - **Plan 3 (this)** — `run` + `inject` + daemon spawner. Depends on Plans 1+2 for the `secrets get-ref` deleted-aware lookup and the structured error/deprecation contract.
-- **Plan 4** — Pre-approved sessions + approval-UI single-window tab reuse + masking of resolved values in `run`'s stdout/stderr (output-pathway hardening pass).
+- **Plan 4** — Pre-approved sessions + approval-UI single-window tab reuse + `run` stdin pass-through (bidirectional chunked-HTTP-body wiring). Run-output masking moved INTO Plan 3 (was previously planned here — see Plan 3 Tasks B4 + B5).
 - **Plan 5a** — `init` rewrite + native-module keychain.
 - **Plan 5b** — Docs (SKILL.md, walkthrough, README, cli-reference) + npm publish 0.2.0.
 
@@ -121,15 +121,16 @@ Once all three checks pass, proceed to Task A1.
 - Create: `src/cli/run/env-file.ts`
 - Create: `src/cli/run/env-file.test.ts`
 
-**Behavior** (per spec §5.3 rules):
+**Behavior** (per spec §5.3 rules — note this revises the previous draft's stricter rule (3) to match canonical ref grammar):
 1. One `KEY=VALUE` per line. Blank lines and `#`-prefixed comments ignored.
 2. Keys must match `[A-Z_][A-Z0-9_]*` (POSIX env var convention).
-3. `VALUE` is recognized as an `ss://` reference **only if the entire value** (after optional surrounding quotes) matches `^ss://[^/]+/[^/]+/[A-Z_][A-Z0-9_]*$`. Partial-substring matches are NOT resolved.
-4. Non-ref values pass through verbatim to the child env.
-5. Double-quoted values are unquoted; backslash-escapes are NOT expanded.
-6. No `${VAR}` shell-style expansion. Ever.
+3. `VALUE` is recognized as an `ss://` reference **only if the entire value** (after optional surrounding quotes) parses successfully via the canonical [`parseSecretRef`](../../../src/shared/refs.ts) helper. That helper enforces the single source of truth for ref grammar: `source` = `[a-zA-Z0-9][a-zA-Z0-9._-]*`, `environment` = same, `name` = `[A-Za-z_][A-Za-z0-9_.-]*`. Refs like `ss://local/dev/my-key.v2` ARE valid (NAME_RE allows lowercase, dots, dashes). Partial-substring matches are NOT resolved.
+4. When the value parses as a ref, the entry stores the CANONICAL ref string (`parseSecretRef(value).ref`) — so `ss://x/prod/...` and `ss://x/production/...` both normalize to one entry. This matters for the daemon's batch `resolveRefs` call.
+5. Non-ref values pass through verbatim to the child env.
+6. Double-quoted values are unquoted; backslash-escapes are NOT expanded.
+7. No `${VAR}` shell-style expansion. Ever.
 
-Returns `{ entries: EnvFileEntry[] }` where `EnvFileEntry = { key: string; value: string; isRef: boolean }`. The `value` field is the raw ref string (e.g. `"ss://stripe/prod/STRIPE_KEY"`) when `isRef: true`, or the verbatim literal when `isRef: false`.
+Returns `{ entries: EnvFileEntry[] }` where `EnvFileEntry = { key: string; value: string; isRef: boolean }`. The `value` field is the CANONICAL ref string (e.g. `"ss://stripe/production/STRIPE_KEY"`) when `isRef: true`, or the verbatim literal when `isRef: false`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -150,9 +151,23 @@ test("parseEnvFile: bare KEY=VALUE pair (non-ref)", () => {
   assert.deepEqual(r.entries, [{ key: "PORT", value: "3000", isRef: false }]);
 });
 
-test("parseEnvFile: KEY=ss://... resolves as ref", () => {
+test("parseEnvFile: KEY=ss://... resolves as ref (canonicalized env)", () => {
+  // 'prod' canonicalizes to 'production' via parseSecretRef.
   const r = parseEnvFile("STRIPE_KEY=ss://stripe/prod/STRIPE_KEY\n");
-  assert.deepEqual(r.entries, [{ key: "STRIPE_KEY", value: "ss://stripe/prod/STRIPE_KEY", isRef: true }]);
+  assert.deepEqual(r.entries, [{ key: "STRIPE_KEY", value: "ss://stripe/production/STRIPE_KEY", isRef: true }]);
+});
+
+test("parseEnvFile: NAME_RE mixed-case + dashes + dots are valid ref names", () => {
+  // The canonical NAME_RE is [A-Za-z_][A-Za-z0-9_.-]*. A real-world ref like
+  // ss://local/dev/my-key.v2 MUST be detected as a ref, not treated as literal.
+  const r = parseEnvFile("MY_KEY=ss://local/dev/my-key.v2\n");
+  assert.deepEqual(r.entries, [{ key: "MY_KEY", value: "ss://local/development/my-key.v2", isRef: true }]);
+});
+
+test("parseEnvFile: invalid ref structure → treated as literal value (no exception)", () => {
+  // Trailing slash → fails parseSecretRef → stays literal.
+  const r = parseEnvFile("BROKEN=ss://x/dev/\n");
+  assert.deepEqual(r.entries, [{ key: "BROKEN", value: "ss://x/dev/", isRef: false }]);
 });
 
 test("parseEnvFile: comments and blank lines are ignored", () => {
@@ -204,9 +219,9 @@ test("parseEnvFile: ${VAR} expansion is not supported — treated as literal", (
   assert.deepEqual(r.entries, [{ key: "FOO", value: "${BAR}_suffix", isRef: false }]);
 });
 
-test("parseEnvFile: quoted ss:// ref is unquoted and detected as ref", () => {
+test("parseEnvFile: quoted ss:// ref is unquoted and detected as ref (canonicalized)", () => {
   const r = parseEnvFile('STRIPE_KEY="ss://stripe/prod/STRIPE_KEY"\n');
-  assert.deepEqual(r.entries, [{ key: "STRIPE_KEY", value: "ss://stripe/prod/STRIPE_KEY", isRef: true }]);
+  assert.deepEqual(r.entries, [{ key: "STRIPE_KEY", value: "ss://stripe/production/STRIPE_KEY", isRef: true }]);
 });
 ```
 
@@ -224,12 +239,17 @@ Create `src/cli/run/env-file.ts`:
 
 ```typescript
 import { ShuttleError } from "../../shared/errors.js";
+import { parseSecretRef } from "../../shared/refs.js";
 
 export interface EnvFileEntry {
   key: string;
-  /** The raw value as seen in the file (unquoted if double-quoted), without shell expansion. */
+  /**
+   * For refs (isRef=true): the CANONICAL ref string (parseSecretRef.ref).
+   * For literals (isRef=false): the raw value (unquoted if double-quoted),
+   *   without shell expansion.
+   */
   value: string;
-  /** True iff `value` is a syntactically valid `ss://source/env/name` ref. */
+  /** True iff `value` parses successfully via parseSecretRef. */
   isRef: boolean;
 }
 
@@ -238,17 +258,19 @@ export interface EnvFileParseResult {
 }
 
 const KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
-const REF_RE = /^ss:\/\/[^/]+\/[^/]+\/[A-Z_][A-Z0-9_]*$/;
 
 /**
  * Strict dotenv-like parser. Spec §5.3 rules:
  *   - One KEY=VALUE per line.
  *   - Blank lines and `#`-prefixed comments ignored.
- *   - Keys: [A-Z_][A-Z0-9_]*.
+ *   - Keys: [A-Z_][A-Z0-9_]* (POSIX env var convention).
  *   - Values: literal. Double quotes around value are stripped but backslash
  *     escapes are NOT expanded. No `${VAR}` shell expansion.
- *   - A value is recognized as an `ss://` ref only if the ENTIRE value matches
- *     the ref regex. Partial substrings stay literal.
+ *   - A value is recognized as an `ss://` ref only if the ENTIRE value parses
+ *     via the canonical parseSecretRef helper — that's the SINGLE source of
+ *     truth for ref grammar (NAME_RE allows mixed-case, dots, dashes, etc.).
+ *     Partial substrings stay literal.
+ *   - When the value is a ref, it's stored CANONICALIZED (e.g. 'prod' → 'production').
  *
  * Errors: throws ShuttleError("env_file_parse_error", "<line N>: <reason>")
  * for any malformed line.
@@ -282,14 +304,29 @@ export function parseEnvFile(content: string): EnvFileParseResult {
     if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
       value = value.slice(1, -1);
     }
-    const isRef = REF_RE.test(value);
-    entries.push({ key, value, isRef });
+    // Detect refs via the canonical parser. If parseSecretRef throws, the
+    // value is NOT a ref — keep the literal verbatim. We deliberately do not
+    // surface parseSecretRef's specific error because the user's intent might
+    // have been a literal value that happens to start with `ss://`.
+    let canonical: string | null = null;
+    if (value.startsWith("ss://")) {
+      try {
+        canonical = parseSecretRef(value).ref;
+      } catch {
+        canonical = null;
+      }
+    }
+    if (canonical !== null) {
+      entries.push({ key, value: canonical, isRef: true });
+    } else {
+      entries.push({ key, value, isRef: false });
+    }
   }
   return { entries };
 }
 ```
 
-- [ ] **Step 4: Run test — expect PASS** (11 tests)
+- [ ] **Step 4: Run test — expect PASS** (13 tests)
 
 ```bash
 npm run build && node --test "dist/cli/run/env-file.test.js"
@@ -795,15 +832,28 @@ test("streamLineDelimitedJson: invalid JSON throws", async () => {
 // from Plan 1 (daemon-provided hint + exit_code MUST survive non-200 paths).
 // ---------------------------------------------------------------------------
 
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { ShuttleError } from "../shared/errors.js";
 import { DaemonServer } from "../daemon/server.js";
-import { writeSocketFile, removeSocketFile } from "../daemon/socket-file.js";
+import { writeSocketFile } from "../daemon/socket-file.js";
 import { streamingDaemonRequest } from "./streaming-request.js";
 
-async function withTestDaemon<T>(
+/**
+ * Same isolation pattern as withEphemeralDaemon in daemon-client.test.ts:
+ * point SECRET_SHUTTLE_HOME at a fresh tmpdir so the test never writes to
+ * the user's real ~/.secret-shuttle/daemon-socket.json. Without this, a
+ * concurrent live daemon would have its socket file clobbered every time
+ * this test runs.
+ */
+async function withEphemeralStreamingDaemon<T>(
   setup: (server: DaemonServer) => void,
   fn: (token: string) => Promise<T>,
 ): Promise<T> {
+  const home = await mkdtemp(path.join(os.tmpdir(), "ss-stream-"));
+  const prev = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = home;
   const token = "test-token-streaming";
   const server = new DaemonServer({ token });
   setup(server);
@@ -812,13 +862,15 @@ async function withTestDaemon<T>(
   try {
     return await fn(token);
   } finally {
-    await removeSocketFile().catch(() => undefined);
     await server.close();
+    if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+    else process.env.SECRET_SHUTTLE_HOME = prev;
+    await rm(home, { recursive: true, force: true });
   }
 }
 
 test("streamingDaemonRequest: preserves daemon-provided hint and exit_code on non-200", async () => {
-  await withTestDaemon(
+  await withEphemeralStreamingDaemon(
     (server) => {
       server.addRouteStreaming("POST", "/v1/run/resolve", async (_req, _body, res) => {
         // Emit a structured-error payload with BOTH nested + flat fields,
@@ -913,11 +965,16 @@ export async function streamLineDelimitedJson(
  * Open a streaming POST to the daemon. Throws daemon_not_running if no socket.
  * Returns the ReadableStream<Uint8Array> of the response body for the caller
  * to feed into streamLineDelimitedJson().
+ *
+ * Cancellation: pass an AbortSignal to interrupt the fetch (the CLI uses this
+ * to forward SIGINT/SIGTERM into a closed-socket → daemon res.on('close') →
+ * SIGTERM-the-child chain).
  */
 export async function streamingDaemonRequest(
   method: "POST",
   path: string,
   body: unknown,
+  options?: { signal?: AbortSignal },
 ): Promise<ReadableStream<Uint8Array>> {
   const sf = await readSocketFile();
   if (sf === null) {
@@ -927,6 +984,7 @@ export async function streamingDaemonRequest(
     method,
     headers: { Authorization: `Bearer ${sf.token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
+    ...(options?.signal !== undefined ? { signal: options.signal } : {}),
   });
   if (res.body === null) {
     throw new ShuttleError("daemon_invalid_response", "Daemon returned no response body for streaming endpoint.");
@@ -1252,7 +1310,7 @@ lookback (maxLen-1 bytes)."
 - Builds the final env block: `{ ...buildChildEnv(), ...nonRefs, ...refValues }`.
 - Validates `cwd` is an absolute path (CLI is required to send `process.cwd()` — see Task C1). If missing or non-absolute, the route rejects with `missing_param` BEFORE spawning. Never falls back to the daemon's `process.cwd()` and never silently uses `$HOME`.
 - Switches into streaming mode (`content-type: application/x-ndjson`, `flushHeaders()`).
-- Wraps the response writer in the masker so resolved values are stripped before bytes cross the HTTP boundary.
+- Wraps the response writer in TWO independent maskers (one per stream: `stdoutMasker`, `stderrMasker`) so resolved values are stripped before bytes cross the HTTP boundary AND so a held-back stdout tail never gets emitted as stderr (or vice-versa). Each masker is flushed to ITS OWN stream when the child exits.
 - Wires `res.on("close", () => abortController.abort())` so a CLI Ctrl-C or socket disconnect kills the child.
 - On the child's exit, calls `markUsed(ref)` for every successfully resolved ref and writes one audit entry per ref `{ action: "run", ok: <child_exit === 0>, ref, environment }`. On any pre-spawn failure, writes per-ref audit with `ok: false` + `error_code`.
 - Calls `res.end()` after `writeExit`.
@@ -1540,6 +1598,8 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
 
 Create `src/daemon/api/routes/run-resolve.test.ts`. Follow the existing test-harness pattern from [src/daemon/api/routes/secrets-delete.test.ts](../../../src/daemon/api/routes/secrets-delete.test.ts) (Plan 2): use a real `DaemonServer` + ephemeral socket file + vault fixture. The streaming response is consumed via `streamingDaemonRequest` + `streamLineDelimitedJson` from Task B3.
 
+**CRITICAL — isolation:** the test fixture MUST point `process.env.SECRET_SHUTTLE_HOME` at a `mkdtemp` tempdir (see [secrets-delete.test.ts:13](../../../src/daemon/api/routes/secrets-delete.test.ts)). Without this, `writeSocketFile` clobbers the user's real daemon-socket file at `~/.secret-shuttle/daemon-socket.json` — a concurrent live daemon would lose its socket pointer on every test run.
+
 ```typescript
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -1564,9 +1624,13 @@ test("POST /v1/run/resolve: streams stdout + exit for a simple development-class
   // (Note: masking is on by default. The raw value "world" must NOT appear anywhere in the stream.)
 });
 
-test("POST /v1/run/resolve: production refs require approval (no approval_id → approval_required)", async () => {
+test("POST /v1/run/resolve: production refs require approval (pre-stream JSON 400)", async () => {
   // Seed: ss://x/prod/SECRET. wait_for_approval: false.
-  // Expect: { error: { code: "approval_required" } } in stream and exit > 0.
+  // Expect: HTTP 400 (non-streaming response — approval failure short-circuits
+  // BEFORE the response transitions to chunked mode). The body is the
+  // canonical structured error: { ok: false, error: { code: "approval_required" }, error_code, message, hint, exit_code }.
+  // This matches how the implementation writeJsonErrors on approval failure
+  // (see the route — approval failures land before res.flushHeaders()).
 });
 
 test("POST /v1/run/resolve: non-ref env values pass through verbatim and are NOT masked", async () => {
@@ -1592,9 +1656,62 @@ test("POST /v1/run/resolve: resolved value never appears in the stream (masking 
   // Assert the literal "THE_SECRET_VALUE_DO_NOT_LEAK" does NOT appear, but "***" does.
 });
 
+test("POST /v1/run/resolve: stdout and stderr maskers are independent (no cross-stream leak)", async () => {
+  // Regression for the "shared masker" bug: with a single masker, a stdout
+  // tail held back across an intervening stderr chunk could be emitted as
+  // stderr (or vice-versa), AND the flush-on-exit would dump all leftover
+  // bytes to one stream regardless of origin. Per-stream maskers fix this.
+  //
+  // Seed ss://x/dev/SECRET = "RUFOAUS" (7 chars, longer than 1 byte).
+  //
+  // Child writes alternating partial chunks of the secret to stdout/stderr
+  // such that NEITHER stream alone contains the full secret, but a shared
+  // masker WOULD see a "match" by concatenating across streams.
+  //
+  //   node -e "
+  //     // The secret is RUFOAUS. Write 'RUF' to stdout, then 'OAU' to stderr,
+  //     // then 'S' to stdout. Neither stream contains the full secret, but
+  //     // a shared masker would (incorrectly) reassemble it.
+  //     process.stdout.write('RUF');
+  //     // Force flush ordering — write to stderr after a microtask.
+  //     setImmediate(() => {
+  //       process.stderr.write('OAU');
+  //       setImmediate(() => { process.stdout.write('S'); process.exit(0); });
+  //     });
+  //   "
+  //
+  // Aggregate stdout chunks → "RUFS" (or similar — never contains "RUFOAUS").
+  // Aggregate stderr chunks → "OAU" — never contains "RUFOAUS".
+  // No "***" appears in either stream (neither stream had a full match).
+  //
+  // The opposite case — secret IS entirely on one stream — is covered by the
+  // "resolved value never appears" test above.
+});
+
 test("POST /v1/run/resolve: missing cwd or relative cwd is rejected before spawn", async () => {
   // Body has cwd: undefined OR cwd: "./relative".
   // Expect: HTTP 400 with error_code = "missing_param" (cwd is required and must be absolute).
+});
+
+test("POST /v1/run/resolve: strict body validation — refs must be an array", async () => {
+  // Body has refs: "not-an-array". Expect HTTP 400 / bad_request.
+  // The route MUST NOT silently coerce to [] or skip non-strings.
+});
+
+test("POST /v1/run/resolve: strict body validation — refs entries must be strings", async () => {
+  // Body has refs: ["valid", 123]. Expect HTTP 400 / bad_request.
+});
+
+test("POST /v1/run/resolve: strict body validation — args must be an array of strings", async () => {
+  // Body has args: [null, "x"]. Expect HTTP 400 / bad_request.
+});
+
+test("POST /v1/run/resolve: strict body validation — env entries must have key, value, isRef fields", async () => {
+  // Body has env: [{ key: "X" }]   (missing value and isRef). Expect HTTP 400 / bad_request.
+});
+
+test("POST /v1/run/resolve: strict body validation — env entry value must be a string", async () => {
+  // Body has env: [{ key: "X", value: 42, isRef: false }]. Expect HTTP 400 / bad_request.
 });
 
 test("POST /v1/run/resolve: markUsed is called on the resolved ref after a successful run", async () => {
@@ -1657,25 +1774,77 @@ export function registerRunResolveRoute(
 
     services.lock.requireKey();
 
-    // Validate body shape.
+    // Strict body validation. Reject — never silently coerce or drop — anything
+    // that doesn't match the wire contract. The existing route validators in
+    // src/daemon/api/routes/secrets-delete.ts and templates.ts follow this same
+    // pattern: throw bad_request / missing_param at the first malformed field.
     let body: RunResolveBody;
     try {
       const o = asObject(raw);
+
+      // refs: optional array of strings.
+      let refs: string[] = [];
+      if (o.refs !== undefined) {
+        if (!Array.isArray(o.refs)) {
+          throw new ShuttleError("bad_request", "refs must be an array of strings.");
+        }
+        for (const r of o.refs) {
+          if (typeof r !== "string") {
+            throw new ShuttleError("bad_request", "refs entries must be strings.");
+          }
+        }
+        refs = o.refs as string[];
+      }
+
+      // env: optional array of { key: string, value: string, isRef: boolean }.
+      let envEntries: Array<{ key: string; value: string; isRef: boolean }> = [];
+      if (o.env !== undefined) {
+        if (!Array.isArray(o.env)) {
+          throw new ShuttleError("bad_request", "env must be an array of entry objects.");
+        }
+        for (const e of o.env) {
+          if (e === null || typeof e !== "object") {
+            throw new ShuttleError("bad_request", "env entries must be objects.");
+          }
+          const ent = e as Record<string, unknown>;
+          if (typeof ent.key !== "string") {
+            throw new ShuttleError("bad_request", "env entry 'key' must be a string.");
+          }
+          if (typeof ent.value !== "string") {
+            throw new ShuttleError("bad_request", "env entry 'value' must be a string.");
+          }
+          if (typeof ent.isRef !== "boolean") {
+            throw new ShuttleError("bad_request", "env entry 'isRef' must be a boolean.");
+          }
+          envEntries.push({ key: ent.key, value: ent.value, isRef: ent.isRef });
+        }
+      }
+
+      // args: optional array of strings.
+      let args: string[] = [];
+      if (o.args !== undefined) {
+        if (!Array.isArray(o.args)) {
+          throw new ShuttleError("bad_request", "args must be an array of strings.");
+        }
+        for (const a of o.args) {
+          if (typeof a !== "string") {
+            throw new ShuttleError("bad_request", "args entries must be strings.");
+          }
+        }
+        args = o.args as string[];
+      }
+
+      const approvalId = optString(o, "approval_id");
+      const waitForApproval = optBool(o, "wait_for_approval");
+
       body = {
-        refs: Array.isArray(o.refs)
-          ? o.refs.filter((r): r is string => typeof r === "string")
-          : [],
-        env: Array.isArray(o.env)
-          ? o.env.filter((e): e is { key: string; value: string; isRef: boolean } =>
-              e !== null && typeof e === "object" && typeof (e as { key?: unknown }).key === "string")
-          : [],
+        refs,
+        env: envEntries,
         command: reqString(o, "command"),
-        args: Array.isArray(o.args)
-          ? o.args.filter((a): a is string => typeof a === "string")
-          : [],
+        args,
         cwd: reqString(o, "cwd"),
-        ...(optString(o, "approval_id") !== undefined ? { approval_id: optString(o, "approval_id")! } : {}),
-        ...(optBool(o, "wait_for_approval") !== undefined ? { wait_for_approval: optBool(o, "wait_for_approval")! } : {}),
+        ...(approvalId !== undefined ? { approval_id: approvalId } : {}),
+        ...(waitForApproval !== undefined ? { wait_for_approval: waitForApproval } : {}),
       };
     } catch (e) {
       // Validation throws before any side effect — safe to surface as pre-stream JSON.
@@ -1767,8 +1936,14 @@ export function registerRunResolveRoute(
       }
     }
 
-    // Build the masker from the resolved values (NOT the refs — refs are public).
-    const masker = createMasker(Array.from(resolved.values()).map((r) => r.value));
+    // Build TWO maskers (one per stream) from the resolved values (NOT the
+    // refs — refs are public). A single shared masker would (a) hold back
+    // stdout tail bytes across stderr writes, (b) emit those held-back bytes
+    // to whichever stream wrote next, mixing the two streams, and (c) at
+    // flush time, dump everything to one stream regardless of origin.
+    const secretValues = Array.from(resolved.values()).map((r) => r.value);
+    const stdoutMasker = createMasker(secretValues);
+    const stderrMasker = createMasker(secretValues);
 
     // Switch into streaming response mode.
     res.statusCode = 200;
@@ -1778,22 +1953,26 @@ export function registerRunResolveRoute(
 
     const writer: OutputWriter = {
       writeStdout(chunk) {
-        const masked = masker.process(chunk);
+        const masked = stdoutMasker.process(chunk);
         if (masked.length > 0) {
           res.write(JSON.stringify({ stream: "stdout", data: masked.toString("base64") }) + "\n");
         }
       },
       writeStderr(chunk) {
-        const masked = masker.process(chunk);
+        const masked = stderrMasker.process(chunk);
         if (masked.length > 0) {
           res.write(JSON.stringify({ stream: "stderr", data: masked.toString("base64") }) + "\n");
         }
       },
       writeExit(code) {
-        // Flush any remaining masker bytes (may carry the tail of a partial match).
-        const flush = masker.flush();
-        if (flush.length > 0) {
-          res.write(JSON.stringify({ stream: "stdout", data: flush.toString("base64") }) + "\n");
+        // Flush each masker to ITS OWN stream — no cross-stream emission.
+        const stdoutFlush = stdoutMasker.flush();
+        if (stdoutFlush.length > 0) {
+          res.write(JSON.stringify({ stream: "stdout", data: stdoutFlush.toString("base64") }) + "\n");
+        }
+        const stderrFlush = stderrMasker.flush();
+        if (stderrFlush.length > 0) {
+          res.write(JSON.stringify({ stream: "stderr", data: stderrFlush.toString("base64") }) + "\n");
         }
         res.write(JSON.stringify({ exit: code }) + "\n");
         res.end();
@@ -1883,7 +2062,7 @@ import { registerRunResolveRoute } from "./routes/run-resolve.js";
 registerRunResolveRoute(server, services, daemonPortRef);
 ```
 
-- [ ] **Step 9: Run route tests — expect PASS** (10 tests)
+- [ ] **Step 9: Run route tests — expect PASS** (16 tests including the cross-stream-leak regression and 5 strict-validation cases)
 
 ```bash
 npm run build && node --test "dist/daemon/api/routes/run-resolve.test.js"
@@ -1928,7 +2107,7 @@ git commit -m "feat(daemon): /v1/run/resolve route + spawner
   - `{ exit: <code> }` → set `process.exitCode = code` and return.
   - `{ error: ... }` → reconstruct via `daemonErrorFromPayload({ error_code: <c>, message: <m>, hint, exit_code })` so daemon-supplied `hint`/`exit_code` survive — same contract as the non-streaming `daemonRequest` path.
 
-**Cancellation:** trap `SIGINT` (Ctrl-C) and `SIGTERM` and `req.destroy()` the underlying fetch — that closes the HTTP socket, which fires `res.on("close")` on the daemon and SIGTERMs the child (see Task B5's spawner).
+**Cancellation:** the CLI registers `SIGINT` (Ctrl-C) and `SIGTERM` handlers that call `controller.abort()` on the `AbortController` passed to `fetch` via `streamingDaemonRequest`. Aborting `fetch` closes the underlying HTTP socket, which fires `res.on("close")` on the daemon and SIGTERMs the child (see Task B5's spawner). The CLI then sets `process.exitCode = 130` (POSIX convention for SIGINT) and exits naturally after the stream consumer returns. This needs `streamingDaemonRequest` to accept an `AbortSignal` — extend Task B3's API to thread one through.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2005,29 +2184,59 @@ export function runCommand(): Command {
         ...(options.wait === false ? { wait_for_approval: false } : {}),
       };
 
-      const stream = await streamingDaemonRequest("POST", "/v1/run/resolve", body);
+      // Wire SIGINT/SIGTERM → AbortController → fetch cancel → daemon
+      // res.on("close") → SIGTERM-the-child. Use { once: true } so signal
+      // handlers don't accumulate across repeated invocations.
+      const controller = new AbortController();
+      let cancelledByUser = false;
+      const onSignal = (): void => {
+        cancelledByUser = true;
+        controller.abort();
+      };
+      process.once("SIGINT", onSignal);
+      process.once("SIGTERM", onSignal);
+
       let exitCode = 0;
       let streamError: ShuttleError | undefined;
-      await streamLineDelimitedJson(stream, (line) => {
-        if ("stream" in line) {
-          const buf = Buffer.from(line.data, "base64");
-          if (line.stream === "stdout") process.stdout.write(buf);
-          else process.stderr.write(buf);
-        } else if ("exit" in line) {
-          exitCode = line.exit;
-        } else if ("error" in line) {
-          // Preserve daemon-provided hint + exit_code; reuse Plan 1's helper.
-          // Synthesize the canonical payload shape so daemonErrorFromPayload
-          // resolves both nested and flat fields consistently.
-          streamError = daemonErrorFromPayload({
-            error: { code: line.error.code, message: line.error.message },
-            error_code: line.error.code,
-            message: line.error.message,
-            hint: line.error.hint ?? null,
-            exit_code: line.error.exit_code,
-          });
+      try {
+        const stream = await streamingDaemonRequest(
+          "POST",
+          "/v1/run/resolve",
+          body,
+          { signal: controller.signal },
+        );
+        await streamLineDelimitedJson(stream, (line) => {
+          if ("stream" in line) {
+            const buf = Buffer.from(line.data, "base64");
+            if (line.stream === "stdout") process.stdout.write(buf);
+            else process.stderr.write(buf);
+          } else if ("exit" in line) {
+            exitCode = line.exit;
+          } else if ("error" in line) {
+            // Preserve daemon-provided hint + exit_code; reuse Plan 1's helper.
+            // Synthesize the canonical payload shape so daemonErrorFromPayload
+            // resolves both nested and flat fields consistently.
+            streamError = daemonErrorFromPayload({
+              error: { code: line.error.code, message: line.error.message },
+              error_code: line.error.code,
+              message: line.error.message,
+              hint: line.error.hint ?? null,
+              exit_code: line.error.exit_code,
+            });
+          }
+        });
+      } catch (e) {
+        // fetch/stream aborted because the user cancelled — exit 130 (SIGINT).
+        // Any other error rethrows to the CLI top-level error handler.
+        if (cancelledByUser) {
+          process.exitCode = 130;
+          return;
         }
-      });
+        throw e;
+      } finally {
+        process.removeListener("SIGINT", onSignal);
+        process.removeListener("SIGTERM", onSignal);
+      }
       if (streamError !== undefined) throw streamError;
       process.exitCode = exitCode;
     })
@@ -2106,10 +2315,12 @@ git commit -m "feat(cli): run --env-file -- <cmd> — subshell injection via dae
 - Reads body: `{ template: string, output_path: string, approval_id?, wait_for_approval? }`.
 - Special case: `output_path === "-"` → return the rendered content in the JSON response (`content` field). CLI documented as "bytes pass through CLI" mode.
 - File mode: validate `output_path` is absolute (CLI is required to send `path.resolve(cli_cwd, user_arg)` — see Task D2). Reject relative.
-- Daemon-side path safety:
-  1. `realpath(dirname(output_path))` — resolve all symlinks in the parent directory.
-  2. Check that the realpath'd parent is inside `realpath($HOME)`. Refuse otherwise with `inject_output_path_unsafe`.
-  3. `lstat(output_path)` — if the leaf exists AND is a symlink, refuse with `inject_output_path_unsafe`. (Writing through a leaf symlink could redirect bytes outside $HOME.)
+- Daemon-side path safety (defends against symlinked ancestors that would let `mkdir(..., { recursive: true })` create directories outside `$HOME` BEFORE rejection):
+  1. Resolve `realHome = realpath($HOME)`.
+  2. Walk UP from `dirname(output_path)` until reaching an existing path component, collecting each non-existent ancestor onto a stack. For each EXISTING component encountered, `lstat` it: if it's a symlink, refuse with `inject_output_path_unsafe`; if it's not a directory, refuse.
+  3. Once a real existing ancestor is found, `realpath` it. Check `path.relative(realHome, realParent)` does NOT start with `..` and is not absolute. Refuse otherwise.
+  4. Pop the non-existent stack shallowest-first, doing `mkdir(dir, { mode: 0o700, recursive: false })` for each. Because each step is non-recursive AND we just verified no symlinks exist on the path, mkdir cannot blindly follow a symlink outside $HOME.
+  5. `lstat(output_path)` itself — if the leaf exists AND is a symlink, refuse with `inject_output_path_unsafe`. (Writing through a leaf symlink could redirect bytes outside $HOME.)
 - Per-ref policy: `assertSecretActionAllowed(record, "use_as_stdin")` for every resolved record. Fails closed if any ref has opted out.
 - Atomic write: open a unique sibling temp file (`<canonical>.<8-random-hex>.tmp`) with `O_CREAT | O_EXCL | O_WRONLY` and mode `0o600`. Write content. Close. `rename` to the final path. On any failure, unlink the temp file. Truncate-then-overwrite semantics is REJECTED — it would briefly leave the file empty and could race a reader; rename is atomic on POSIX.
 - markUsed + per-ref audit on success (action `"inject_render"`). Per-ref audit on failure with `error_code`.
@@ -2255,10 +2466,14 @@ export function parseTemplate(template: string): ParsedTemplate {
 
 - [ ] **Step 5: Route test**
 
+**CRITICAL — isolation:** same as the run-resolve route test, the inject-render fixture MUST set `process.env.SECRET_SHUTTLE_HOME` to a `mkdtemp` tempdir before calling `writeSocketFile`. Otherwise the test clobbers the user's real daemon-socket file. Mirror [secrets-delete.test.ts:13](../../../src/daemon/api/routes/secrets-delete.test.ts).
+
+Additionally, this test creates real files under the synthetic `$HOME`. Use the same tempdir for both `SECRET_SHUTTLE_HOME` and the simulated `os.homedir()` — but note that `os.homedir()` reads `process.env.HOME` (POSIX) or `USERPROFILE` (Windows), so the test must ALSO override `HOME` for the duration of the test to make the daemon's `realHome` check meaningful. Save + restore both env vars.
+
 ```typescript
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat, symlink, writeFile, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, stat, symlink, rm, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 // ... existing harness imports (vault stub, approval store, etc.)
@@ -2288,6 +2503,29 @@ test("POST /v1/inject/render: refuses leaf-symlink output_path → inject_output
 test("POST /v1/inject/render: refuses parent-with-symlink-outside-HOME via realpath", async () => {
   // Pre-create $HOME/escape -> /tmp/somewhere/. POST output_path = $HOME/escape/file.yml.
   // realpath($HOME/escape) = /tmp/somewhere; that's outside HOME → reject.
+});
+
+test("POST /v1/inject/render: refuses symlinked ANCESTOR (no directory created outside HOME)", async () => {
+  // Regression for the "mkdir before realpath" bug: previously,
+  // mkdir(parent, { recursive: true }) followed the symlink and CREATED
+  // directories outside HOME before the realpath check fired. The fixed
+  // implementation walks ancestors with lstat first and refuses without
+  // creating anything.
+  //
+  // Setup:
+  //   tmpdir = mkdtemp(...)
+  //   $HOME = tmpdir
+  //   escape = path.join(tmpdir, "escape")          // does not exist
+  //   outside = mkdtemp(...)                         // SEPARATE temp dir, OUTSIDE the synthetic $HOME
+  //   await symlink(outside, escape)                 // $HOME/escape → /tmp/outside
+  //
+  // POST output_path = path.join(escape, "deep", "nested", "out.yml").
+  //
+  // Expected:
+  //   - Error: inject_output_path_unsafe
+  //   - readdir(outside) is EMPTY — no `deep/` or `nested/` was created inside it.
+  //
+  // (The naive impl would have created /tmp/outside/deep/nested/ before failing.)
 });
 
 test("POST /v1/inject/render with output_path='-' returns rendered content in response body", async () => {
@@ -2328,7 +2566,7 @@ test("POST /v1/inject/render: existing output file is atomically overwritten (no
 Create `src/daemon/api/routes/inject-render.ts`:
 
 ```typescript
-import { mkdir, lstat, realpath, rename, rm, writeFile, open } from "node:fs/promises";
+import { mkdir, lstat, realpath, rename, rm, open } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { randomBytes } from "node:crypto";
@@ -2413,19 +2651,69 @@ export function registerInjectRenderRoute(
         throw new ShuttleError("inject_output_path_unsafe", `output_path must be absolute: ${outputPath}`);
       }
 
-      // realpath the parent directory and verify it's inside $HOME.
-      const home = await realpath(os.homedir());
+      // Path-safety walk. The dangerous case we defend against:
+      //
+      //   $HOME/escape  →  symlink to /tmp/outside/
+      //   user passes -o $HOME/escape/file.yml
+      //
+      // A naive `mkdir(parent, { recursive: true })` followed by realpath()
+      // would happily traverse the symlink and create /tmp/outside/, only
+      // THEN rejecting based on realpath — too late. Instead:
+      //   1. Find the deepest EXISTING ancestor of the parent dir.
+      //      Along the way, lstat each existing path component and refuse
+      //      if any is a symlink or non-directory.
+      //   2. realpath the deepest existing ancestor; verify inside $HOME.
+      //   3. mkdir the missing ancestors step-by-step (NOT recursive),
+      //      shallowest first. Because we walked the existing prefix
+      //      symlink-free AND each new mkdir creates a fresh directory,
+      //      we cannot follow a symlink outside $HOME.
+      const realHome = await realpath(os.homedir());
       const parentDir = path.dirname(outputPath);
-      // Create the parent dir if needed (mode 0o700). Do this BEFORE realpath
-      // so realpath can resolve a freshly-created parent.
-      await mkdir(parentDir, { recursive: true, mode: 0o700 });
-      const realParent = await realpath(parentDir);
-      const rel = path.relative(home, realParent);
+      const missingStack: string[] = []; // deepest -> shallowest as we walk up
+      let existing = parentDir;
+      while (true) {
+        try {
+          const st = await lstat(existing);
+          if (st.isSymbolicLink()) {
+            throw new ShuttleError(
+              "inject_output_path_unsafe",
+              `Refusing — ancestor ${existing} is a symlink`,
+            );
+          }
+          if (!st.isDirectory()) {
+            throw new ShuttleError(
+              "inject_output_path_unsafe",
+              `Refusing — ancestor ${existing} is not a directory`,
+            );
+          }
+          break; // deepest existing ancestor found
+        } catch (e) {
+          const err = e as NodeJS.ErrnoException;
+          if (err.code !== "ENOENT") throw e;
+          missingStack.push(existing);
+          const next = path.dirname(existing);
+          if (next === existing) {
+            // Walked off the root without finding ANY existing prefix.
+            throw new ShuttleError(
+              "inject_output_path_unsafe",
+              `Refusing — no existing ancestor for ${outputPath}`,
+            );
+          }
+          existing = next;
+        }
+      }
+      const realExisting = await realpath(existing);
+      const rel = path.relative(realHome, realExisting);
       if (rel.startsWith("..") || path.isAbsolute(rel)) {
         throw new ShuttleError(
           "inject_output_path_unsafe",
-          `Refusing to write outside HOME (parent realpath ${realParent} not inside ${home})`,
+          `Refusing to write outside HOME (ancestor realpath ${realExisting} not inside ${realHome})`,
         );
+      }
+      // Create the missing ancestors shallowest-first, one at a time.
+      while (missingStack.length > 0) {
+        const next = missingStack.pop()!;
+        await mkdir(next, { mode: 0o700 });
       }
 
       // Leaf symlink check: if the target already exists AND is a symlink, refuse.
@@ -2442,8 +2730,10 @@ export function registerInjectRenderRoute(
         // ENOENT — file doesn't exist yet — fine, proceed.
       }
 
-      // Atomic write: temp file with O_EXCL + 0600, then rename.
-      const finalPath = path.join(realParent, path.basename(outputPath));
+      // Atomic write: temp file with O_EXCL + 0600, then rename. We use the
+      // ORIGINAL parentDir (now confirmed safe) so the user-visible final
+      // path matches what they passed.
+      const finalPath = outputPath;
       const tempPath = `${finalPath}.${randomBytes(8).toString("hex")}.tmp`;
       let fh: Awaited<ReturnType<typeof open>> | undefined;
       try {
@@ -2490,7 +2780,7 @@ export function registerInjectRenderRoute(
 
 Same pattern as the other route registrations (regular `addRoute`, not streaming).
 
-- [ ] **Step 8: Route tests pass** (12 tests)
+- [ ] **Step 8: Route tests pass** (13 tests including the symlinked-ancestor regression)
 
 - [ ] **Step 9: Commit**
 
@@ -2693,7 +2983,7 @@ before sending so the daemon's HOME check is meaningful."
 
 ### Task E1: Full suite verification
 
-- [ ] **Step 1:** `npm test` — all pass (expect 605 baseline + ~55-65 new tests across A1, B0-B5, C1, D1-D2 = ~660-670 total).
+- [ ] **Step 1:** `npm test` — all pass (expect ~605 baseline + ~90 new tests across A1 (13), B0 (4), B1 (5), B2 (registry count update), B3 (5), B4 (12), B5 spawner (8), B5 route (16), C1 (3), D1 template (9), D1 route (13), D2 (3) = **~695 total**).
 - [ ] **Step 2:** `npm run typecheck` — pass.
 - [ ] **Step 3:** `npm run check-pack` — pass.
 - [ ] **Step 4: Smoke tests**
@@ -2710,28 +3000,11 @@ node dist/cli/index.js inject --help | tail -20
 node dist/cli/index.js internal --help | grep -E "compare|blind|capture|inject\b"
 ```
 
-- [ ] **Step 5: Masking guarantee smoke test (manual)**
+- [ ] **Step 5: Confirm masking guarantee via the route test (no manual smoke needed)**
 
-If a daemon is running and unlocked:
+The masking-guarantee assertion is automated in [Task B5](#task-b5-daemon-post-v1runresolve-route--spawner)'s route test (`POST /v1/run/resolve: resolved value never appears in the stream (masking guarantee)`). If that test passed in Step 1, masking is verified end-to-end without a separate manual canary.
 
-```bash
-# Seed a fake "secret" you'll watch for in the output.
-node dist/cli/index.js secrets set --source localtest --env dev --name CANARY --value "BLEEDING-CANARY-12345"
-
-# Run a child that prints it. The literal "BLEEDING-CANARY-12345" must NOT appear.
-cat <<EOF > /tmp/canary.env
-CANARY=ss://localtest/dev/CANARY
-EOF
-node dist/cli/index.js run --env-file=/tmp/canary.env -- node -e 'console.log("got=" + process.env.CANARY)'
-# Expected stdout: "got=***"
-# Failing output (regression): "got=BLEEDING-CANARY-12345"
-
-# Cleanup.
-node dist/cli/index.js secrets delete --ref ss://localtest/dev/CANARY
-rm /tmp/canary.env
-```
-
-If the literal value appears, masking is broken. Stop and fix before completing E2.
+The previous draft included a manual `secret-shuttle secrets set --value ...` + `secrets delete --ref ...` shell incantation, but Plan 2's CLI surface does NOT support those flags — `secrets set` is generate-only (random kinds; no `--value`) per [secrets/set.ts](../../../src/cli/commands/secrets/set.ts), and `secrets delete` takes a positional `<ref>` per [secrets/delete.ts](../../../src/cli/commands/secrets/delete.ts). Seeding a known plaintext for a manual canary would require a test-only path. Skip — the route test covers it.
 
 - [ ] **Step 6:** No commit for E1 (verification only).
 
@@ -2825,18 +3098,19 @@ git commit -m "docs(changelog): Plan 3 — run + inject commands + curated help 
 
 **2. Placeholder scan**
 
-No "TBD", "TODO", "implement later", "Similar to Task N", or "add appropriate X". Every code block is complete. Every command shows expected output. Test code snippets are runnable as-is. The earlier "// ... reproduce the bearer check" placeholder is gone — auth is handled by `addRouteStreaming` (Task B0) which the route declares as its registrar type.
+No "TBD", "TODO", "implement later", "Similar to Task N", or "add appropriate X". Every code block is complete. Every command shows expected output. Test code snippets are runnable as-is. The earlier "// ... reproduce the bearer check" placeholder is gone — auth is handled by `addRouteStreaming` (Task B0) which the route declares as its registrar type. The earlier broken manual smoke (`secrets set --value` / `secrets delete --ref` — neither flag exists) is removed in favor of the automated B5 route test `resolved value never appears in the stream (masking guarantee)`.
 
 **3. Type consistency**
 
-- `EnvFileEntry` defined in A1; consumed in C1 and B5. Same shape across.
-- `OutputWriter` defined in B5 (spawner); used in B5 (route) — both writes go through the route's masker-wrapped writer.
-- `Masker` defined in B4; consumed in B5 (route).
+- `EnvFileEntry` defined in A1; consumed in C1 and B5. Same shape across. Note: for `isRef: true` entries, `value` is the CANONICAL ref (via `parseSecretRef`), not the user's raw string.
+- `OutputWriter` defined in B5 (spawner); used in B5 (route) — both writes go through the route's masker-wrapped writer, with SEPARATE per-stream maskers (`stdoutMasker`, `stderrMasker`) so a held-back stdout tail never gets emitted as stderr.
+- `Masker` defined in B4; the route instantiates TWO of them.
 - `StreamLine` union defined in B3; consumed in C1.
 - `ApprovalBinding.action` adds `"run"` and `"inject_render"` in B2; both literals used in B5 and D1.
 - `Vault.resolveRefs` defined in B1; returns `Map<string, SecretRecord>` consistently (not bare `Map<string, string>`) so callers can do policy + markUsed inline.
-- `parseTemplate` defined in D1; returns `{ refs: string[]; render(values: Map<string, string>): string }` consistently used in D1's route.
+- `parseTemplate` defined in D1; returns `{ refs: string[]; render(values: Map<string, string>): string }` consistently used in D1's route. Both the env-file parser (A1) AND the template parser (D1) delegate to `parseSecretRef` from `src/shared/refs.ts` — single source of truth for ref grammar.
 - `SecretAction` is **not extended** — both flows use the existing `"use_as_stdin"` action so existing secrets allow them by default.
+- `streamingDaemonRequest` accepts an optional `{ signal: AbortSignal }` so the CLI can forward SIGINT/SIGTERM into a closed-socket cancel; the daemon's `res.on("close")` SIGTERMs the child in turn.
 
 **4. Scope**
 
