@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import { daemonRequest } from "../../client/daemon-client.js";
 import { getShuttlePaths } from "../../shared/config.js";
 import { ok, outputJson } from "../../shared/result.js";
-import { withPendingDeprecationWarning } from "../../shared/deprecation.js";
+import { consumePendingDeprecationWarning, withPendingDeprecationWarning } from "../../shared/deprecation.js";
 
 export interface DoctorReport {
   daemon_reachable: boolean;
@@ -90,6 +90,12 @@ export function doctorCommand(): Command {
         outputJson(ok(report as unknown as Record<string, unknown>));
         return;
       }
+      // Text-mode branch: outputJson is the normal consume site for the
+      // pending deprecation warning (writes the human line to stderr +
+      // splices into JSON). In text mode we bypass outputJson, so we must
+      // consume + emit the human line ourselves before writing the report.
+      const warning = consumePendingDeprecationWarning();
+      if (warning !== null) process.stderr.write(warning.message + "\n");
       process.stdout.write(formatDoctorText(report));
     });
 }
