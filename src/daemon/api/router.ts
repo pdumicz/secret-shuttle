@@ -16,6 +16,7 @@ import { registerTemplates } from "./routes/templates.js";
 import { registerUnlockSession } from "./routes/unlock-session.js";
 import { registerHealth } from "./routes/health.js";
 import { registerRunResolveRoute } from "./routes/run-resolve.js";
+import { registerInjectRenderRoute } from "./routes/inject-render.js";
 
 export function registerRoutes(
   server: DaemonServer,
@@ -37,4 +38,5 @@ export function registerRoutes(
   registerBrowser(server, services);
   registerTemplates(server, services, daemonPortRef);
   registerRunResolveRoute(server, services, daemonPortRef);
+  registerInjectRenderRoute(server, services, daemonPortRef);
 }
