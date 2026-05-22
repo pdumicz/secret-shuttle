@@ -1,13 +1,9 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { browserCommand } from "./commands/browser.js";
-import { blindCommand } from "./commands/blind.js";
 import { daemonCommand } from "./commands/daemon.js";
-import { captureCommand } from "./commands/capture.js";
-import { compareCommand } from "./commands/compare.js";
 import { generateCommand } from "./commands/generate.js";
 import { initCommand } from "./commands/init.js";
-import { injectCommand } from "./commands/inject.js";
 import { injectSubmitCommand } from "./commands/inject-submit.js";
 import { revealCaptureCommand } from "./commands/reveal-capture.js";
 import { inspectCommand } from "./commands/inspect.js";
@@ -33,13 +29,9 @@ program
 
 program.addCommand(initCommand());
 program.addCommand(browserCommand());
-program.addCommand(blindCommand());
-program.addCommand(captureCommand());
-program.addCommand(injectCommand());
 program.addCommand(injectSubmitCommand());
 program.addCommand(revealCaptureCommand());
 program.addCommand(generateCommand());
-program.addCommand(compareCommand());
 program.addCommand(listCommand());
 program.addCommand(inspectCommand());
 program.addCommand(unlockCommand());
