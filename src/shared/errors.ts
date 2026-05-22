@@ -1,3 +1,5 @@
+import { lookupErrorCode } from "./error-codes.js";
+
 export type ShuttleErrorOpts = {
   exitCode?: number;
   hint?: string | null;
@@ -16,13 +18,18 @@ export class ShuttleError extends Error {
     super(message);
     this.name = "ShuttleError";
     this.code = code;
+
+    const registry = lookupErrorCode(code);
+    const registryExitCode = registry?.exitCode ?? 1;
+    const registryHint = registry?.hint(message) ?? null;
+
     if (typeof optsOrExitCode === "number") {
-      // Backward-compat: callers still using `new ShuttleError(code, message, 2)`.
+      // Backward-compat positional form: explicit exitCode wins; hint from registry.
       this.exitCode = optsOrExitCode;
-      this.hint = null;
+      this.hint = registryHint;
     } else {
-      this.exitCode = optsOrExitCode.exitCode ?? 1;
-      this.hint = optsOrExitCode.hint ?? null;
+      this.exitCode = optsOrExitCode.exitCode ?? registryExitCode;
+      this.hint = optsOrExitCode.hint ?? registryHint;
     }
   }
 }

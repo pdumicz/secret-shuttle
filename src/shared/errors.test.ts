@@ -34,3 +34,23 @@ test("ShuttleError partial opts: explicit exitCode, default hint", () => {
   assert.equal(err.exitCode, 4);
   assert.equal(err.hint, null);
 });
+
+test("ShuttleError defaults exitCode and hint from registry when known code", () => {
+  const err = new ShuttleError("daemon_not_running", "Daemon not running");
+  assert.equal(err.exitCode, 1);
+  assert.equal(err.hint, "Run: secret-shuttle daemon start");
+});
+
+test("ShuttleError uses registry exitCode but explicit hint when both supplied", () => {
+  const err = new ShuttleError("daemon_not_running", "Daemon not running", {
+    hint: "Custom recovery instruction",
+  });
+  assert.equal(err.exitCode, 1);
+  assert.equal(err.hint, "Custom recovery instruction");
+});
+
+test("ShuttleError unknown code falls back to exitCode 1 / null hint", () => {
+  const err = new ShuttleError("totally_unknown", "huh");
+  assert.equal(err.exitCode, 1);
+  assert.equal(err.hint, null);
+});
