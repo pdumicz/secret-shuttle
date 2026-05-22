@@ -4,6 +4,7 @@ import { ShuttleError, errorToJson } from "../shared/errors.js";
 
 type RouteHandler = (req: IncomingMessage, body: unknown) => Promise<unknown> | unknown;
 type RawHandler = (req: IncomingMessage, body: unknown, res: ServerResponse) => Promise<void> | void;
+// Like RawHandler but auth-gated (Host + bearer checked before invocation).
 type StreamingHandler = (
   req: IncomingMessage,
   body: unknown,
@@ -128,7 +129,19 @@ export class DaemonServer {
     const streamingHandler = this.streamingRoutes.get(streamingKey);
     if (streamingHandler !== undefined) {
       const body = req.method === "GET" ? null : await readJsonBody(req);
-      await streamingHandler(req, body, res);
+      try {
+        await streamingHandler(req, body, res);
+      } catch (e) {
+        if (res.headersSent) {
+          // Headers already flushed (the streaming handler began writing then
+          // threw). We cannot safely write a JSON error envelope. Destroy the
+          // socket to signal an incomplete response to the client.
+          res.destroy(e instanceof Error ? e : new Error(String(e)));
+        } else {
+          // Streaming handler threw before flushing — safe to send a JSON error.
+          this.writeError(res, e);
+        }
+      }
       return;
     }
 

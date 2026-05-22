@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
 import test from "node:test";
 import { DaemonServer } from "./server.js";
@@ -58,6 +59,18 @@ async function httpJson(url: string, init: RequestInit = {}): Promise<{ status: 
   const res = await fetch(url, init);
   const body = res.status === 204 ? null : await res.json();
   return { status: res.status, body };
+}
+
+async function setUpServer(): Promise<{ server: DaemonServer; url: string; token: string; stop: () => Promise<void> }> {
+  const token = "test-token-1234";
+  const server = new DaemonServer({ token });
+  const { port } = await server.listen(0);
+  return {
+    server,
+    url: `http://127.0.0.1:${port}`,
+    token,
+    stop: () => server.close(),
+  };
 }
 
 test("server requires bearer token", async () => {
@@ -289,18 +302,6 @@ test("unknown route → 404 with full §5.6 error contract", async () => {
 
 // ─── addRouteStreaming ────────────────────────────────────────────────────────
 
-async function setUpServer(): Promise<{ server: DaemonServer; url: string; token: string; stop: () => Promise<void> }> {
-  const token = "test-token-1234";
-  const server = new DaemonServer({ token });
-  const { port } = await server.listen(0);
-  return {
-    server,
-    url: `http://127.0.0.1:${port}`,
-    token,
-    stop: () => server.close(),
-  };
-}
-
 test("addRouteStreaming: 200 with chunked body when auth + Host valid", async () => {
   const { server, url, token, stop } = await setUpServer();
   server.addRouteStreaming("POST", "/v1/test", async (_req, body, res) => {
@@ -362,11 +363,10 @@ test("addRouteStreaming: bad Host header → 400 with structured error", async (
   });
   try {
     // The fetch API doesn't easily let us spoof Host, so test by hand-crafting a
-    // request via net.connect — or use a node:http client and override headers.
-    const { request } = await import("node:http");
+    // request via node:http with an overridden Host header.
     const port = Number(new URL(url).port);
-    const responseBody: string = await new Promise((resolve, reject) => {
-      const req = request({
+    const { statusCode, body: responseBody } = await new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
+      const req = httpRequest({
         host: "127.0.0.1",
         port,
         method: "POST",
@@ -379,12 +379,13 @@ test("addRouteStreaming: bad Host header → 400 with structured error", async (
       }, (res) => {
         const chunks: Buffer[] = [];
         res.on("data", (c: Buffer) => chunks.push(c));
-        res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        res.on("end", () => resolve({ statusCode: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }));
       });
       req.on("error", reject);
       req.write(JSON.stringify({}));
       req.end();
     });
+    assert.equal(statusCode, 400);
     const json = JSON.parse(responseBody) as Record<string, unknown>;
     assert.equal((json.error as { code: string }).code, "bad_host");
     assert.equal(json.error_code, "bad_host");
@@ -409,10 +410,51 @@ test("addRouteStreaming: oversize body → request_too_large (handler NOT invoke
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ blob: huge }),
     });
+    assert.equal(r.status, 400);
     const json = await r.json() as Record<string, unknown>;
     assert.equal((json.error as { code: string }).code, "request_too_large");
     assert.equal(handlerCalls, 0, "handler MUST NOT be invoked when body oversize");
   } finally {
+    await stop();
+  }
+});
+
+test("addRouteStreaming: handler that throws after partial write destroys the response without unhandled rejection", async () => {
+  const { server, url, token, stop } = await setUpServer();
+  // Install an uncaughtException listener for the duration so we'd see
+  // a regression as a test failure instead of a process crash.
+  const uncaught: Error[] = [];
+  const onUncaught = (e: Error): void => { uncaught.push(e); };
+  process.on("uncaughtException", onUncaught);
+  server.addRouteStreaming("POST", "/v1/test", async (_req, _body, res) => {
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/x-ndjson");
+    res.flushHeaders();
+    res.write(JSON.stringify({ partial: 1 }) + "\n");
+    throw new Error("simulated mid-stream failure");
+  });
+  try {
+    // The fetch will either receive the partial body and then a socket
+    // termination, or just an error. Both are acceptable — the regression
+    // we're guarding against is the daemon crashing.
+    try {
+      const r = await fetch(`${url}/v1/test`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      // Drain the body so the socket close is observed.
+      try { await r.text(); } catch { /* socket reset is fine */ }
+    } catch { /* network-level error after partial body is fine */ }
+    // Give Node a microtask tick to surface deferred unhandled rejections.
+    await new Promise((r) => setImmediate(r));
+    assert.equal(
+      uncaught.length,
+      0,
+      `streaming handler throw caused unhandled exception(s): ${uncaught.map((e) => e.message).join("; ")}`,
+    );
+  } finally {
+    process.removeListener("uncaughtException", onUncaught);
     await stop();
   }
 });
