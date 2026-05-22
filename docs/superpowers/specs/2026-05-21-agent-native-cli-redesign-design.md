@@ -18,7 +18,7 @@ After this work:
 
 1. An AI agent that has never seen Secret Shuttle can install it (`npx secret-shuttle`), run `secret-shuttle help`, and from the one-line subcommand list alone derive a correct mental model of `secrets`/`run`/`inject` — because those verbs match what it learned from `op`/`doppler`/`infisical`.
 2. The agent reads a ~40-line `SKILL.md` (down from 139) and has copy-pasteable worked examples for both the universal flow (`secrets set`, `template run`) and the differentiated flow (`reveal-capture`, `inject-submit`).
-3. Every error returned by the CLI carries `{ error, message, hint, code }` where `hint` is the literal next command the agent should run.
+3. Every error returned by the CLI carries the §5.6 contract — legacy nested `error: { code, message }` block plus flat `error_code` / `message` / `hint` / `exit_code` fields — where `hint` is the literal next command the agent should run.
 4. The "set up Stripe + Vercel + GitHub Actions" composite flow that today requires 8 separate human approval clicks requires **one** human approval (pre-approved session) after this work.
 5. Distribution is `npx secret-shuttle init` from a cold start — no `npm link`, no source build.
 
@@ -99,7 +99,7 @@ Plus net-new daemon work:
 ### 3.4 Cross-cutting changes
 
 - All commands gain a `--json` flag (default-on when `!process.stdout.isTTY` or env `SECRET_SHUTTLE_JSON=1`; human-readable when interactive TTY). Aligns with `gh` and Sol.
-- `errorToJson` ([src/shared/errors.ts](../../src/shared/errors.ts)) extended to emit `{ error, message, hint, code }` shape. Backward-compatible: old consumers of `{ ok: false, error: { code, message } }` get the same fields plus the new `hint` and a top-level `code` mirror.
+- `errorToJson` ([src/shared/errors.ts](../../src/shared/errors.ts)) extended to emit the §5.6 final contract: legacy nested `error: { code, message }` block PLUS flat agent-friendly fields (`error_code`, `message`, `hint`, `exit_code`). Backward-compatible: existing readers of `result.error.code` continue to work; new agent code reads the flat top-level fields.
 - Exit code policy formalized: `0`/`1`/`2`/`3`/`4`/`5` per Sol. Today there's only `1` and exit-code-from-`ShuttleError` ([src/cli/index.ts:57](../../src/cli/index.ts)); existing error codes get mapped to the new exit code policy.
 - `--help` for every command rewritten with copy-pasteable examples in epilog (commander's `addHelpText('after', ...)`).
 - `SKILL.md` rewritten as narrative + worked examples (~40 lines target, down from 139).

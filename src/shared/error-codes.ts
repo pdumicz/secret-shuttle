@@ -41,6 +41,18 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     exitCode: EXIT_CODE_TRANSIENT,
     hint: () => "Run: secret-shuttle browser start",
   },
+  auto_resume_precondition: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  blank_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  chrome_startup_timeout: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  click_hit_test_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  click_no_box: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  click_occluded: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  click_offscreen: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  inject_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  inject_focus_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  reveal_baseline_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  reveal_no_transition: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  reveal_resolve_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
 
   // ── Usage (fix argv; don't retry) ──────────────────────────────────────────
   invalid_ref: { exitCode: EXIT_CODE_USAGE, hint: () => null },
@@ -63,6 +75,15 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   mark_kind_unsupported: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   handle_invalid: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   handle_kind_mismatch: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  invalid_env_var_name: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  invalid_environment: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  invalid_name: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  invalid_source: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  invalid_vault: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  removed_in_secure_mode: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  template_definition_invalid: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  unsupported_repository_host: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  unsupported_secret_kind: { exitCode: EXIT_CODE_USAGE, hint: () => null },
 
   // ── Not found ──────────────────────────────────────────────────────────────
   secret_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -82,6 +103,15 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   mark_focused_unavailable: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   mark_pick_no_actionable: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   unknown_browser_domain: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
+  chrome_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
+  legacy_key_present: {
+    exitCode: EXIT_CODE_NOT_FOUND,
+    hint: () => "Run: secret-shuttle internal migrate",
+  },
+  package_json_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
+  repository_field_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
+  skill_bundled_file_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
+  template_tmpdir_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
 
   // ── Permission ─────────────────────────────────────────────────────────────
   vault_unlock_failed: {
@@ -104,11 +134,36 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   inject_focus_mismatch: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   field_changed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   reveal_read_failed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  action_not_allowed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  approval_required: {
+    exitCode: EXIT_CODE_PERMISSION,
+    // The thrown message is JSON: {approval_id, expires_at}. The hint
+    // tells the agent how to recover.
+    hint: () => "Approve in the daemon UI, then re-run with --approval-id <id> (id is in the message JSON).",
+  },
+  blind_mode_domain_mismatch: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  blind_mode_required: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  domain_not_allowed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  handle_target_mismatch: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  reveal_not_contained: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  vault_decryption_failed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  vault_locked: {
+    exitCode: EXIT_CODE_PERMISSION,
+    hint: () => "Run: secret-shuttle internal unlock",
+  },
 
   // ── Conflict ───────────────────────────────────────────────────────────────
   already_migrated: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   browser_already_started: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   blind_mode_active: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
+  blind_mode_already_active: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
+  secret_exists: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "Pick a different name, or use rotate (Plan 2) to replace.",
+  },
+  snippet_ambiguous: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
+  template_env_file_collision: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
+  template_env_file_write_failed: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
 
   // ── Keychain (Part B; full implementations come in Plan 5a) ────────────────
   keychain_not_implemented: {

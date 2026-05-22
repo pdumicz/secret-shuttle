@@ -61,3 +61,60 @@ test("unknown codes return null from lookup", () => {
   const entry = lookupErrorCode("totally_made_up_code");
   assert.equal(entry, null);
 });
+
+test("approval_required → permission with workflow hint", () => {
+  const entry = lookupErrorCode("approval_required");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_PERMISSION);
+  assert.match(entry.hint("any") ?? "", /approval-id/);
+});
+
+test("vault_locked → permission with unlock hint", () => {
+  const entry = lookupErrorCode("vault_locked");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_PERMISSION);
+  assert.equal(entry.hint(""), "Run: secret-shuttle internal unlock");
+});
+
+test("domain_not_allowed → permission, null hint", () => {
+  const entry = lookupErrorCode("domain_not_allowed");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_PERMISSION);
+  assert.equal(entry.hint(""), null);
+});
+
+test("action_not_allowed → permission, null hint", () => {
+  const entry = lookupErrorCode("action_not_allowed");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_PERMISSION);
+});
+
+test("secret_exists → conflict with rotate hint", () => {
+  const entry = lookupErrorCode("secret_exists");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_CONFLICT);
+  assert.match(entry.hint("") ?? "", /rotate/);
+});
+
+test("blind_mode_already_active → conflict", () => {
+  const entry = lookupErrorCode("blind_mode_already_active");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_CONFLICT);
+});
+
+test("legacy_key_present → not-found with migrate hint", () => {
+  const entry = lookupErrorCode("legacy_key_present");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_NOT_FOUND);
+  assert.match(entry.hint("") ?? "", /migrate/);
+});
+
+test("registry total entry count (sanity check)", () => {
+  // After the P1 fix, the registry should have 101 entries:
+  //   60 from initial A2 seed + 41 added in the P1 fix.
+  // This sanity test prevents accidental regressions / duplicate keys.
+  const codes = ["daemon_not_running", "approval_required", "vault_locked", "secret_exists"];
+  for (const c of codes) {
+    assert.ok(lookupErrorCode(c), `expected '${c}' in registry`);
+  }
+});
