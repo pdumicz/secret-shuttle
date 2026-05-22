@@ -17,6 +17,7 @@ import { unlockCommand } from "./commands/unlock.js";
 import { templateCommand } from "./commands/template.js";
 import { migrateCommand } from "./commands/migrate.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { statusCommand } from "./commands/status.js";
 import { agentCommand } from "./commands/agent.js";
 import { secretsCommand } from "./commands/secrets/index.js";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
@@ -45,6 +46,7 @@ program.addCommand(templateCommand());
 program.addCommand(daemonCommand());
 program.addCommand(migrateCommand());
 program.addCommand(doctorCommand());
+program.addCommand(statusCommand());
 program.addCommand(agentCommand());
 program.addCommand(secretsCommand());
 
