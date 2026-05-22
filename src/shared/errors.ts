@@ -28,8 +28,14 @@ export class ShuttleError extends Error {
       this.exitCode = optsOrExitCode;
       this.hint = registryHint;
     } else {
-      this.exitCode = optsOrExitCode.exitCode ?? registryExitCode;
-      this.hint = optsOrExitCode.hint ?? registryHint;
+      // If the caller explicitly supplied `hint` (including null), respect it.
+      // If they didn't supply the key at all, fall through to the registry default.
+      this.exitCode = "exitCode" in optsOrExitCode && optsOrExitCode.exitCode !== undefined
+        ? optsOrExitCode.exitCode
+        : registryExitCode;
+      this.hint = "hint" in optsOrExitCode
+        ? (optsOrExitCode.hint ?? null)
+        : registryHint;
     }
   }
 }

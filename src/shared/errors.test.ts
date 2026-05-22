@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ShuttleError } from "./errors.js";
+import { errorToJson, ShuttleError } from "./errors.js";
 
 test("ShuttleError exposes code, exitCode, and hint", () => {
   const err = new ShuttleError("some_code", "Some message", { exitCode: 3, hint: "Run: foo" });
@@ -55,8 +55,6 @@ test("ShuttleError unknown code falls back to exitCode 1 / null hint", () => {
   assert.equal(err.hint, null);
 });
 
-import { errorToJson } from "./errors.js";
-
 test("errorToJson on ShuttleError emits BOTH legacy nested block AND flat fields", () => {
   const err = new ShuttleError("daemon_not_running", "Daemon not running");
   const j = errorToJson(err) as Record<string, unknown>;
@@ -97,4 +95,9 @@ test("errorToJson on non-Error emits unexpected_error with default message", () 
   assert.equal(j.message, "Unknown error");
   assert.equal(j.hint, null);
   assert.equal(j.exit_code, 1);
+});
+
+test("ShuttleError: explicit null hint suppresses registry default", () => {
+  const err = new ShuttleError("daemon_not_running", "Down", { hint: null });
+  assert.equal(err.hint, null);
 });
