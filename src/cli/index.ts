@@ -15,6 +15,7 @@ import { doctorCommand } from "./commands/doctor.js";
 import { statusCommand } from "./commands/status.js";
 import { agentCommand } from "./commands/agent.js";
 import { secretsCommand } from "./commands/secrets/index.js";
+import { runCommand } from "./commands/run.js";
 import { internalCommand } from "./commands/internal.js";
 import { helpCommand } from "./commands/help.js";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
@@ -42,6 +43,7 @@ program.addCommand(doctorCommand());
 program.addCommand(statusCommand());
 program.addCommand(agentCommand());
 program.addCommand(secretsCommand());
+program.addCommand(runCommand());
 program.addCommand(internalCommand(), { hidden: true });
 program.addCommand(helpCommand());
 
