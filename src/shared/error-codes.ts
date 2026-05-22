@@ -106,7 +106,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   chrome_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   legacy_key_present: {
     exitCode: EXIT_CODE_NOT_FOUND,
-    hint: () => "Run: secret-shuttle internal migrate",
+    hint: () => "Run: secret-shuttle migrate secure-vault",
   },
   package_json_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   repository_field_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -149,7 +149,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   vault_decryption_failed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   vault_locked: {
     exitCode: EXIT_CODE_PERMISSION,
-    hint: () => "Run: secret-shuttle internal unlock",
+    hint: () => "Run: secret-shuttle unlock",
   },
 
   // ── Conflict ───────────────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   blind_mode_already_active: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   secret_exists: {
     exitCode: EXIT_CODE_CONFLICT,
-    hint: () => "Pick a different name, or use rotate (Plan 2) to replace.",
+    hint: () => "Re-run with --force to overwrite.",
   },
   snippet_ambiguous: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   template_env_file_collision: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },

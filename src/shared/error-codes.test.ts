@@ -66,14 +66,17 @@ test("approval_required → permission with workflow hint", () => {
   const entry = lookupErrorCode("approval_required");
   assert.ok(entry);
   assert.equal(entry.exitCode, EXIT_CODE_PERMISSION);
-  assert.match(entry.hint("any") ?? "", /approval-id/);
+  assert.equal(
+    entry.hint("any"),
+    "Approve in the daemon UI, then re-run with --approval-id <id> (id is in the message JSON).",
+  );
 });
 
 test("vault_locked → permission with unlock hint", () => {
   const entry = lookupErrorCode("vault_locked");
   assert.ok(entry);
   assert.equal(entry.exitCode, EXIT_CODE_PERMISSION);
-  assert.equal(entry.hint(""), "Run: secret-shuttle internal unlock");
+  assert.equal(entry.hint(""), "Run: secret-shuttle unlock");
 });
 
 test("domain_not_allowed → permission, null hint", () => {
@@ -89,11 +92,11 @@ test("action_not_allowed → permission, null hint", () => {
   assert.equal(entry.exitCode, EXIT_CODE_PERMISSION);
 });
 
-test("secret_exists → conflict with rotate hint", () => {
+test("secret_exists → conflict with --force hint", () => {
   const entry = lookupErrorCode("secret_exists");
   assert.ok(entry);
   assert.equal(entry.exitCode, EXIT_CODE_CONFLICT);
-  assert.match(entry.hint("") ?? "", /rotate/);
+  assert.equal(entry.hint(""), "Re-run with --force to overwrite.");
 });
 
 test("blind_mode_already_active → conflict", () => {
@@ -106,7 +109,7 @@ test("legacy_key_present → not-found with migrate hint", () => {
   const entry = lookupErrorCode("legacy_key_present");
   assert.ok(entry);
   assert.equal(entry.exitCode, EXIT_CODE_NOT_FOUND);
-  assert.match(entry.hint("") ?? "", /migrate/);
+  assert.equal(entry.hint(""), "Run: secret-shuttle migrate secure-vault");
 });
 
 test("registry total entry count (sanity check)", () => {
