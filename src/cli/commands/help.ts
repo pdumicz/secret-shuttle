@@ -26,6 +26,8 @@ export function renderTopLevelHelp(): string {
     "  secrets rotate <ref>        Rotate a secret",
     "",
     "Provider integration:",
+    "  run --env-file=<f> -- <cmd>                  Run a command with secrets injected as env vars",
+    "  inject -i <tpl> -o <out>                     Render a template with ss:// refs into a file",
     "  template list / template run <id>            Vetted CLI integrations",
     "  browser mark / reveal-capture / inject-submit   Browser-mediated flows",
     "",

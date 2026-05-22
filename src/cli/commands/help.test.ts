@@ -16,6 +16,9 @@ test("renderTopLevelHelp output groups commands and stays under 30 lines", () =>
   assert.match(output, /\binit\b/);
   assert.match(output, /\bstatus\b/);
   assert.match(output, /\bsecrets list\b/);
+  // Plan 3 commands must appear under Provider integration:
+  assert.match(output, /\brun\b/);
+  assert.match(output, /\binject\b/);
   // Public recovery commands MUST appear — registry hints + status.next_action
   // emit these as bare top-level commands, so the curated help has to surface
   // them too, or agents reading help will look for the wrong place.
