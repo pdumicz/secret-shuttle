@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { compareCommand } from "./compare.js";
 import { blindCommand } from "./blind.js";
 import { captureCommand } from "./capture.js";
-import { injectCommand } from "./inject.js";
+import { injectCommand } from "./inject-internal.js";
 
 /**
  * The `internal` namespace holds power-user and V0/legacy commands that
