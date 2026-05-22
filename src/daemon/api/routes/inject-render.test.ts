@@ -375,6 +375,33 @@ test("POST /v1/inject/render: audit log gains a per-ref entry per render", async
     const refsAudited = new Set(renderEntries.map((e) => e.ref));
     assert.ok(refsAudited.has(refA));
     assert.ok(refsAudited.has(refB));
-    for (const e of renderEntries) assert.equal(e.ok, true);
+    for (const e of renderEntries) {
+      assert.equal(e.ok, true);
+      assert.equal(e.value_visible_to_agent, false, "file-mode must not mark value_visible_to_agent true");
+    }
+  });
+});
+
+test("POST /v1/inject/render with output_path='-' marks the audit entry value_visible_to_agent: true", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "development", name: "VIS", value: "visible",
+    });
+    const r = await call(ctx, "POST", "/v1/inject/render", {
+      template: `val: ${ref}`,
+      output_path: "-",
+    });
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { content: string }).content, "val: visible");
+    const auditPath = path.join(ctx.home, "audit.jsonl");
+    const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
+    const renderEntries = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.action === "inject_render");
+    assert.ok(renderEntries.length >= 1, "expected at least one inject_render audit entry");
+    for (const e of renderEntries) {
+      assert.equal(e.value_visible_to_agent, true, "stdout passthrough must mark value_visible_to_agent true");
+    }
   });
 });

@@ -28,11 +28,26 @@ export interface DaemonAuditEvent {
   absence_proof?: string;
   blind_mode?: boolean;
   op?: string;
+  /**
+   * Whether the plaintext secret value was surfaced to the agent in this
+   * operation.  Defaults to false for every route.  The only current caller
+   * that sets this to true is `inject_render` when `output_path === "-"`
+   * (stdout-passthrough mode), because in that case the rendered plaintext is
+   * returned in the HTTP response body where the agent can read it.
+   */
+  value_visible_to_agent?: boolean;
 }
 
 export async function writeDaemonAudit(event: DaemonAuditEvent): Promise<void> {
   const paths = getShuttlePaths();
   await ensureShuttleHome(paths);
-  const line = JSON.stringify({ ts: new Date().toISOString(), ...event, value_visible_to_agent: false });
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    ...event,
+    // Default to false; only emit true when the caller explicitly opted into
+    // documenting that this operation surfaced plaintext to the agent
+    // (currently: inject_render in stdout-passthrough mode).
+    value_visible_to_agent: event.value_visible_to_agent === true,
+  });
   await appendFile(paths.auditLogPath, `${line}\n`, { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
 }

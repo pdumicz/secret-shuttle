@@ -28,6 +28,10 @@ export function registerInjectRenderRoute(
 
     const parsed = parseTemplate(template);
 
+    // Compute once — stdout-passthrough mode surfaces plaintext in the response
+    // body, so the agent (and anything that sees the HTTP response) can read it.
+    const valueVisibleToAgent = outputPath === "-";
+
     // Per-ref audit at the END must always fire — declare these outside the try
     // so the finally block sees them. `resolved` may still be undefined if the
     // resolveRefs() throw fires (deleted ref → secret_not_found); the finally
@@ -248,6 +252,7 @@ export function registerInjectRenderRoute(
           action: "inject_render",
           ok: auditOk,
           ref,
+          value_visible_to_agent: valueVisibleToAgent,
           ...(record !== undefined ? { environment: record.environment } : {}),
           ...(auditErrorCode !== undefined ? { error_code: auditErrorCode } : {}),
         });
