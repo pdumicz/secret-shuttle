@@ -1,12 +1,29 @@
+export type ShuttleErrorOpts = {
+  exitCode?: number;
+  hint?: string | null;
+};
+
 export class ShuttleError extends Error {
   readonly code: string;
   readonly exitCode: number;
+  readonly hint: string | null;
 
-  constructor(code: string, message: string, exitCode = 1) {
+  constructor(
+    code: string,
+    message: string,
+    optsOrExitCode: ShuttleErrorOpts | number = {},
+  ) {
     super(message);
     this.name = "ShuttleError";
     this.code = code;
-    this.exitCode = exitCode;
+    if (typeof optsOrExitCode === "number") {
+      // Backward-compat: callers still using `new ShuttleError(code, message, 2)`.
+      this.exitCode = optsOrExitCode;
+      this.hint = null;
+    } else {
+      this.exitCode = optsOrExitCode.exitCode ?? 1;
+      this.hint = optsOrExitCode.hint ?? null;
+    }
   }
 }
 
