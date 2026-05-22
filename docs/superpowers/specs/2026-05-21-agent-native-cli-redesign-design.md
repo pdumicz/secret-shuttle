@@ -479,6 +479,29 @@ Structure:
 
 [examples/stripe-to-vercel/walkthrough.md](../../examples/stripe-to-vercel/walkthrough.md) gets rewritten to match: uses `reveal-capture` + `template run` (new API), uses pre-approved session, ends with verification via non-secret signals.
 
+### 5.10 Approval UI tab reuse (bugfix)
+
+**Problem.** Today [src/daemon/approvals/open-url.ts:10](../../src/daemon/approvals/open-url.ts) spawns a fresh `open <URL>` (macOS) / `xdg-open` (Linux) / `start ""` (Windows) **for every approval, every unlock, every paste UI**, with a unique per-request URL (`/internal/approvals/<id>/ui?token=...`). Nothing closes the resulting tabs — they accumulate over the daemon's lifetime. Two real callers drive this: `unlock-session.ts:24` (every unlock) and `require-approval.ts:32` (every production-gated action). The pre-approved session work in §5.7 makes this worse, not better — a bootstrap that mints 8 underlying approvals would spawn 8 tabs unless we fix it.
+
+This bug exists in 0.1.1 and contradicts the "feels like magic" goal. It also bleeds into agent UX: an LLM-driven session that hits 6 approvals leaves the human with 6 tabs to close.
+
+**Fix: single-window tab reuse.** The daemon serves a stable URL (e.g. `http://127.0.0.1:<port>/ui/`) bound by the daemon-startup bearer token. The window is opened **once** (in `init`, or on first approval if init didn't open it), then polls / holds an SSE stream / WebSocket to the daemon. When a new approval is pending the window updates in place — same tab, same browser process. When no approval is pending it shows a quiet "Connected. No pending approvals." state. The legacy `/internal/approvals/<id>/ui` URLs continue to work as deep-links but the default flow uses the stable URL.
+
+**Behavior contract:**
+- One tab per daemon lifetime, period.
+- If the human closes the tab, the next approval-or-unlock op re-opens it (idempotent), but only once until closed again.
+- Across daemon restarts: the URL changes (new port + new token) so a stale pinned tab disconnects with a clear "daemon restarted — close this tab" message.
+- Approval responses still POST to the existing `/internal/approvals/<id>/respond` endpoint; the only UI change is HOW the human reaches it, not WHAT the daemon validates.
+
+**Implementation surface (Plan 4, alongside sessions):**
+- New daemon route: `GET /ui/` — serves the stable shell HTML.
+- New daemon route: `GET /ui/events` — SSE stream of `{ pending_approval_id, kind, summary, expires_at }` events, plus heartbeats. Single-subscriber (the open tab).
+- `open-url.ts` gains a `singleWindowMode: bool` flag (default true in 0.2.0) that opens the stable URL the first time and is a no-op thereafter (tracked by a daemon-side `uiTabOpenedAt` timestamp + a window-side ack via SSE).
+- `unlock-session.ts:24` and `require-approval.ts:32` call the new `surfaceApproval(id)` which posts an SSE event instead of spawning a new tab.
+- Existing `/internal/approvals/<id>/ui` URL stays valid as a deep-link (e.g., for the legacy per-action URL or pasted into a remote-pair session).
+
+**Why Plan 4, not Plan 1.** This is foundational UX but its natural home is alongside the pre-approved sessions work (Plan 4) because (a) both touch the approval UI HTML, (b) the SSE stream's event payload should already include `session_id` if any, (c) Plan 1 must not block on UI work.
+
 ## 6. Data flow walkthroughs
 
 ### 6.1 The "set up Stripe in Vercel prod + GitHub Actions" flow
@@ -641,8 +664,9 @@ This is the contract for the implementation plan.
 - [ ] `POST /v1/secrets/rotate` (Plan 2)
 
 **Approval UI:**
-- [ ] Session pattern approval view
-- [ ] Per-op approval view shows "approve this + similar for 15 min" checkbox (mints session)
+- [ ] Session pattern approval view (Plan 4)
+- [ ] Per-op approval view shows "approve this + similar for 15 min" checkbox (mints session) (Plan 4)
+- [ ] Single-window tab reuse — stable `GET /ui/` + SSE `GET /ui/events`; replaces per-request `open <URL>` spawning (Plan 4; see §5.10)
 
 **Cross-cutting:**
 - [ ] `ShuttleError` extended with `hint` + `exitCode` (Plan 1)
@@ -683,7 +707,7 @@ This is the contract for the implementation plan.
 - **Plan 1:** Foundation — structured errors (incl. daemon-client preservation) + KeychainAdapter interface + platform stubs.
 - **Plan 2:** CLI surface — `secrets` group + `status` + `internal` namespace + per-command help text.
 - **Plan 3:** `run` + `inject` commands + daemon spawner.
-- **Plan 4:** Pre-approved sessions + approval-UI checkbox.
+- **Plan 4:** Pre-approved sessions + approval-UI checkbox + **single-window tab reuse** (§5.10).
 - **Plan 5a:** `init` rewrite + native-module-backed keychain adapters (macOS / Linux / Windows).
 - **Plan 5b:** Docs (SKILL.md, walkthrough, README, cli-reference) + npm publish 0.2.0.
 
