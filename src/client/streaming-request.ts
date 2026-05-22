@@ -2,12 +2,11 @@ import { readSocketFile } from "../daemon/socket-file.js";
 import { ShuttleError } from "../shared/errors.js";
 import { daemonErrorFromPayload } from "./daemon-client.js";
 
-export type StreamLine = (
+export type StreamLine =
   | { stream: "stdout"; data: string } // base64
   | { stream: "stderr"; data: string } // base64
   | { exit: number }
-  | { error: { code: string; message: string; hint?: string | null; exit_code?: number } }
-) & Record<string, unknown>;
+  | { error: { code: string; message: string; hint?: string | null; exit_code?: number } };
 
 /**
  * Read a ReadableStream<Uint8Array> as a sequence of newline-terminated JSON

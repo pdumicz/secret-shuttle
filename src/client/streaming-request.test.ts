@@ -39,7 +39,9 @@ test("streamLineDelimitedJson: handles lines split across chunk boundaries", asy
   const lines: StreamLine[] = [];
   await streamLineDelimitedJson(stream, (l) => { lines.push(l); });
   assert.equal(lines.length, 2);
-  assert.equal(lines[0]!.data, "aGVsbG8=");
+  const first = lines[0]!;
+  assert.ok("stream" in first, "expected the first line to be a stream chunk");
+  assert.equal(first.data, "aGVsbG8=");
 });
 
 test("streamLineDelimitedJson: skips empty lines (between messages)", async () => {
