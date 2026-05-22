@@ -67,7 +67,7 @@ These are spec items the plan deliberately defers, with rationale:
 | `src/daemon/server.ts` | Fix three pre-handler error paths (lines 88-92, 100-103, 109-112) to route through `errorToJson` so they emit the §5.6 contract. |
 | `src/daemon/api/router.ts` *(or wherever routes are registered)* | Register `/v1/secrets/delete` and `/v1/secrets/rotate`. |
 | `src/vault/vault.ts` | Add `softDelete(ref)` method + `markRotating(ref)` method. (Soft delete = vault record gets `deleted_at: ISO`; subsequent reads filter unless `--include-deleted`.) |
-| `src/vault/types.ts` | Add `deleted_at?: string` and `rotating?: boolean` to `SecretRecord`. |
+| `src/vault/types.ts` | Add `deleted_at?: string` to BOTH `SecretRecord` and `AgentSecretMetadata`. Add `rotating?: boolean` to `SecretRecord` (operational state only; not surfaced via the agent-facing metadata shape). |
 | `CHANGELOG.md` | Append Plan 2 entries. |
 
 **Files to delete:**
@@ -75,6 +75,45 @@ These are spec items the plan deliberately defers, with rationale:
 | Path | Reason |
 |---|---|
 | `src/cli/commands/use-as-stdin.ts` | Removed per README; replaced by `template run`. Plan 2 finalizes the deletion. |
+
+---
+
+## Pre-execution checklist — RUN BEFORE TASK A1
+
+**This is a hard gate.** Do not proceed to Task A1 if any of these conditions fail. Plan 2's commit lineage must contain only files in this plan's declared scope — anything else is unrelated work that needs to be isolated FIRST.
+
+- [ ] **Step 1: Working tree must be clean.**
+
+```bash
+git status --short
+```
+
+Expected output: empty (or only files this plan declares it will modify, but on a fresh execution the tree should be fully clean).
+
+If anything appears:
+- Files **inside this plan's scope** (e.g. `src/cli/commands/secrets/*`): unexpected — investigate; you might be re-running a partial execution.
+- Files **outside this plan's scope** (e.g. `.claude/launch.json`, `demo/index.html`, etc.): commit them on a separate branch, stash them, or revert them. **Do not start Task A1 with unrelated dirty state.** Mixing scopes makes per-task reviews unreliable.
+
+If you genuinely don't know whether a dirty file belongs to Plan 2 or to other work, STOP and escalate to the human.
+
+- [ ] **Step 2: Confirm the head commit is one of Plan 2's plan-commits, not an unrelated commit interleaved in.**
+
+```bash
+git log --oneline -5
+```
+
+If recent commits include work unrelated to Plan 1's foundation or Plan 2's planning (e.g. demo / docs / unrelated fixes), that's fine for HISTORY but flag it in your execution report so the reviewer can untangle the diff when reviewing each Plan 2 commit. Don't reset/rebase those out — just note them.
+
+- [ ] **Step 3: Confirm the build is green before any changes.**
+
+```bash
+npm run typecheck
+npm test
+```
+
+Both must pass on the current HEAD. If they don't, the failure isn't caused by Plan 2 — fix or escalate before starting.
+
+Once all three checks pass, proceed to Task A1.
 
 ---
 
@@ -447,7 +486,7 @@ git commit -m "feat(cli): secrets set — rename of generate; paste mode rejecte
 - Modify: `src/cli/commands/secrets/secrets.test.ts`
 - Modify: `src/vault/vault.ts` — add `softDelete(ref)`, extend existing `list({ environment, source, includeDeleted })` and `inspect(ref)` to filter deleted, update `getSecret(ref)` to throw `secret_not_found` for deleted refs
 - Modify: `src/vault/vault.test.ts` (or wherever existing Vault tests live) — add tests for the invariant (incl. proof that `list({ includeDeleted: true })` returns `AgentSecretMetadata[]` with no `value` field)
-- Modify: `src/vault/types.ts` — add `deleted_at?: string` to `SecretRecord`
+- Modify: `src/vault/types.ts` — add `deleted_at?: string` to BOTH `SecretRecord` AND `AgentSecretMetadata` (so soft-deleted entries are distinguishable from active ones when surfaced via `--include-deleted`)
 - Modify: `src/daemon/api/routes/secrets.ts` — `/v1/secrets/list` accepts `include_deleted: boolean` and threads it to `vault.list({...filters, includeDeleted})`; `/v1/secrets/inspect` returns `secret_not_found` for deleted refs (Vault.inspect change propagates automatically)
 - Modify: `src/daemon/api/routes/secrets.test.ts` — add a test asserting `/v1/secrets/list { include_deleted: true }` never serializes a `value` field
 - Modify: `src/cli/commands/secrets/list.ts` — add `--include-deleted` flag (CLI body sets `include_deleted: true`)
@@ -2472,13 +2511,7 @@ git commit -m "docs(cli-reference): remove use-as-stdin section; add v0.2.0 surf
 
 ### Task F2: Full test suite verification
 
-**Pre-flight (working-tree hygiene):**
-
-```bash
-git status --short
-```
-
-If the output shows files modified that aren't part of Plan 2's scope (the reviewer specifically noted `demo/index.html` was dirty in a prior round), either commit/stash them on a separate branch BEFORE starting Plan 2 execution, or accept that they'll be entangled with Plan 2's commits. Plan 2 commits should each touch only files inside Plan 2's declared scope — anything else is unrelated work that needs its own commit.
+(Working-tree hygiene was enforced as a hard gate in the Pre-execution checklist before Task A1; not re-run here.)
 
 - [ ] **Step 1: Run `npm test`**
 
