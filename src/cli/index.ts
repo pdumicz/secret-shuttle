@@ -12,7 +12,6 @@ import { injectSubmitCommand } from "./commands/inject-submit.js";
 import { revealCaptureCommand } from "./commands/reveal-capture.js";
 import { inspectCommand } from "./commands/inspect.js";
 import { listCommand } from "./commands/list.js";
-import { useAsStdinCommand } from "./commands/use-as-stdin.js";
 import { unlockCommand } from "./commands/unlock.js";
 import { templateCommand } from "./commands/template.js";
 import { migrateCommand } from "./commands/migrate.js";
@@ -20,6 +19,7 @@ import { doctorCommand } from "./commands/doctor.js";
 import { statusCommand } from "./commands/status.js";
 import { agentCommand } from "./commands/agent.js";
 import { secretsCommand } from "./commands/secrets/index.js";
+import { internalCommand } from "./commands/internal.js";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
 import { consumePendingDeprecationWarning } from "../shared/deprecation.js";
 
@@ -39,7 +39,6 @@ program.addCommand(injectSubmitCommand());
 program.addCommand(revealCaptureCommand());
 program.addCommand(generateCommand());
 program.addCommand(compareCommand());
-program.addCommand(useAsStdinCommand());
 program.addCommand(listCommand());
 program.addCommand(inspectCommand());
 program.addCommand(unlockCommand());
@@ -50,6 +49,7 @@ program.addCommand(doctorCommand());
 program.addCommand(statusCommand());
 program.addCommand(agentCommand());
 program.addCommand(secretsCommand());
+program.addCommand(internalCommand(), { hidden: true });
 
 if (process.argv.length <= 2) {
   program.help();
