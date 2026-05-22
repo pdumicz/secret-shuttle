@@ -21,3 +21,12 @@ test("secrets list accepts --env and --source options", () => {
   assert.ok(optionNames.includes("--env"), "list should accept --env");
   assert.ok(optionNames.includes("--source"), "list should accept --source");
 });
+
+test("secrets get-ref accepts a positional ref argument", () => {
+  const cmd = secretsCommand();
+  const getRef = cmd.commands.find((c) => c.name() === "get-ref");
+  assert.ok(getRef);
+  const argNames = (getRef as unknown as { registeredArguments: { _name: string }[] })
+    .registeredArguments.map((a) => a._name);
+  assert.deepEqual(argNames, ["ref"]);
+});
