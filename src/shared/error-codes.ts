@@ -25,11 +25,11 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   },
   daemon_invalid_response: {
     exitCode: EXIT_CODE_TRANSIENT,
-    hint: () => "Run: secret-shuttle status (then retry)",
+    hint: () => "Run: secret-shuttle daemon status (then retry)",
   },
   daemon_start_timeout: {
     exitCode: EXIT_CODE_TRANSIENT,
-    hint: () => "Run: secret-shuttle daemon start (verify with: secret-shuttle status)",
+    hint: () => "Run: secret-shuttle daemon start (verify with: secret-shuttle daemon status)",
   },
   approval_timeout: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
   unlock_timeout: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },

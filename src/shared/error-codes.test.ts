@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lookupErrorCode, EXIT_CODE_SUCCESS, EXIT_CODE_TRANSIENT, EXIT_CODE_USAGE, EXIT_CODE_NOT_FOUND, EXIT_CODE_PERMISSION, EXIT_CODE_CONFLICT } from "./error-codes.js";
+import { lookupErrorCode, listKnownErrorCodes, EXIT_CODE_SUCCESS, EXIT_CODE_TRANSIENT, EXIT_CODE_USAGE, EXIT_CODE_NOT_FOUND, EXIT_CODE_PERMISSION, EXIT_CODE_CONFLICT } from "./error-codes.js";
 
 test("EXIT_CODE constants follow Sol convention", () => {
   assert.equal(EXIT_CODE_SUCCESS, 0);
@@ -55,6 +55,23 @@ test("browser_not_started → transient with browser-start hint", () => {
   assert.ok(entry);
   assert.equal(entry.exitCode, EXIT_CODE_TRANSIENT);
   assert.equal(entry.hint(""), "Run: secret-shuttle browser start");
+});
+
+test("daemon_invalid_response → transient with daemon-status hint", () => {
+  const entry = lookupErrorCode("daemon_invalid_response");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_TRANSIENT);
+  assert.equal(entry.hint(""), "Run: secret-shuttle daemon status (then retry)");
+});
+
+test("daemon_start_timeout → transient with daemon-start + verify hint", () => {
+  const entry = lookupErrorCode("daemon_start_timeout");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_TRANSIENT);
+  assert.equal(
+    entry.hint(""),
+    "Run: secret-shuttle daemon start (verify with: secret-shuttle daemon status)",
+  );
 });
 
 test("unknown codes return null from lookup", () => {
@@ -113,11 +130,14 @@ test("legacy_key_present → not-found with migrate hint", () => {
 });
 
 test("registry total entry count (sanity check)", () => {
-  // After the P1 fix, the registry should have 101 entries:
-  //   60 from initial A2 seed + 41 added in the P1 fix.
-  // This sanity test prevents accidental regressions / duplicate keys.
-  const codes = ["daemon_not_running", "approval_required", "vault_locked", "secret_exists"];
-  for (const c of codes) {
+  // 60 from initial A2 seed + 41 added in the P1 coverage fix = 101 total.
+  // Catches accidental duplicate keys, dropped entries, or unreviewed
+  // expansions.
+  const codes = listKnownErrorCodes();
+  assert.equal(codes.length, 101, `expected 101 registry entries, got ${codes.length}`);
+
+  // Spot-check a representative slice — one entry per exit-code class.
+  for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
     assert.ok(lookupErrorCode(c), `expected '${c}' in registry`);
   }
 });
