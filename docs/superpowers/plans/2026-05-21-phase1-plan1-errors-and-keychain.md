@@ -31,16 +31,18 @@
 - `src/shared/error-codes.ts` — central registry mapping error code → `{ exitCode, hint(message): string|null }`. Seeded with real current codes from grep of `new ShuttleError(...)` sites.
 - `src/shared/error-codes.test.ts` — registry lookup, exit code constants, defaults for unknown codes.
 - `src/shared/errors.test.ts` — new shape, hint propagation, exit code propagation, backward-compat shape preservation, flat-field shape.
+- `src/cli/error-printer.test.ts` — verifies CLI error printer emits the full nested + flat contract (Task A5).
 - `src/vault/keychain/types.ts` — `KeychainAdapter` interface.
 - `src/vault/keychain/index.ts` — platform dispatcher, exports `getKeychainAdapter()`.
-- `src/vault/keychain/index.test.ts` — dispatcher selects correct platform stub for current platform.
+- `src/vault/keychain/index.test.ts` — dispatcher returns the right platform class **and** verifies every Plan-1 stub reports `isAvailable() === false` and throws `keychain_not_implemented` on all ops.
 - `src/vault/keychain/darwin.ts` — **stub** throwing `keychain_not_implemented` (Plan 5a replaces with native-module-backed impl).
 - `src/vault/keychain/linux.ts` — stub throws `keychain_not_implemented`.
 - `src/vault/keychain/windows.ts` — stub throws `keychain_not_implemented`.
 
 **Files to modify:**
 - `src/shared/errors.ts` — extend `ShuttleError` (accept `opts` with `exitCode`/`hint`, default from registry); extend `errorToJson` (emit final contract — nested + flat).
-- `src/client/daemon-client.ts` — preserve daemon-provided `hint` and `exit_code` through CLI-side reconstruction (Task A6).
+- `src/client/daemon-client.ts` — preserve daemon-provided `hint` and `exit_code` through CLI-side reconstruction; export `daemonErrorFromPayload` (Task A6).
+- `src/client/daemon-client.test.ts` — **already exists** with `daemonRequest` coverage; **append** new `daemonErrorFromPayload` tests using ESM imports (Task A6).
 - `src/cli/index.ts` — already uses `error.exitCode`; new printer test ensures end-to-end shape preservation.
 
 ---
@@ -677,28 +679,18 @@ git commit -m "test(cli): verify error printer emits both legacy and flat shape"
 
 **Files:**
 - Modify: `src/client/daemon-client.ts:25-35`
-- Create: `src/client/daemon-client.test.ts`
+- Modify (append): `src/client/daemon-client.test.ts` (already exists with `daemonRequest` coverage — keep existing tests, append new `daemonErrorFromPayload` tests)
 
 **Why:** [src/client/daemon-client.ts:33](../../src/client/daemon-client.ts) currently reconstructs daemon errors as `new ShuttleError(err.code, err.message)`, dropping any `hint` / `exit_code` the daemon sent. The daemon emits the full contract (after Tasks A1–A4); the CLI must forward it. Without this, an agent calling a CLI command that delegates to the daemon (most of them) will get a structured error that's missing the daemon's hint — defeating the point of Plan 1.
 
-- [ ] **Step 1: Write the failing test**
+The existing [src/client/daemon-client.test.ts](../../src/client/daemon-client.test.ts) covers `daemonRequest` against an ephemeral daemon (`withEphemeralDaemon` harness). Plan 1 keeps all of that intact and **appends** the new unit tests for the extracted `daemonErrorFromPayload` function. Tests are written in ESM (`import`, not `require`) since `package.json` has `"type": "module"`.
 
-Create `src/client/daemon-client.test.ts`:
+- [ ] **Step 1: Append the failing tests to the existing file**
+
+Open `src/client/daemon-client.test.ts` and **append** at the end of the file (do not touch the existing tests or the `withEphemeralDaemon` helper):
 
 ```typescript
-import { test } from "node:test";
-import assert from "node:assert/strict";
-import { ShuttleError } from "../shared/errors.js";
-
-// Local helper that mirrors the logic in daemon-client.ts's payload parser.
-// We test the reconstruction by simulating a parsed daemon response and
-// asserting the resulting ShuttleError carries hint + exitCode.
-function reconstructDaemonError(payload: unknown): ShuttleError {
-  // Will be implemented in Task A6 step 3; tests run against the export.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const mod = require("./daemon-client.js");
-  return mod.daemonErrorFromPayload(payload);
-}
+import { daemonErrorFromPayload } from "./daemon-client.js";
 
 test("daemonErrorFromPayload preserves hint and exit_code from daemon response", () => {
   const payload = {
@@ -709,7 +701,7 @@ test("daemonErrorFromPayload preserves hint and exit_code from daemon response",
     hint: "Run: secret-shuttle secrets list",
     exit_code: 3,
   };
-  const err = reconstructDaemonError(payload);
+  const err = daemonErrorFromPayload(payload);
   assert.ok(err instanceof ShuttleError);
   assert.equal(err.code, "secret_not_found");
   assert.equal(err.message, "No such ref");
@@ -724,7 +716,7 @@ test("daemonErrorFromPayload falls back to registry defaults when daemon omits n
     ok: false,
     error: { code: "approval_denied", message: "User denied" },
   };
-  const err = reconstructDaemonError(payload);
+  const err = daemonErrorFromPayload(payload);
   assert.equal(err.code, "approval_denied");
   // Registry says approval_denied → exitCode 4, null hint
   assert.equal(err.exitCode, 4);
@@ -739,23 +731,25 @@ test("daemonErrorFromPayload daemon-provided hint wins over registry default", (
     hint: "Specific recovery: re-run with --session <id>",
     exit_code: 4,
   };
-  const err = reconstructDaemonError(payload);
+  const err = daemonErrorFromPayload(payload);
   assert.equal(err.hint, "Specific recovery: re-run with --session <id>");
   assert.equal(err.exitCode, 4);
 });
 
 test("daemonErrorFromPayload missing error block falls back to 'unknown'", () => {
   const payload = { ok: false };
-  const err = reconstructDaemonError(payload);
+  const err = daemonErrorFromPayload(payload);
   assert.equal(err.code, "unknown");
   assert.equal(err.message, "unknown error");
 });
 ```
 
+(The existing file already imports `assert`, `test`, and `ShuttleError` at the top, so the new tests reuse those bindings. The new `daemonErrorFromPayload` import is the only addition.)
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npm run build && node --test "dist/client/daemon-client.test.js"`
-Expected: FAIL — `daemonErrorFromPayload` not exported.
+Expected: FAIL — `daemonErrorFromPayload` not exported. (Existing daemonRequest tests continue to pass.)
 
 - [ ] **Step 3: Implement — extract and extend the reconstruction logic**
 
@@ -816,12 +810,10 @@ export async function daemonRequest<T = Record<string, unknown>>(
 }
 ```
 
-Note on the `require` in the test: we use it because `daemonErrorFromPayload` needs to be inspected post-build via the `dist/` output. If the test framework setup uses ESM-only loading and `require` fails, switch the test to `import { daemonErrorFromPayload } from "./daemon-client.js"` and remove the local helper. Either form is acceptable; pick whichever the existing test harness supports (check `src/cli/agent.test.ts` for the convention).
-
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npm run build && node --test "dist/client/daemon-client.test.js"`
-Expected: PASS (4 tests).
+Expected: PASS (all 4 existing daemonRequest tests + 4 new daemonErrorFromPayload tests = 8 total). The existing tests continue to pass because `daemonRequest` still throws a `ShuttleError` with the same `code` on `ok: false` payloads; the new code path simply also carries `hint` and `exit_code` when present.
 
 - [ ] **Step 5: Run the full test suite**
 
@@ -852,10 +844,13 @@ Create `src/vault/keychain/types.ts`:
 /**
  * Adapter interface for OS-level secret storage.
  *
- * Each platform implements this against its native keyring:
- *  - macOS:  `security` CLI → login keychain
- *  - Linux:  `secret-tool` CLI → libsecret
- *  - Windows: PowerShell wincred shim
+ * Each platform's adapter is backed by a native module (likely
+ * @napi-rs/keyring, evaluated in Plan 5a) that talks to the OS keyring
+ * through memory APIs — never argv. This avoids the `ps`-recoverable
+ * password leak inherent in shell-CLI wrappers around `security`,
+ * `secret-tool`, or PowerShell credential cmdlets.
+ *
+ * Plan 1 ships stubs only; Plan 5a wires in the real implementations.
  *
  * Keys are namespaced by (service, account). For Secret Shuttle's master key,
  * we use service = "secret-shuttle" and account = the daemon's unique vault id
@@ -985,10 +980,12 @@ import { ShuttleError } from "../../shared/errors.js";
 import type { KeychainAdapter } from "./types.js";
 
 /**
- * Linux keychain adapter — placeholder.
+ * Linux keychain adapter — Plan 1 stub.
  *
- * Plan 5 will replace this with a secret-tool (libsecret) implementation.
- * Until then, init falls back to passphrase unlock on Linux.
+ * Plan 5a replaces this with a native-module-backed adapter that talks
+ * to libsecret through memory APIs (not the `secret-tool` CLI, which
+ * would put the password in argv). Until then, init falls back to
+ * passphrase unlock on Linux.
  */
 export class LinuxKeychain implements KeychainAdapter {
   async isAvailable(): Promise<boolean> {
@@ -998,21 +995,21 @@ export class LinuxKeychain implements KeychainAdapter {
   async set(): Promise<void> {
     throw new ShuttleError(
       "keychain_not_implemented",
-      "Linux keychain adapter not yet implemented (planned for Plan 5)",
+      "Linux keychain adapter not yet implemented (planned for Plan 5a, native-module-backed)",
     );
   }
 
   async get(): Promise<Buffer | null> {
     throw new ShuttleError(
       "keychain_not_implemented",
-      "Linux keychain adapter not yet implemented (planned for Plan 5)",
+      "Linux keychain adapter not yet implemented (planned for Plan 5a, native-module-backed)",
     );
   }
 
   async delete(): Promise<void> {
     throw new ShuttleError(
       "keychain_not_implemented",
-      "Linux keychain adapter not yet implemented (planned for Plan 5)",
+      "Linux keychain adapter not yet implemented (planned for Plan 5a, native-module-backed)",
     );
   }
 }
@@ -1027,10 +1024,12 @@ import { ShuttleError } from "../../shared/errors.js";
 import type { KeychainAdapter } from "./types.js";
 
 /**
- * Windows keychain adapter — placeholder.
+ * Windows keychain adapter — Plan 1 stub.
  *
- * Plan 5 will replace this with a PowerShell wincred shim implementation.
- * Until then, init falls back to passphrase unlock on Windows.
+ * Plan 5a replaces this with a native-module-backed adapter that talks
+ * to Windows Credential Manager through memory APIs (not a PowerShell
+ * shim, which would put the password in argv). Until then, init falls
+ * back to passphrase unlock on Windows.
  */
 export class WindowsKeychain implements KeychainAdapter {
   async isAvailable(): Promise<boolean> {
@@ -1040,21 +1039,21 @@ export class WindowsKeychain implements KeychainAdapter {
   async set(): Promise<void> {
     throw new ShuttleError(
       "keychain_not_implemented",
-      "Windows keychain adapter not yet implemented (planned for Plan 5)",
+      "Windows keychain adapter not yet implemented (planned for Plan 5a, native-module-backed)",
     );
   }
 
   async get(): Promise<Buffer | null> {
     throw new ShuttleError(
       "keychain_not_implemented",
-      "Windows keychain adapter not yet implemented (planned for Plan 5)",
+      "Windows keychain adapter not yet implemented (planned for Plan 5a, native-module-backed)",
     );
   }
 
   async delete(): Promise<void> {
     throw new ShuttleError(
       "keychain_not_implemented",
-      "Windows keychain adapter not yet implemented (planned for Plan 5)",
+      "Windows keychain adapter not yet implemented (planned for Plan 5a, native-module-backed)",
     );
   }
 }
@@ -1069,7 +1068,7 @@ Expected: PASS.
 
 ```bash
 git add src/vault/keychain/linux.ts src/vault/keychain/windows.ts
-git commit -m "feat(keychain): Linux + Windows adapter stubs (full impls in Plan 5)"
+git commit -m "feat(keychain): Linux + Windows adapter stubs (native-module impls in Plan 5a)"
 ```
 
 ---
@@ -1091,18 +1090,26 @@ import { getKeychainAdapter } from "./index.js";
 import { DarwinKeychain } from "./darwin.js";
 import { LinuxKeychain } from "./linux.js";
 import { WindowsKeychain } from "./windows.js";
+import { ShuttleError } from "../../shared/errors.js";
 
-test("getKeychainAdapter returns DarwinKeychain on darwin", { skip: process.platform !== "darwin" ? "not darwin" : null }, () => {
+// node:test `skip` accepts `boolean | string`. Use `false` (don't skip)
+// rather than `null` — `null` is not assignable to that type under strict
+// TypeScript, which would break the build.
+const skipUnlessDarwin = process.platform !== "darwin" ? "not darwin" : false;
+const skipUnlessLinux = process.platform !== "linux" ? "not linux" : false;
+const skipUnlessWin32 = process.platform !== "win32" ? "not win32" : false;
+
+test("getKeychainAdapter returns DarwinKeychain on darwin", { skip: skipUnlessDarwin }, () => {
   const adapter = getKeychainAdapter();
   assert.ok(adapter instanceof DarwinKeychain);
 });
 
-test("getKeychainAdapter returns LinuxKeychain on linux", { skip: process.platform !== "linux" ? "not linux" : null }, () => {
+test("getKeychainAdapter returns LinuxKeychain on linux", { skip: skipUnlessLinux }, () => {
   const adapter = getKeychainAdapter();
   assert.ok(adapter instanceof LinuxKeychain);
 });
 
-test("getKeychainAdapter returns WindowsKeychain on win32", { skip: process.platform !== "win32" ? "not win32" : null }, () => {
+test("getKeychainAdapter returns WindowsKeychain on win32", { skip: skipUnlessWin32 }, () => {
   const adapter = getKeychainAdapter();
   assert.ok(adapter instanceof WindowsKeychain);
 });
@@ -1116,17 +1123,70 @@ test("getKeychainAdapter respects platform override", () => {
   assert.ok(wk instanceof WindowsKeychain);
 });
 
-test("getKeychainAdapter on unsupported platform falls back to stub-style adapter", () => {
+// ─── Stub-behavior assertions: every Plan-1 platform adapter MUST report
+// not-available and throw keychain_not_implemented on every operation. These
+// catch regressions where a future stub forgets to throw, or returns true
+// from isAvailable() before Plan 5a wires the real implementation.
+for (const [name, platform] of [
+  ["darwin", "darwin"],
+  ["linux", "linux"],
+  ["win32", "win32"],
+] as const) {
+  test(`${name} stub: isAvailable() returns false`, async () => {
+    const adapter = getKeychainAdapter({ platformOverride: platform });
+    assert.equal(await adapter.isAvailable(), false);
+  });
+
+  test(`${name} stub: set() throws keychain_not_implemented`, async () => {
+    const adapter = getKeychainAdapter({ platformOverride: platform });
+    await assert.rejects(
+      () => adapter.set("svc", "acct", Buffer.from("x")),
+      (err) => err instanceof ShuttleError && err.code === "keychain_not_implemented",
+    );
+  });
+
+  test(`${name} stub: get() throws keychain_not_implemented`, async () => {
+    const adapter = getKeychainAdapter({ platformOverride: platform });
+    await assert.rejects(
+      () => adapter.get("svc", "acct"),
+      (err) => err instanceof ShuttleError && err.code === "keychain_not_implemented",
+    );
+  });
+
+  test(`${name} stub: delete() throws keychain_not_implemented`, async () => {
+    const adapter = getKeychainAdapter({ platformOverride: platform });
+    await assert.rejects(
+      () => adapter.delete("svc", "acct"),
+      (err) => err instanceof ShuttleError && err.code === "keychain_not_implemented",
+    );
+  });
+}
+
+test("getKeychainAdapter on unsupported platform: stub-shaped + refuses operations", async () => {
   const adapter = getKeychainAdapter({ platformOverride: "freebsd" as NodeJS.Platform });
-  // Should be a stub-shaped adapter (isAvailable returns false). We don't
-  // require a specific class — just that it implements the interface and
-  // refuses operations.
+  // Shape:
   assert.equal(typeof adapter.isAvailable, "function");
   assert.equal(typeof adapter.set, "function");
   assert.equal(typeof adapter.get, "function");
   assert.equal(typeof adapter.delete, "function");
+  // Behavior:
+  assert.equal(await adapter.isAvailable(), false);
+  await assert.rejects(
+    () => adapter.set("svc", "acct", Buffer.from("x")),
+    (err) => err instanceof ShuttleError && err.code === "keychain_not_implemented",
+  );
+  await assert.rejects(
+    () => adapter.get("svc", "acct"),
+    (err) => err instanceof ShuttleError && err.code === "keychain_not_implemented",
+  );
+  await assert.rejects(
+    () => adapter.delete("svc", "acct"),
+    (err) => err instanceof ShuttleError && err.code === "keychain_not_implemented",
+  );
 });
 ```
+
+Test count: **17 tests defined.** 14 always run (1 "platform override" + 12 from the for-loop + 1 "unsupported platform"); 3 are skip-conditional and exactly one runs based on `process.platform` (the other two report as skipped). On macOS, expect: 14 PASS + 1 PASS (darwin instance) + 2 SKIP.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1208,7 +1268,7 @@ class UnsupportedKeychain implements KeychainAdapter {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npm run build && node --test "dist/vault/keychain/index.test.js"`
-Expected: PASS (5 tests; 3 of the platform-specific ones SKIPPED depending on host).
+Expected: PASS — 17 tests defined; 14 always run; 3 platform-instance tests are skip-conditional (1 runs on the current host, 2 report SKIP). On macOS: 15 PASS + 2 SKIP.
 
 - [ ] **Step 5: Commit**
 
@@ -1282,20 +1342,21 @@ git commit -m "docs(changelog): Plan 1 — structured errors + keychain interfac
 
 ## Self-Review
 
-**1. Spec coverage (revised post P0–P2 review)**
+**1. Spec coverage (revised post round-2 review)**
 
 Reviewing spec §5.6 (Structured errors) and §5.1/§3.4 (keychain abstraction):
 
 - ✅ `ShuttleError` extended with `hint` + `exitCode` (Task A1)
 - ✅ Central registry `src/shared/error-codes.ts` with code → {exitCode, hint(message)}, **seeded with real codes** from the current codebase (Task A2)
 - ✅ `errorToJson` emits the **final contract** — legacy nested `error: { code, message }` block AND flat `error_code` / `message` / `hint` / `exit_code` fields (Task A4)
-- ✅ **Daemon-client preserves daemon-provided `hint` + `exit_code`** through CLI reconstruction (Task A6 — fixes the P1 issue flagged in review)
+- ✅ **Daemon-client preserves daemon-provided `hint` + `exit_code`** through CLI reconstruction; tests **appended to existing** `daemon-client.test.ts` (which already covers `daemonRequest`) using **ESM imports** (Task A6 — fixes the round-2 file-overwrite + `require`-in-ESM findings)
 - ✅ CLI error printer uses new shape + sets exit code (Task A5 — minimal change, existing code already used `error.exitCode`)
 - ✅ Exit code policy 0/1/2/3/4/5 with named constants (Task A2)
-- ✅ Keychain abstraction interface (Task B1)
-- ✅ macOS stub (Task B2 — **not** the real `security`-CLI impl, which leaks the password via argv; real native-module impl deferred to Plan 5a per P0 review)
-- ✅ Linux + Windows stubs (Task B3)
-- ✅ Platform dispatcher with override for tests (Task B4)
+- ✅ Keychain abstraction interface — comment normalized to "native-module-backed", no leftover shell-CLI/secret-tool/PowerShell references (Task B1)
+- ✅ macOS stub (Task B2 — **not** the real `security`-CLI impl, which leaks the password via argv; real native-module impl deferred to Plan 5a per round-1 P0)
+- ✅ Linux + Windows stubs — comments and error messages reference Plan 5a + native-module-backed (round-2 normalization) (Task B3)
+- ✅ Platform dispatcher with override for tests; **stub behavior assertions added** (every stub: `isAvailable() === false`; every op throws `keychain_not_implemented`) (Task B4 — fixes round-2 "tests don't exercise stub behavior" finding)
+- ✅ `skip: null` replaced with `skip: false` / `skip: "<reason>"` to satisfy strict TS types on node:test's `TestOptions.skip` (round-2 typecheck fix)
 - ✅ CHANGELOG entry (Task C2)
 
 **Audit of all 204 `throw new ShuttleError` sites:** explicitly deferred to Plans 2–5 (noted in Task A2 and in the plan header). The registry's default behavior (unknown code → exit code 1, null hint) means existing throw sites work unchanged; this plan only adds the *infrastructure* for richer errors. Each subsequent plan audits the throw sites in the files it touches.
@@ -1304,7 +1365,7 @@ Reviewing spec §5.6 (Structured errors) and §5.1/§3.4 (keychain abstraction):
 
 **2. Placeholder scan**
 
-No "TBD", "TODO", "implement later", "Similar to Task N", or "add appropriate X". Every code block is complete. Every command shows expected output. No NUL bytes (P2 fix verified).
+No "TBD", "TODO", "implement later", "Similar to Task N", or "add appropriate X". Every code block is complete. Every command shows expected output. No NUL bytes (round-1 P2 fix verified). No `require()` in ESM tests (round-2 fix verified). No `skip: null` (round-2 fix verified).
 
 **3. Type consistency**
 
@@ -1313,11 +1374,12 @@ No "TBD", "TODO", "implement later", "Similar to Task N", or "add appropriate X"
 - `lookupErrorCode` (Task A2) → consumed in `ShuttleError` constructor (A3) → consistent signature `(code: string) => ErrorCodeEntry | null`.
 - `daemonErrorFromPayload` (Task A6) calls into `ShuttleError` (A1/A3) using the `opts` form — consistent.
 - Exit code constants (`EXIT_CODE_TRANSIENT` etc.) named consistently in A2 and tests.
-- All registry codes match real codes confirmed by grep of `new ShuttleError("...")` in `src/` (P1 fix verified).
+- All registry codes match real codes confirmed by grep of `new ShuttleError("...")` in `src/` (round-1 P1 fix verified).
+- `skip` value type is `boolean | string`, never `null` (round-2 typecheck fix).
 
 **4. Scope**
 
-Foundation only — no user-facing command changes. Working, testable software at the end: a registry, an extended error class, an end-to-end-preserving daemon client, a keychain interface + stubs. Independent of all subsequent plans. Estimated execution: ~2–3 hours for a fresh subagent doing one task at a time with verification.
+Foundation only — no user-facing command changes. Working, testable software at the end: a registry, an extended error class, an end-to-end-preserving daemon client, a keychain interface + stubs (with real behavior assertions). Independent of all subsequent plans. Estimated execution: ~2–3 hours for a fresh subagent doing one task at a time with verification.
 
 ---
 
