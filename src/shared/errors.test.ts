@@ -22,3 +22,15 @@ test("ShuttleError backward-compatible positional exitCode still works", () => {
   assert.equal(err.exitCode, 2);
   assert.equal(err.hint, null);
 });
+
+test("ShuttleError partial opts: explicit hint, default exitCode", () => {
+  const err = new ShuttleError("some_code", "Some message", { hint: "Try foo" });
+  assert.equal(err.exitCode, 1);
+  assert.equal(err.hint, "Try foo");
+});
+
+test("ShuttleError partial opts: explicit exitCode, default hint", () => {
+  const err = new ShuttleError("some_code", "Some message", { exitCode: 4 });
+  assert.equal(err.exitCode, 4);
+  assert.equal(err.hint, null);
+});
