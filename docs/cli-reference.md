@@ -1,5 +1,7 @@
 # CLI Reference
 
+> Note (v0.2.0+): the CLI surface was reshaped in v0.2.0 — `secrets` is the new namespace for vault primitives (`secrets list/get-ref/set/delete/rotate`) and `status` replaces `doctor`. Recovery commands (`daemon start/status/stop`, `unlock`, `migrate secure-vault`) stay at top level — they're what the structured-error `hint` and `status.next_action` fields point at. Power-user paths (`compare`, `blind`, `capture`, V0 `inject`) live under `secret-shuttle internal *`. Old names (`list`, `inspect`, `generate`, `doctor`) still work but print a deprecation warning and will be removed in v0.3.0. Run `secret-shuttle help` for the curated public-command index or `secret-shuttle <command> --help` for per-command details — those are the current source of truth while this reference is being updated.
+
 All successful commands return JSON. Raw secret values are never returned.
 
 ## `secret-shuttle daemon start | status | stop`
@@ -157,10 +159,6 @@ Lists active marks. Returns non-secret metadata only — labels, frame IDs, targ
 ## `secret-shuttle list | inspect`
 
 Metadata-only views, scoped by `--env` / `--source` for `list`.
-
-## `secret-shuttle use-as-stdin`
-
-Refused in Secure Mode. Returns error `removed_in_secure_mode`. Use `template run` instead.
 
 ## `secret-shuttle doctor`
 
