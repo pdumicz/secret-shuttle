@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=1280" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Secret Shuttle — Developer Walkthrough</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -81,8 +81,10 @@
       background: var(--bg-stage);
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
-      overflow: hidden;
-      min-width: 1100px;
+    }
+    /* Desktop preserves the original "fits in one viewport" model. */
+    @media (min-width: 720px) {
+      body { overflow: hidden; min-width: 1100px; }
     }
     button { font-family: inherit; cursor: pointer; }
     code, kbd, pre { font-family: var(--font-mono); }
@@ -1005,8 +1007,8 @@
       font-size: 11.5px;
     }
 
-    /* Responsive guard */
-    @media (max-width: 1200px) {
+    /* Responsive guard (narrow desktop) */
+    @media (max-width: 1200px) and (min-width: 720px) {
       .app { grid-template-columns: 340px 1fr; }
       .scene-stage[data-scene="5"] .approval-a,
       .scene-stage[data-scene="5"] .approval-b { width: 360px; }
@@ -1014,6 +1016,138 @@
       .scene-stage[data-scene="8"] .browser { width: 420px; }
       .scene-stage[data-scene="7"] .approval,
       .scene-stage[data-scene="8"] .approval { width: 380px; }
+    }
+
+    /* ── Mobile (< 720px) ─────────────────────────────────────────── */
+    @media (max-width: 719px) {
+      html, body { min-height: 0; height: auto; }
+      body { background: var(--bg-stage); overflow-x: hidden; }
+
+      .app {
+        display: flex;
+        flex-direction: column;
+        height: auto;
+        min-height: 100vh;
+      }
+
+      /* Side panel — top of page, full width, content flows naturally */
+      .side {
+        border-right: none;
+        border-bottom: 1px solid var(--rule);
+        padding: 20px 18px 24px;
+        overflow: visible;
+      }
+      .side::before { display: none; } /* drop the paper grain on mobile to save paint */
+
+      .brand { font-size: 16px; }
+      .brand-sub { font-size: 10.5px; }
+      .progress { margin-top: 18px; }
+
+      .scene-meta {
+        margin-top: 20px;
+        gap: 14px;
+        flex: 0 0 auto;
+      }
+      .title { font-size: 26px; line-height: 1.1; }
+      .copy { font-size: 13.5px; }
+      .watch { font-size: 12px; padding: 8px 12px; }
+      .gap { padding: 11px 13px 13px; }
+      .gap-body { font-size: 12px; }
+
+      /* Stage flows below the side panel */
+      .stage {
+        position: relative;
+        height: auto;
+        min-height: 0;
+        padding: 18px 14px 100px;
+        overflow: visible;
+        background: linear-gradient(180deg, #16181d 0%, var(--bg-stage) 80%);
+      }
+      .stage::before, .stage::after { display: none; } /* drop expensive overlays on mobile */
+
+      /* Each scene-stage = vertical column of windows */
+      .scene-stage,
+      .scene-stage[data-layout="center"] {
+        position: relative;
+        inset: auto;
+        width: 100%;
+      }
+      .scene-stage.active,
+      .scene-stage[data-layout="center"].active {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 0;
+        align-items: stretch;
+        justify-content: flex-start;
+      }
+
+      /* All windows: full-width, no abs positioning, no rotation, no fixed widths */
+      .scene-stage .win {
+        position: relative !important;
+        top: auto !important;
+        left: auto !important;
+        right: auto !important;
+        bottom: auto !important;
+        width: 100% !important;
+        max-width: 100%;
+        transform: none !important;
+        opacity: 1 !important;
+      }
+      /* Window typography stays the same (12.5px mono is readable) */
+      .term-body { padding: 14px 16px 16px; font-size: 12px; }
+      .term-body .line { word-break: break-word; overflow-wrap: anywhere; }
+      .approval-body, .unlock-body { padding: 14px 16px; }
+      .approval-body h2, .unlock-body h2 { font-size: 18px; }
+      .approval-action { font-size: 12.5px; padding: 9px 11px; }
+      .browser-body { min-height: 220px; }
+
+      /* Scene caption inline at top of scene */
+      .scene-caption {
+        position: relative;
+        top: auto; left: auto;
+        margin: 0 0 4px;
+        align-self: flex-start;
+        font-size: 10px;
+      }
+
+      /* Scene-5 approval card stamp doesn't overlap title on narrow card */
+      .approved-stamp { top: 8px; right: 12px; font-size: 9.5px; }
+
+      /* Scene-6 marks rely on desktop pixel coords — hide cleanly on mobile */
+      .scene-stage[data-scene="6"] .mark,
+      .scene-stage[data-scene="6"] .mark-box { display: none; }
+
+      /* Final strip inline in mobile flow */
+      .final-strip {
+        position: relative;
+        bottom: auto; left: auto; right: auto;
+        margin-top: 0;
+        font-size: 11.5px;
+        padding: 11px 14px;
+      }
+      .final-strip .ref { font-size: 11px; word-break: break-all; }
+
+      /* Sticky nav at bottom of viewport */
+      .nav {
+        position: fixed;
+        bottom: 0; left: 0; right: 0;
+        background: var(--bg-side-2);
+        padding: 11px 16px;
+        margin-top: 0;
+        border-top: 1px solid var(--rule);
+        z-index: 100;
+        box-shadow: 0 -8px 22px rgba(0,0,0,0.18);
+      }
+      .nav-btn { padding: 10px 16px; font-size: 13px; }
+      .key-hint { display: none; }
+
+      /* For approval rows that have long values (refs/fingerprints) — wrap nicely */
+      .row { gap: 10px; flex-wrap: wrap; }
+      .row .v { text-align: right; }
+
+      /* Hide animations on mobile (cheaper, snappier feel) */
+      .scene-meta, .scene-stage { animation: none; }
     }
   </style>
 </head>

@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "demo",
-      "runtimeExecutable": "/opt/homebrew/bin/npx",
-      "runtimeArgs": ["-y", "http-server", "demo", "-p", "8765", "-c-1", "--silent"],
+      "runtimeExecutable": "/opt/homebrew/bin/python3.13",
+      "runtimeArgs": ["-m", "http.server", "8765", "--directory", "demo"],
       "port": 8765
     }
   ]
