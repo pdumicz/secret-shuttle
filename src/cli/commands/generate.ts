@@ -4,10 +4,11 @@ import { ok, outputJson } from "../../shared/result.js";
 import { collectRepeated } from "./helpers.js";
 import { ShuttleError } from "../../shared/errors.js";
 import { canonicalEnvironment } from "../../shared/refs.js";
+import { withPendingDeprecationWarning } from "../../shared/deprecation.js";
 
 export function generateCommand(): Command {
   return new Command("generate")
-    .description("Generate and store a new secret via the daemon.")
+    .description("(deprecated) Use 'secret-shuttle secrets set' instead.")
     .requiredOption("--name <name>")
     .requiredOption("--env <environment>")
     .option("--source <source>", "Secret source namespace.", "local")
@@ -19,6 +20,7 @@ export function generateCommand(): Command {
     .option("--approval-id <id>", "Pre-issued approval id.")
     .option("--no-wait", "Return approval_required without waiting.")
     .action(async (options) => {
+      withPendingDeprecationWarning("generate", "secrets set");
       const domains = options.allowDomain as string[];
       if (canonicalEnvironment(options.env) === "production" && domains.length === 0) {
         throw new ShuttleError(

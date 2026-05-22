@@ -1,13 +1,15 @@
 import { Command } from "commander";
 import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
+import { withPendingDeprecationWarning } from "../../shared/deprecation.js";
 
 export function listCommand(): Command {
   return new Command("list")
-    .description("List secret metadata only.")
+    .description("(deprecated) Use 'secret-shuttle secrets list' instead.")
     .option("--env <environment>")
     .option("--source <source>")
     .action(async (options) => {
+      withPendingDeprecationWarning("list", "secrets list");
       const body: Record<string, string> = {};
       if (options.env !== undefined) body.environment = options.env;
       if (options.source !== undefined) body.source = options.source;

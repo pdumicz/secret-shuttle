@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import { daemonRequest } from "../../client/daemon-client.js";
 import { getShuttlePaths } from "../../shared/config.js";
 import { ok, outputJson } from "../../shared/result.js";
+import { withPendingDeprecationWarning } from "../../shared/deprecation.js";
 
 export interface DoctorReport {
   daemon_reachable: boolean;
@@ -58,9 +59,10 @@ export function formatDoctorText(report: DoctorReport): string {
 
 export function doctorCommand(): Command {
   return new Command("doctor")
-    .description("Report whether the daemon, vault, browser, policy, and local files are in a safe state.")
+    .description("(deprecated) Use 'secret-shuttle status' instead.")
     .option("--json", "Emit machine-readable JSON.", false)
     .action(async (options) => {
+      withPendingDeprecationWarning("doctor", "status");
       const paths = getShuttlePaths();
       let socketMode: string | null = null;
       try {
