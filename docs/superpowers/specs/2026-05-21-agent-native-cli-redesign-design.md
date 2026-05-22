@@ -182,19 +182,20 @@ Replaces today's thin status wrapper. New behavior:
 
 1. **Detect daemon state.** If not running, `daemon start`.
 2. **Vault check.** If `~/.secret-shuttle/vault.json.enc` doesn't exist → create new vault.
-3. **Master key storage.** OS keychain integration:
-   - macOS: `security` CLI (deferred Touch ID native binding to Phase 2; for now, Keychain auto-unlock — daemon reads key at startup. Trade-off documented: no per-call biometric.)
-   - Linux: `secret-tool` (libsecret).
-   - Windows: `wincred` via PowerShell shim.
+3. **Master key storage.** OS keychain integration via a **native NAPI module**, not shell-CLI calls. The `security` / `secret-tool` / PowerShell-shim approach is **ruled out** because every one of them puts the password in process argv (visible to any process via `ps auxww`), contradicting Secret Shuttle's "vault key never leaves the daemon" promise. Native APIs accept the password through memory, not argv.
+   - macOS: `@napi-rs/keyring` → Keychain Services
+   - Linux: `@napi-rs/keyring` → libsecret
+   - Windows: `@napi-rs/keyring` → Windows Credential Manager
    - Fallback: passphrase prompt in the existing unlock UI window. User can opt out of keychain via `--no-keychain`.
+   - **Phase 1 (Plan 1) ships only the `KeychainAdapter` interface** + platform-specific stubs that throw `keychain_not_implemented` with a passphrase-fallback hint. The native-module-backed implementations land in **Plan 5a**, which is also where `init` wires keychain in for real. This keeps Plan 1 unblocked while we evaluate `@napi-rs/keyring` vs. shipping a tiny custom NAPI helper.
 4. **Agent skill install.** Detect `.claude/`, `.cursor/`, `AGENTS.md`, `.github/copilot-instructions.md` in CWD; install skill into each found. Skip if not in a project root.
 5. **Output.** JSON shape with `next_action`. Human mode prints a 4-line summary.
 
 Idempotency: re-running `init` is safe. If vault exists and is unlocked, `init` reports state and offers `--reset` (which prompts for confirmation).
 
-New file: [src/cli/commands/init.ts](../../src/cli/commands/init.ts) — full rewrite.
-New file: [src/vault/keychain-store.ts](../../src/vault/keychain-store.ts) — OS keyring abstraction with per-platform implementations.
-New daemon endpoint: `POST /v1/keychain/unlock` — accepts no body, daemon reads key from keychain. Bound by an `init`-issued one-shot setup token, not the normal bearer (because the bearer doesn't exist yet at first init).
+**Implementation phasing:**
+- **Plan 1:** New module [src/vault/keychain/](../../src/vault/keychain/) — `KeychainAdapter` interface (`types.ts`), platform dispatcher (`index.ts`), and per-platform stubs (`darwin.ts`, `linux.ts`, `windows.ts`) that all throw `keychain_not_implemented`. No daemon endpoint yet.
+- **Plan 5a:** Real native-module-backed implementations replace the stubs. New CLI file: [src/cli/commands/init.ts](../../src/cli/commands/init.ts) — full rewrite. New daemon endpoint: `POST /v1/keychain/unlock` (accepts no body, daemon reads key from keychain). Bound by an `init`-issued one-shot setup token, not the normal bearer (because the bearer doesn't exist yet at first init).
 
 ### 5.2 `secrets` group
 
@@ -206,7 +207,15 @@ If an agent needs the raw value for `run`, it must go through `secret-shuttle ru
 
 **`secrets set`** — two modes:
 - `--kind random_32_bytes` / `random_24_chars` / etc. → daemon generates, never returns raw.
-- `--kind paste` → daemon opens an input window (same approval UI infra) for the human to paste. The CLI never receives the bytes. The agent never sees them.
+- `--kind paste` → daemon opens an input window (same trusted approval-UI infra) for the human to paste.
+
+**Paste UI contract (resolved from §12 open-question):**
+- The paste field is a trusted browser window served by the daemon over loopback HTTP, same origin as the approval UI ([src/daemon/approvals/ui.html](../../src/daemon/approvals/ui.html)).
+- The CLI process never receives the bytes — they go daemon-ward via the existing UI POST channel.
+- The pasted value is **hidden by default** (`<input type="password">`-style mask). A single explicit "show" toggle reveals it briefly for human verification; "hide" is also explicit. No persistent display.
+- The bytes are never echoed to CLI stdout/stderr.
+- The bytes are never written to the audit log. The audit entry records: action, name, env, source, fingerprint — not the value.
+- After daemon ingest, the value lives only in the encrypted vault; the UI page is destroyed.
 
 **`secrets delete <ref>`** — soft-delete (audit trail preserved). Production-gated by approval.
 
@@ -224,12 +233,22 @@ New daemon endpoint: `POST /v1/secrets/rotate` — handles steps 1–3, returns 
 
 Subshell injection. The killer category-standard feature.
 
-**Env file format** (matches `op` for ergonomics):
+**Env file format (strict dotenv-like, resolved from §12 open-question):**
+
 ```
+# Comments start with #
 STRIPE_KEY=ss://stripe/prod/STRIPE_KEY
 DATABASE_URL=ss://local/prod/DATABASE_URL
-SOME_OTHER=plain-value-passthrough  # non-ss:// values pass through unchanged
+PORT=3000                              # non-ss:// values pass through unchanged
+QUOTED_VALUE="some literal with spaces"  # double-quoted values supported
 ```
+
+**Rules:**
+1. One `KEY=VALUE` per line. Blank lines and `#`-prefixed comments ignored.
+2. Keys must match `[A-Z_][A-Z0-9_]*` (POSIX env var convention).
+3. `VALUE` is resolved as an `ss://` reference **only if the entire value** (after optional surrounding quotes) is a syntactically valid ref (`^ss://[^/]+/[^/]+/[A-Z_][A-Z0-9_]*$`). Partial-substring matches are not resolved. (Defers shell-style expansion like `${VAR}` indefinitely — explicit non-feature.)
+4. Non-ref values pass through verbatim to the child env.
+5. Quoting: double-quoted values are unquoted; backslash-escapes are not expanded.
 
 **Flow:**
 1. CLI parses env file, identifies `ss://` refs.
@@ -303,19 +322,27 @@ Updated: daemon `/v1/status` endpoint emits the new shape (additive — old fiel
 
 ### 5.6 Structured errors
 
-Single source-of-truth shape:
+**Final contract — both legacy nested block and flat agent-friendly fields:**
 
 ```typescript
 type StructuredError = {
   ok: false;
-  error: string;       // machine-readable code, e.g. "daemon_not_running"
-  message: string;     // human-readable
-  hint: string | null; // literal command to recover, or null if human-required
-  code: number;        // exit code (0/1/2/3/4/5)
+
+  // Legacy nested block — preserved indefinitely for backward compat. Anything
+  // already parsing `result.error.code` / `result.error.message` continues to work.
+  error: { code: string; message: string };
+
+  // Flat agent-friendly fields — read these in new code:
+  error_code: string;      // mirror of error.code
+  message: string;         // mirror of error.message
+  hint: string | null;     // literal recovery command, or null if human-required
+  exit_code: number;       // 0/1/2/3/4/5 per Sol/Memori convention
 };
 ```
 
-[src/shared/errors.ts](../../src/shared/errors.ts) extends `ShuttleError` and `errorToJson` to emit this shape. Backward compatibility: today's `{ ok: false, error: { code, message } }` keeps working — same fields plus the new `hint` and top-level `code`.
+Why both: the legacy nested block keeps existing tests / callers green; the flat fields are what modern agents and structured-logging consumers want (no nesting to traverse, `error_code` is unambiguous vs. a string-vs-object `error` field). Total cost: ~3 lines of duplication in `errorToJson`.
+
+[src/shared/errors.ts](../../src/shared/errors.ts) extends `ShuttleError` (adds `hint` field; constructor optionally accepts `{ exitCode, hint }`). [src/shared/error-codes.ts](../../src/shared/error-codes.ts) (new) seeds defaults keyed by `code`. `errorToJson` emits the contract above.
 
 **Exit code mapping** (formalized):
 - `0`: success
@@ -323,11 +350,11 @@ type StructuredError = {
 - `2`: usage error (bad argv, missing required flag)
 - `3`: not found (ref doesn't exist, template not found)
 - `4`: permission (approval denied, domain not allowed, vault locked)
-- `5`: conflict (ref already exists, secret rotating)
+- `5`: conflict (ref already exists, rotating)
 
-Every existing `ShuttleError` gets reviewed and assigned an exit code. List of codes maintained in [src/shared/error-codes.ts](../../src/shared/error-codes.ts) (new file).
+**Daemon → CLI preservation.** [src/client/daemon-client.ts:33](../../src/client/daemon-client.ts) currently reconstructs daemon errors as `new ShuttleError(err.code, err.message)`, dropping any `hint` / `exit_code` the daemon sent. After Plan 1, the client must preserve those fields end-to-end so the agent sees the same structured error whether it originated at the daemon or in the CLI.
 
-Audit task in plan: walk every `throw new ShuttleError(...)` call site and verify the code + hint are correct.
+**Registry seeding.** Plan 1 seeds the registry with **real codes from the current codebase** (e.g. `secret_not_found` — not the aspirational `ref_not_found`; `missing_param` not `missing_required_param`; `domain_mismatch` not `domain_not_allowed`). The full audit of all 204 `throw new ShuttleError(...)` sites happens incrementally in Plans 2–5 as each command is touched. The registry's default behavior (unknown code → exitCode 1, hint null) keeps existing throw sites working unchanged.
 
 ### 5.7 Pre-approved sessions
 
@@ -579,7 +606,7 @@ Before releasing 0.2.0:
 ## 10. What's explicitly NOT in this spec
 
 - **MCP server.** Research is unanimous: CLI first, MCP optional later. Deferred indefinitely; tracked separately.
-- **Touch ID native binding.** Phase 1 ships OS-keychain-stored master key with auto-unlock; biometric per-call is Phase 2 (requires native helper).
+- **Touch ID native binding.** Phase 1 ships keychain-stored master key with auto-unlock (in Plan 5a, via native module); biometric per-call is Phase 2 (requires a separately-signed helper / LAContext wrapper).
 - **Browser extension for marking.** Phase 2+. `mark focused` / `mark pick` keep their current ergonomics.
 - **Team vaults / cloud sync.** V6+ (commercial). Phase 1 stays single-operator.
 - **CI mode (pre-signed approval blobs).** Phase 3, separate spec.
@@ -606,23 +633,25 @@ This is the contract for the implementation plan.
 - [ ] `secret-shuttle internal *` namespace + commands moved into it
 
 **Daemon endpoints (new):**
-- [ ] `POST /v1/keychain/unlock`
-- [ ] `POST /v1/run/resolve` + spawner
-- [ ] `POST /v1/inject/render`
-- [ ] `POST /v1/approvals/session`
-- [ ] `POST /v1/secrets/delete`
-- [ ] `POST /v1/secrets/rotate`
+- [ ] `POST /v1/keychain/unlock` (Plan 5a)
+- [ ] `POST /v1/run/resolve` + spawner (Plan 3)
+- [ ] `POST /v1/inject/render` (Plan 3)
+- [ ] `POST /v1/approvals/session` (Plan 4)
+- [ ] `POST /v1/secrets/delete` (Plan 2)
+- [ ] `POST /v1/secrets/rotate` (Plan 2)
 
 **Approval UI:**
 - [ ] Session pattern approval view
 - [ ] Per-op approval view shows "approve this + similar for 15 min" checkbox (mints session)
 
 **Cross-cutting:**
-- [ ] `ShuttleError` extended with `hint` + `exitCode`
-- [ ] [src/shared/error-codes.ts](../../src/shared/error-codes.ts) created
-- [ ] Every error site audited for hint + exit code
-- [ ] CLI error printer emits new shape
-- [ ] OS keychain abstraction ([src/vault/keychain-store.ts](../../src/vault/keychain-store.ts)) with mac/linux/win adapters
+- [ ] `ShuttleError` extended with `hint` + `exitCode` (Plan 1)
+- [ ] [src/shared/error-codes.ts](../../src/shared/error-codes.ts) created, seeded with **real current codes** (Plan 1)
+- [ ] `errorToJson` emits final contract (legacy `error: { code, message }` + flat `error_code` / `message` / `hint` / `exit_code`) (Plan 1)
+- [ ] [src/client/daemon-client.ts](../../src/client/daemon-client.ts) preserves daemon-provided `hint` + `exit_code` through CLI reconstruction (Plan 1)
+- [ ] Every error site audited for hint + exit code — incrementally across Plans 2–5 as each command is touched
+- [ ] CLI error printer emits new shape (Plan 1)
+- [ ] OS keychain abstraction ([src/vault/keychain/](../../src/vault/keychain/)) with interface + platform stubs (Plan 1); native-module-backed implementations in Plan 5a
 
 **Docs:**
 - [ ] [skills/secret-shuttle/SKILL.md](../../skills/secret-shuttle/SKILL.md) rewritten
@@ -644,22 +673,31 @@ This is the contract for the implementation plan.
 - [ ] E2E walkthrough using new API
 
 **Verification gates (manual):**
-- [ ] Fresh macOS install: `npx secret-shuttle init` works
-- [ ] Fresh Linux install: same
+- [ ] Fresh macOS install: `npx secret-shuttle init` works (after Plan 5a wires the macOS keychain adapter)
+- [ ] Fresh Linux install: same (after Plan 5a wires the Linux adapter)
 - [ ] Stripe → Vercel walkthrough end-to-end with one approval click
 - [ ] `help` output ≤ 30 lines
 - [ ] `SKILL.md` ≤ 50 lines
 
-## 12. Open questions deferred to plan-writing
+**Plan sequencing:**
+- **Plan 1:** Foundation — structured errors (incl. daemon-client preservation) + KeychainAdapter interface + platform stubs.
+- **Plan 2:** CLI surface — `secrets` group + `status` + `internal` namespace + per-command help text.
+- **Plan 3:** `run` + `inject` commands + daemon spawner.
+- **Plan 4:** Pre-approved sessions + approval-UI checkbox.
+- **Plan 5a:** `init` rewrite + native-module-backed keychain adapters (macOS / Linux / Windows).
+- **Plan 5b:** Docs (SKILL.md, walkthrough, README, cli-reference) + npm publish 0.2.0.
 
-These are implementation-level, not architecture-level. The plan will resolve them:
+## 12. Open questions
 
-1. Exact env-file format for `run` (strict `KEY=ss://...` only, or allow shell-style expansion?).
-2. `secrets set --kind paste` — does the paste window allow the human to confirm the value before submission? (Avoid mistypes — but echoing the value to the approval UI may be exactly what we're trying to prevent.)
-3. Session creation: who initiates — the agent or the daemon (offered via approval UI checkbox)? Both probably; details in plan.
-4. Internal namespace: is `internal` a separate Commander program or just a hidden command group? Implementation detail.
-5. Deprecation warning format: stderr line, or JSON `warning` field in output? Probably both.
+**Resolved in this revision:**
+- ~~Exact env-file format for `run`~~ → Strict dotenv-like `KEY=VALUE`; only full-value `ss://...` refs are resolved; no shell expansion (§5.3).
+- ~~`secrets set --kind paste` UX~~ → Trusted-UI paste with explicit show/hide; bytes never echoed to CLI, never logged in audit (§5.2).
+
+**Still open (deferred to per-plan resolution):**
+1. Session creation: who initiates — the agent (via `internal session create`) or the daemon (offered via approval-UI checkbox)? Both, details in Plan 4.
+2. Internal namespace: separate Commander program or hidden command group? Plan 2 implementation detail.
+3. Deprecation warning format: stderr line, JSON `warning` field, or both? Plan 2 implementation detail.
 
 ---
 
-End of design spec. Plan-writing starts next.
+End of design spec. Plan 1 follows.
