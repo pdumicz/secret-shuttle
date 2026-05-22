@@ -133,13 +133,21 @@ test("registry total entry count (sanity check)", () => {
   // 60 from initial A2 seed + 41 added in the P1 coverage fix + 3 added in
   // Plan 2 Task E1 (bad_host, unauthorized, not_found for server.ts
   // pre-handler error paths) = 104 total.
+  // Plan 3 Task B2 adds 6 more (spawn_failed, env_file_parse_error,
+  // inject_template_parse_error, env_file_not_found, inject_output_path_unsafe,
+  // inject_output_write_failed) = 110 total.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 104, `expected 104 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 110, `expected 110 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
     assert.ok(lookupErrorCode(c), `expected '${c}' in registry`);
   }
+
+  // Spot-check new B2 entries.
+  assert.ok(lookupErrorCode("env_file_parse_error"));
+  assert.ok(lookupErrorCode("inject_output_path_unsafe"));
+  assert.ok(lookupErrorCode("spawn_failed"));
 });

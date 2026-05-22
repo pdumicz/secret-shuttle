@@ -37,6 +37,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   mark_pick_timeout: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
   mark_pick_cancelled: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
   template_spawn_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  spawn_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
   browser_not_started: {
     exitCode: EXIT_CODE_TRANSIENT,
     hint: () => "Run: secret-shuttle browser start",
@@ -84,6 +85,8 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   template_definition_invalid: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   unsupported_repository_host: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   unsupported_secret_kind: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  env_file_parse_error: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  inject_template_parse_error: { exitCode: EXIT_CODE_USAGE, hint: () => null },
 
   // ── Not found ──────────────────────────────────────────────────────────────
   not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -113,6 +116,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   repository_field_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   skill_bundled_file_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   template_tmpdir_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
+  env_file_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
 
   // ── Permission ─────────────────────────────────────────────────────────────
   bad_host: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
@@ -154,6 +158,8 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     exitCode: EXIT_CODE_PERMISSION,
     hint: () => "Run: secret-shuttle unlock",
   },
+  inject_output_path_unsafe: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  inject_output_write_failed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
 
   // ── Conflict ───────────────────────────────────────────────────────────────
   already_migrated: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },

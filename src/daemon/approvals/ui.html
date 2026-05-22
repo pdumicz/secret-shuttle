@@ -39,6 +39,8 @@
           blind_end: `Resume browser observation for ${esc(g.destination_domain ?? "?")}`,
           secrets_delete: `Delete the secret ${esc(g.ref ?? "")} from the vault (audit trail preserved).`,
           secrets_rotate: `Rotate the secret ${esc(g.ref ?? "")}: generate a new value and mark the old as rotating.`,
+          run: `Resolve secret refs and inject them as env vars for the spawned command (refs visible in this approval; values stay in the daemon; child stdout/stderr are masked before relay).`,
+          inject_render: `Resolve secret refs and write the rendered template file (refs visible in this approval; values are written to disk at mode 0600 inside $HOME).`,
         }[g.action] || `${esc(g.action)}`;
         const scope = Array.isArray(g.allowed_domains) && g.allowed_domains.length
           ? g.allowed_domains.map(esc).join(", ") : "(none yet — not injectable)";
