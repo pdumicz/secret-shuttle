@@ -4,7 +4,7 @@
 
 **Goal:** Reshape the user-facing CLI surface to match category conventions (op / doppler / infisical) — introduce the `secrets` command group (5 subcommands), rename `doctor` → `status`, move power-user commands under `internal`, add a deprecation layer that keeps old names working with stderr + JSON warnings, ship the new `secret-shuttle help` progressive-disclosure entry, and audit every command's `--help` to include a copy-pasteable example.
 
-**Architecture:** Mostly additive + renames. The new `secrets` group wraps existing list/inspect/generate semantics under a Commander subcommand tree; two genuinely new commands (`delete`, `rotate`) each get a thin daemon endpoint that reuses existing vault and approval infrastructure. `status` reuses doctor's report-gathering logic and adds a `ready` boolean + `next_action` field. `internal` is a hidden Commander command group that absorbs `unlock`, `compare`, `migrate`, `blind`, `capture`, `inject` (V0), and `daemon` subcommands that agents shouldn't see in default help. A small `deprecated(oldName, newName, action)` wrapper handles the dual-channel warning (stderr line + JSON `warning` field). Plus one cleanup: the three pre-handler error paths in `src/daemon/server.ts` get routed through `errorToJson` so every HTTP response emits the §5.6 contract uniformly.
+**Architecture:** Mostly additive + renames. The new `secrets` group wraps existing list/inspect/generate semantics under a Commander subcommand tree; two genuinely new commands (`delete`, `rotate`) each get a thin daemon endpoint that reuses existing vault and approval infrastructure. `status` reuses doctor's report-gathering logic and adds a `ready` boolean + `next_action` field. `internal` is a hidden Commander command group that absorbs `unlock`, `compare`, `migrate`, `blind`, `capture`, and `inject` (V0) — power-user paths agents shouldn't see in default help. **`daemon` stays public** (`daemon start`, `daemon status`, `daemon stop`) because Plan 1's registry hints (`vault_not_initialized`, `daemon_not_running`, etc.) already point at `secret-shuttle daemon start/status` as recovery commands. A small deprecation helper handles the dual-channel warning (stderr line + JSON `warning` field) — and the warning is also injected into the CLI's structured-error JSON when an action throws, so the contract is consistent on success and failure. Plus one cleanup: the three pre-handler error paths in `src/daemon/server.ts` get routed through `errorToJson` so every HTTP response emits the §5.6 contract uniformly.
 
 **Tech Stack:** TypeScript (existing); Commander 12.x (existing); Node 20+ (existing); `node:test`. No new npm dependencies.
 
@@ -23,7 +23,7 @@
 
 These are spec items the plan deliberately defers, with rationale:
 
-- **`secrets set --kind paste` mode** — §5.2 specifies a trusted browser-window paste flow. Requires new UI page + daemon endpoint + polling overlap with Plan 4's tab-reuse work. **Plan 2 ships `secrets set` as a rename of `generate` (random + capture); paste lands in Plan 4.** A `--kind paste` invocation will error with `unsupported_secret_kind` and a hint pointing at Plan 4 once that lands.
+- **`secrets set --kind paste` mode** — §5.2 specifies a trusted browser-window paste flow. Requires new UI page + daemon endpoint + polling overlap with Plan 4's tab-reuse work. **Plan 2 ships `secrets set` as a rename of `generate` (random + capture); paste lands in Plan 4.** A `--kind paste` invocation errors with `unsupported_secret_kind` and copy pointing the caller at random kinds or `reveal-capture`. The error message **does not** mention internal plan numbers — agent-facing copy says what works now, not what's coming.
 - **`secrets rotate` audit-log-driven destination discovery** — spec §5.2 step 3 has the daemon read `audit.jsonl` to find past destinations and synthesize a re-push plan. **Plan 2 ships rotate as: generate new + mark old as `rotating` + return `plan: []` with a `next_action` instructing the caller to re-push and then `secrets delete <old-ref>`.** Audit-log destination synthesis is a follow-up improvement.
 - **Pre-existing `src/daemon/api/routes/unlock-session.ts:90` direct-emit** — Plan 1's final review flagged this. **Deferred to Plan 4** (which already touches the unlock/approval flow). Plan 2 fixes only the pre-handler paths in `server.ts`.
 
@@ -58,7 +58,7 @@ These are spec items the plan deliberately defers, with rationale:
 
 | Path | Change |
 |---|---|
-| `src/cli/index.ts` | Register `secretsCommand`, `statusCommand`, `internalCommand`, `helpCommand`. Remove direct top-level registration of `unlock`, `compare`, `migrate`, `blind`, `capture`, `inject` (V0), `useAsStdin`, and the old `list`/`inspect`/`generate`/`doctor` (they're available via deprecated shims and via `secrets`/`status`). |
+| `src/cli/index.ts` | Register `secretsCommand`, `statusCommand`, `internalCommand`, `helpCommand`. Remove direct top-level registration of `unlock`, `compare`, `migrate`, `blind`, `capture`, `inject` (V0), `useAsStdin`. **Keep `daemon` registered at top level** (lifecycle, public per spec §4.1 + Plan 1 hints reference `daemon start/status`). The old `list`/`inspect`/`generate`/`doctor` remain registered at top level as deprecated shims that delegate to their replacements. |
 | `src/cli/commands/list.ts` | Stays as a deprecated shim — wraps `secretsListCommand` behavior with `deprecated('list','secrets list')`. |
 | `src/cli/commands/inspect.ts` | Deprecated shim → `secrets get-ref`. |
 | `src/cli/commands/generate.ts` | Deprecated shim → `secrets set`. |
@@ -369,7 +369,7 @@ export function secretsSetCommand(): Command {
     .requiredOption("--name <name>", "Logical secret name (e.g. STRIPE_WEBHOOK_SECRET).")
     .requiredOption("--env <environment>", "Environment (e.g. production, preview, local).")
     .option("--source <source>", "Source namespace (e.g. stripe, supabase, local).", "local")
-    .option("--kind <kind>", "Generation kind: random_32_bytes | random_24_chars | ... | paste (Plan 4).", "random_32_bytes")
+    .option("--kind <kind>", "Generation kind: random_32_bytes | random_24_chars | ... (paste not yet supported)", "random_32_bytes")
     .option("--allow-domain <domain>", "Domain allow-list for inject (repeatable).", collectRepeated, [])
     .option("--allow-action <action>", "Allowed action (repeatable).", collectRepeated, [])
     .option("--description <description>", "Free-form description (stored in metadata).")
@@ -377,11 +377,12 @@ export function secretsSetCommand(): Command {
     .option("--approval-id <id>", "Pre-issued approval id (skip the approval window).")
     .option("--no-wait", "Return approval_required without waiting.")
     .action(async (options) => {
-      // Reject paste mode until Plan 4 lands the trusted-UI paste flow.
+      // Paste mode is not yet supported. (User-facing copy must NOT mention
+      // internal plan numbers — say what works now.)
       if (options.kind === "paste") {
         throw new ShuttleError(
           "unsupported_secret_kind",
-          "--kind paste is not yet implemented (planned for Plan 4). Use a random kind or capture from a provider page via reveal-capture.",
+          "--kind paste is not yet supported. Use a random kind (e.g. --kind random_32_bytes) or capture from a provider page with 'reveal-capture'.",
         );
       }
 
@@ -421,7 +422,7 @@ Exit codes:
   0  Success
   2  Usage error (missing required flag, bad --kind, etc.)
   4  Permission (approval denied, vault locked)
-  5  Conflict (ref already exists; re-run with --force, or use 'secrets rotate' once Plan 2 ships rotate)
+  5  Conflict (ref already exists; re-run with --force, or use 'secrets rotate' for explicit rotation)
 `);
 }
 ```
@@ -437,18 +438,29 @@ git commit -m "feat(cli): secrets set — rename of generate; paste mode rejecte
 
 ---
 
-### Task A5: `secrets delete` (new — CLI + daemon endpoint)
+### Task A5: `secrets delete` (new — CLI + daemon endpoint + invariant)
 
 **Files:**
 - Create: `src/daemon/api/routes/secrets-delete.ts`
 - Create: `src/daemon/api/routes/secrets-delete.test.ts`
 - Modify: `src/cli/commands/secrets/delete.ts` (replace placeholder)
 - Modify: `src/cli/commands/secrets/secrets.test.ts`
-- Modify: `src/vault/vault.ts` — add `softDelete(ref)` method
+- Modify: `src/vault/vault.ts` — add `softDelete(ref)`, `findRecord(ref, opts?)`, and update `getSecret(ref)` to filter deleted by default
+- Modify: `src/vault/vault.test.ts` (or wherever existing Vault tests live) — add tests for the invariant
 - Modify: `src/vault/types.ts` — add `deleted_at?: string` to `SecretRecord`
-- Modify: `src/daemon/api/router.ts` (or equivalent route registrar) — register `/v1/secrets/delete`
+- Modify: `src/daemon/api/routes/secrets.ts` — `/v1/secrets/list` accepts `include_deleted: boolean`; `/v1/secrets/inspect` returns `secret_not_found` for deleted refs (consistent with `getSecret`)
+- Modify: `src/cli/commands/secrets/list.ts` — add `--include-deleted` flag
+- Modify: `src/daemon/api/router.ts` — register `/v1/secrets/delete`
+- Modify: `src/daemon/approvals/store.ts` — add `secrets_delete` to the `ApprovalBinding.action` union
+- Modify: `src/daemon/approvals/ui.html` — add human-readable copy for `secrets_delete` action (mirror existing entries)
 
-**Behavior:** Soft delete — set `deleted_at` on the vault record, keep audit trail. `list` filters deleted entries by default; `--include-deleted` shows them. Production refs require approval.
+**Behavior + invariant:**
+
+> **Default reads exclude soft-deleted records.** A record with a non-null `deleted_at` is treated as not present by every operational read path: `getSecret(ref)` throws `secret_not_found`; `/v1/secrets/list` omits them; `/v1/secrets/inspect` returns `secret_not_found`. The single exception is `/v1/secrets/list` when called with `include_deleted: true` (CLI: `secrets list --include-deleted`), which surfaces deleted records for admin / audit inspection.
+
+This invariant is what makes "delete" actually behave like delete. Every downstream code path that consumes a ref (`inject`, `compare`, `template run`, `inject-submit`, `reveal-capture`, `secrets rotate`) goes through `getSecret` — so the invariant propagates automatically once `getSecret` filters.
+
+Production refs require approval, gated through a new `secrets_delete` approval action with matching UI copy.
 
 - [ ] **Step 1: Add `deleted_at?: string` to `SecretRecord`**
 
@@ -463,19 +475,43 @@ export interface SecretRecord {
 
 If `SecretRecord` is defined as a Zod / similar schema, adapt accordingly.
 
-- [ ] **Step 2: Add `softDelete(ref)` to Vault**
+- [ ] **Step 2: Update Vault — `getSecret` filters deleted; add `softDelete` + `listRecords({ includeDeleted })`**
 
-Open `src/vault/vault.ts`. Add this method to the class:
+Open `src/vault/vault.ts`. Note: `read()` is currently `private` (line 144 — verified) and the public read API today is `getSecret(ref)` (line 124). Don't expose `read()` publicly. Add a new public helper `listRecords({ includeDeleted })` for callers that need to enumerate records, and update `getSecret` to treat deleted as missing.
+
+**Modify the existing `getSecret(ref)`:** wherever it currently finds the record and returns it, add a deleted-check:
+
+```typescript
+async getSecret(ref: string): Promise<SecretRecord> {
+  const plaintext = await this.read();
+  const found = plaintext.secrets.find((s) => s.ref === ref);
+  if (found === undefined || found.deleted_at !== undefined) {
+    throw new ShuttleError("secret_not_found", `No secret with ref ${ref}.`);
+  }
+  return found;
+}
+```
+
+(If the current implementation already wraps the lookup in a different shape — e.g. `_lookupByRef` — apply the deleted-check at that boundary, not as a duplicate filter.)
+
+**Add `listRecords` (public):**
+
+```typescript
+async listRecords(opts: { includeDeleted?: boolean } = {}): Promise<readonly SecretRecord[]> {
+  const plaintext = await this.read();
+  if (opts.includeDeleted === true) return plaintext.secrets;
+  return plaintext.secrets.filter((s) => s.deleted_at === undefined);
+}
+```
+
+**Add `softDelete(ref)` (public):**
 
 ```typescript
 async softDelete(ref: string): Promise<{ ref: string; deleted_at: string }> {
   const plaintext = await this.read();
   const idx = plaintext.secrets.findIndex((s) => s.ref === ref);
-  if (idx === -1) {
+  if (idx === -1 || plaintext.secrets[idx].deleted_at !== undefined) {
     throw new ShuttleError("secret_not_found", `No secret with ref ${ref}.`);
-  }
-  if (plaintext.secrets[idx].deleted_at !== undefined) {
-    throw new ShuttleError("secret_not_found", `Secret ${ref} is already deleted.`);
   }
   const now = new Date().toISOString();
   plaintext.secrets[idx] = { ...plaintext.secrets[idx], deleted_at: now };
@@ -483,6 +519,85 @@ async softDelete(ref: string): Promise<{ ref: string; deleted_at: string }> {
   return { ref, deleted_at: now };
 }
 ```
+
+**Update internal callers:** any place inside `vault.ts` that previously iterated `plaintext.secrets` directly for an OPERATIONAL read path (e.g. inject lookups, compare lookups) must use the deleted-aware lookup — typically by going through `getSecret` instead of raw iteration. The two list/inspect routes are the only intentional exceptions.
+
+- [ ] **Step 2b: Add `secrets_delete` to the ApprovalBinding action union**
+
+Open `src/daemon/approvals/store.ts`. Find the `ApprovalBinding` interface (line 12). Extend the `action` union:
+
+```typescript
+export interface ApprovalBinding {
+  action: "inject" | "capture" | "generate" | "compare" | "template" | "blind_end" | "inject_submit" | "reveal_capture" | "secrets_delete" | "secrets_rotate";
+  // ... rest unchanged
+}
+```
+
+(`secrets_rotate` is added preemptively here so Task A6 doesn't have to re-touch this file.)
+
+Run the typecheck after this change to verify nothing else breaks (`npm run typecheck`). Any place that switches over `binding.action` will need a default case or a new branch.
+
+- [ ] **Step 2c: Add UI copy for `secrets_delete` (and `secrets_rotate`) in `ui.html`**
+
+Open `src/daemon/approvals/ui.html`. Find the action-to-human-copy mapping (likely a JS object literal or `switch` statement keyed by `g.action`). Add entries for the two new actions:
+
+```javascript
+// In whichever map / function builds the human-readable text from g.action:
+case "secrets_delete":
+  return "Delete the secret " + g.ref + " from the vault (audit trail preserved).";
+case "secrets_rotate":
+  return "Rotate the secret " + g.ref + ": generate a new value and mark the old as rotating.";
+```
+
+(Read the existing entries to match the file's style; the above is illustrative.)
+
+If `ui.html` is too large or has changed since this plan was written, search for any string like `g.action ===` or `case "inject"` and add the two new entries alongside.
+
+- [ ] **Step 2d: Vault invariant tests**
+
+Open (or create) `src/vault/vault.test.ts`. Append tests:
+
+```typescript
+test("getSecret throws secret_not_found for a soft-deleted ref", async () => {
+  const vault = await setUpTestVault({ secrets: [makeSecret("ss://x/dev/A")] });
+  await vault.softDelete("ss://x/dev/A");
+  await assert.rejects(
+    () => vault.getSecret("ss://x/dev/A"),
+    (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+  );
+});
+
+test("listRecords excludes deleted by default; includeDeleted surfaces them", async () => {
+  const vault = await setUpTestVault({
+    secrets: [makeSecret("ss://x/dev/A"), makeSecret("ss://x/dev/B")],
+  });
+  await vault.softDelete("ss://x/dev/A");
+  const visible = await vault.listRecords();
+  assert.equal(visible.length, 1);
+  assert.equal(visible[0].ref, "ss://x/dev/B");
+  const all = await vault.listRecords({ includeDeleted: true });
+  assert.equal(all.length, 2);
+});
+
+test("softDelete is idempotent against a non-existent ref (throws secret_not_found)", async () => {
+  const vault = await setUpTestVault({ secrets: [] });
+  await assert.rejects(
+    () => vault.softDelete("ss://x/dev/missing"),
+    (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+  );
+});
+
+test("softDelete a second time throws secret_not_found (already deleted)", async () => {
+  const vault = await setUpTestVault({ secrets: [makeSecret("ss://x/dev/A")] });
+  await vault.softDelete("ss://x/dev/A");
+  await assert.rejects(
+    () => vault.softDelete("ss://x/dev/A"),
+    (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+  );
+});
+```
+
+(The test fixtures `setUpTestVault` and `makeSecret` should already exist or be findable in the vault test suite; if not, look at the existing test pattern in `src/vault/vault.test.ts` and follow it.)
 
 - [ ] **Step 3: Daemon endpoint — write failing test**
 
@@ -528,6 +643,7 @@ Create `src/daemon/api/routes/secrets-delete.ts`:
 import type { IncomingMessage } from "node:http";
 import { ShuttleError } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
+import type { ApprovalBinding } from "../../approvals/store.js";
 import type { DaemonServices } from "../../services.js";
 
 interface DeleteBody {
@@ -536,38 +652,37 @@ interface DeleteBody {
   wait_for_approval?: boolean;
 }
 
-export function registerSecretsDeleteRoute(server: { addRoute: (method: "POST", path: string, handler: (req: IncomingMessage, body: unknown) => Promise<unknown>) => void }, services: DaemonServices): void {
-  server.addRoute("POST", "/v1/secrets/delete", async (req, body) => {
+export function registerSecretsDeleteRoute(
+  server: { addRoute: (method: "POST", path: string, handler: (req: IncomingMessage, body: unknown) => Promise<unknown>) => void },
+  services: DaemonServices,
+): void {
+  server.addRoute("POST", "/v1/secrets/delete", async (_req, body) => {
     const b = (body ?? {}) as DeleteBody;
     if (typeof b.ref !== "string" || b.ref.length === 0) {
       throw new ShuttleError("missing_param", "ref is required.");
     }
 
-    // Read the record first to determine environment for approval gating.
-    const vault = await services.vault.read();
-    const record = vault.secrets.find((s) => s.ref === b.ref);
-    if (record === undefined) {
-      throw new ShuttleError("secret_not_found", `No secret with ref ${b.ref}.`);
-    }
+    // Use the public getSecret() — it throws secret_not_found for both
+    // missing AND already-soft-deleted refs (per the invariant). This
+    // doubles as our existence check + production-or-not branch input.
+    const record = await services.vault.getSecret(b.ref);
 
     // Production-gated.
     if (record.environment === "production") {
+      const binding: ApprovalBinding = {
+        action: "secrets_delete",
+        ref: b.ref,
+        environment: "production",
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: null,
+        template_params: null,
+        allowed_domains: record.allowed_domains ?? [],
+      };
       await requireApproval({
         store: services.approvals,
-        binding: {
-          action: "secrets-delete",
-          ref: b.ref,
-          environment: "production",
-          destination_domain: null,
-          target_id: null,
-          field_fingerprint: null,
-          template_id: null,
-          template_params: null,
-          template_binary_path: null,
-          template_binary_sha256: null,
-          allowed_domains: record.allowed_domains ?? [],
-          allowed_actions: record.allowed_actions ?? [],
-        },
+        binding,
         daemonPort: services.daemonPort,
         approvalIdFromClient: b.approval_id,
         waitMs: b.wait_for_approval === false ? 0 : undefined,
@@ -580,7 +695,7 @@ export function registerSecretsDeleteRoute(server: { addRoute: (method: "POST", 
 }
 ```
 
-**Adapt the `requireApproval` binding shape to match the existing `ApprovalBinding` interface — see `src/daemon/approvals/store.ts` for the canonical type. The above is illustrative; align fields with the real interface.**
+**Note on `ApprovalBinding` shape:** the type at `src/daemon/approvals/store.ts:12` has optional fields beyond what's shown above (e.g. `template_binary_path`, `submit_fingerprint`, etc.). Only set the fields that matter for this binding's match semantics; leave the rest unset. The `bindingsMatch` logic in `store.ts` compares using strict-equality on the declared fields and stable-set on `allowed_domains`.
 
 - [ ] **Step 5: Register the route**
 
@@ -737,6 +852,7 @@ Create `src/daemon/api/routes/secrets-rotate.ts`:
 import type { IncomingMessage } from "node:http";
 import { ShuttleError } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
+import type { ApprovalBinding } from "../../approvals/store.js";
 import type { DaemonServices } from "../../services.js";
 
 interface RotateBody {
@@ -750,47 +866,45 @@ export function registerSecretsRotateRoute(
   server: { addRoute: (method: "POST", path: string, handler: (req: IncomingMessage, body: unknown) => Promise<unknown>) => void },
   services: DaemonServices,
 ): void {
-  server.addRoute("POST", "/v1/secrets/rotate", async (req, body) => {
+  server.addRoute("POST", "/v1/secrets/rotate", async (_req, body) => {
     const b = (body ?? {}) as RotateBody;
     if (typeof b.ref !== "string" || b.ref.length === 0) {
       throw new ShuttleError("missing_param", "ref is required.");
     }
 
-    const vault = await services.vault.read();
-    const oldRecord = vault.secrets.find((s) => s.ref === b.ref);
-    if (oldRecord === undefined) {
-      throw new ShuttleError("secret_not_found", `No secret with ref ${b.ref}.`);
-    }
-
+    // Public getSecret enforces the soft-delete invariant: rotating an
+    // already-deleted ref is secret_not_found, which is correct.
+    const oldRecord = await services.vault.getSecret(b.ref);
     const kind = typeof b.kind === "string" ? b.kind : "random_32_bytes";
 
-    // Production-gated.
+    // Production-gated. ApprovalBinding.action gained "secrets_rotate" in
+    // Task A5 step 2b (added alongside secrets_delete for the same TS pass).
     if (oldRecord.environment === "production") {
+      const binding: ApprovalBinding = {
+        action: "secrets_rotate",
+        ref: b.ref,
+        environment: "production",
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: null,
+        template_params: null,
+        allowed_domains: oldRecord.allowed_domains ?? [],
+      };
       await requireApproval({
         store: services.approvals,
-        binding: {
-          action: "secrets-rotate",
-          ref: b.ref,
-          environment: "production",
-          // ... shape matches ApprovalBinding; see store.ts
-          destination_domain: null,
-          target_id: null,
-          field_fingerprint: null,
-          template_id: null,
-          template_params: null,
-          template_binary_path: null,
-          template_binary_sha256: null,
-          allowed_domains: oldRecord.allowed_domains ?? [],
-          allowed_actions: oldRecord.allowed_actions ?? [],
-        },
+        binding,
         daemonPort: services.daemonPort,
         approvalIdFromClient: b.approval_id,
         waitMs: b.wait_for_approval === false ? 0 : undefined,
       });
     }
 
-    // Generate the new secret. The new ref has the same source/env/name as the
-    // old but with a rotation suffix (e.g. -rot-<short-iso>).
+    // Generate the new secret via the same code path the existing
+    // /v1/secrets/generate route uses. If services.vault doesn't expose a
+    // direct `generate` method, look at how `secrets.ts` (the generate
+    // route) builds its record — factor that into a shared helper and call
+    // it from both places. Don't duplicate generation logic.
     const rotSuffix = `-rot-${Date.now().toString(36)}`;
     const newName = oldRecord.name + rotSuffix;
     const newRecord = await services.vault.generate({
@@ -809,14 +923,14 @@ export function registerSecretsRotateRoute(
       rotation_started: true,
       old_ref: b.ref,
       new_ref: newRecord.ref,
-      plan: [], // Plan 2 deliberately empty — audit-log destination synthesis is a follow-up.
+      plan: [], // Empty in this release; destination synthesis from audit log is a follow-up.
       next_action: `Re-push the new secret to all destinations of ${b.ref}, then run: secret-shuttle secrets delete ${b.ref}`,
     };
   });
 }
 ```
 
-**Note:** the call `services.vault.generate(...)` assumes the vault has a `generate` method matching this shape. If the actual method name differs, adapt — the goal is "generate a new secret via the same code path that `secrets set` uses." If no such method exists yet, factor out the generate logic from the existing `POST /v1/secrets/generate` route into `services.vault.generate(...)`.
+**Note on `services.vault.generate(...)`:** the existing daemon `/v1/secrets/generate` route already has the canonical generation code. If `vault` doesn't already expose a `generate` method matching this signature, the implementer must (a) extract the generation logic from `secrets.ts`'s `/v1/secrets/generate` handler into a `Vault.generate(...)` method, (b) call it from both the existing route and from this new rotate route. Don't duplicate generation logic across two files.
 
 - [ ] **Step 5: Register route** — same pattern as Task A5 step 5.
 
@@ -1216,12 +1330,21 @@ export function consumePendingDeprecationWarning(): DeprecationWarning | null {
 }
 ```
 
-- [ ] **Step 4: Wire into `outputJson`**
+- [ ] **Step 4: Wire into `outputJson` (success path)**
 
-Open `src/shared/result.ts`. Modify `outputJson`:
+Open `src/shared/result.ts`. Modify `outputJson`. To avoid the circular import (`shared/result.ts` → `cli/deprecation.ts` → ...), **move `deprecation.ts` into `src/shared/`**:
+
+```bash
+git mv src/cli/deprecation.ts src/shared/deprecation.ts
+git mv src/cli/deprecation.test.ts src/shared/deprecation.test.ts
+```
+
+Update the test file's import to use `./deprecation.js` (it's now a sibling of `result.ts`). Update any other reference once the helper is consumed in Task C3.
+
+Then in `src/shared/result.ts`:
 
 ```typescript
-import { consumePendingDeprecationWarning } from "../cli/deprecation.js";
+import { consumePendingDeprecationWarning } from "./deprecation.js";
 
 export function ok<T extends Record<string, unknown>>(payload: T): T & { ok: true } {
   return {
@@ -1233,7 +1356,6 @@ export function ok<T extends Record<string, unknown>>(payload: T): T & { ok: tru
 export function outputJson(value: unknown): void {
   const warning = consumePendingDeprecationWarning();
   if (warning !== null && typeof value === "object" && value !== null) {
-    // Splice the warning into the output object.
     const enriched = { ...(value as Record<string, unknown>), warning };
     process.stdout.write(`${JSON.stringify(enriched, null, 2)}\n`);
     return;
@@ -1242,15 +1364,74 @@ export function outputJson(value: unknown): void {
 }
 ```
 
-**Caveat:** this creates a circular import (`shared/result.ts` → `cli/deprecation.ts`). If the build complains, move `deprecation.ts` into `src/shared/` and update all imports. Or keep the warning state in `result.ts` itself with the public API exposed there. Pick whichever resolves the cycle cleanly — the test API stays the same.
+- [ ] **Step 5: Also surface the warning in the CLI error path**
 
-- [ ] **Step 5: Run tests — expect PASS**
+The success path of a deprecated command flows through `outputJson` → JSON gets the `warning` field. **The error path doesn't** — `src/cli/index.ts:53–58` catches the thrown error and prints `errorToJson(error)` directly. Without this fix, a `list --json` run that fails because the daemon is down would emit the deprecation stderr line but NOT include the `warning` field in the JSON error.
 
-- [ ] **Step 6: Commit**
+Open `src/cli/index.ts`. The current catch block:
+
+```typescript
+try {
+  await program.parseAsync(process.argv);
+} catch (error) {
+  process.stderr.write(`${JSON.stringify(errorToJson(error), null, 2)}\n`);
+  process.exitCode = error instanceof ShuttleError ? error.exitCode : 1;
+}
+```
+
+Replace with:
+
+```typescript
+import { consumePendingDeprecationWarning } from "../shared/deprecation.js";
+
+// ... later, in the catch:
+try {
+  await program.parseAsync(process.argv);
+} catch (error) {
+  const errJson = errorToJson(error) as Record<string, unknown>;
+  const warning = consumePendingDeprecationWarning();
+  if (warning !== null) {
+    errJson.warning = warning;
+  }
+  process.stderr.write(`${JSON.stringify(errJson, null, 2)}\n`);
+  process.exitCode = error instanceof ShuttleError ? error.exitCode : 1;
+}
+```
+
+This way the contract is consistent: deprecated commands surface the `warning` in JSON output whether they succeed (via `outputJson`) or fail (via the CLI's catch block). The stderr line still fires immediately regardless.
+
+- [ ] **Step 6: Add the error-path test**
+
+Append to `src/shared/deprecation.test.ts`:
+
+```typescript
+test("a deprecation warning set but never consumed by outputJson is cleared by error-path consume", () => {
+  // Simulates a deprecated action that throws before reaching outputJson.
+  // The CLI error handler must consume the pending warning so it doesn't
+  // leak across CLI invocations (in-process tests can reveal this leak).
+  consumePendingDeprecationWarning(); // start clean
+  withPendingDeprecationWarning("list", "secrets list");
+  // (No outputJson call — simulate the throw.)
+  // The CLI error handler would now consume:
+  const w = consumePendingDeprecationWarning();
+  assert.ok(w !== null);
+  assert.equal(w.deprecated, "list");
+  // And a second consume returns null (no leak):
+  assert.equal(consumePendingDeprecationWarning(), null);
+});
+```
+
+- [ ] **Step 7: Run tests — expect PASS**
 
 ```bash
-git add src/cli/deprecation.ts src/cli/deprecation.test.ts src/shared/result.ts
-git commit -m "feat(cli): deprecation helper — stderr line + JSON warning field"
+npm run build && node --test "dist/shared/deprecation.test.js"
+```
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/shared/deprecation.ts src/shared/deprecation.test.ts src/shared/result.ts src/cli/index.ts
+git commit -m "feat(cli): deprecation helper — stderr + JSON warning (success and error paths)"
 ```
 
 ---
@@ -1269,6 +1450,8 @@ The `internal` group registers the following as subcommands (each just re-export
 - `blind` (from `blind.ts`)
 - `capture` (from `capture.ts`)
 - `inject` (from `inject.ts` — the V0 path, distinct from Plan 3's new `inject`)
+
+**`daemon` is NOT moved into `internal`** — `daemon start/status/stop` stay at top level. Plan 1's registry hints (`daemon_not_running`, `daemon_invalid_response`, `daemon_start_timeout`) point at `secret-shuttle daemon start` and `secret-shuttle daemon status` as recovery commands; relocating them under `internal` would break those hints.
 
 Plus the four renamed-into-secrets commands stay as deprecated shims AT TOP LEVEL (so old scripts keep working for one release). The internal group does NOT shadow them.
 
@@ -1390,7 +1573,7 @@ Pattern (for `list.ts`):
 ```typescript
 import { Command } from "commander";
 import { secretsListCommand } from "./secrets/list.js";
-import { withPendingDeprecationWarning } from "../deprecation.js";
+import { withPendingDeprecationWarning } from "../../shared/deprecation.js";
 
 export function listCommand(): Command {
   const wrapped = secretsListCommand();
@@ -1427,7 +1610,7 @@ Create `src/cli/commands/list.test.ts` (or extend if exists):
 ```typescript
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { consumePendingDeprecationWarning } from "../deprecation.js";
+import { consumePendingDeprecationWarning } from "../../shared/deprecation.js";
 
 test("listCommand action triggers a deprecation warning before delegating", async () => {
   // We don't actually want to call the daemon here. The test only checks
@@ -1458,7 +1641,7 @@ For each of `list.ts`, `inspect.ts`, `generate.ts`, `doctor.ts`, follow the patt
 
 ```typescript
 import { Command } from "commander";
-import { withPendingDeprecationWarning } from "../deprecation.js";
+import { withPendingDeprecationWarning } from "../../shared/deprecation.js";
 
 export function inspectCommand(): Command {
   return new Command("inspect")
@@ -1535,7 +1718,8 @@ Create `src/cli/commands/help.test.ts`:
 ```typescript
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderTopLevelHelp } from "./help.js";
+import { Command } from "commander";
+import { renderTopLevelHelp, helpCommand } from "./help.js";
 
 test("renderTopLevelHelp output groups commands and stays under 30 lines", () => {
   const output = renderTopLevelHelp();
@@ -1553,6 +1737,77 @@ test("renderTopLevelHelp output groups commands and stays under 30 lines", () =>
   // Internal commands should NOT appear:
   assert.doesNotMatch(output, /\binternal\b/);
   assert.doesNotMatch(output, /^unlock\b/m); // old top-level deprecated; should NOT be in the curated help
+  // Future-tense commands must NOT appear:
+  assert.doesNotMatch(output, /\brestart\b/); // daemon restart doesn't exist
+});
+
+test("helpCommand resolves and prints help for a top-level command", async () => {
+  // Build a minimal program that mirrors how src/cli/index.ts wires things.
+  const program = new Command("secret-shuttle");
+  const fake = new Command("fake").description("a fake command for testing").option("--flag");
+  program.addCommand(fake);
+  program.addCommand(helpCommand());
+
+  // Capture stdout.
+  const chunks: string[] = [];
+  const origWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: unknown) => {
+    chunks.push(typeof chunk === "string" ? chunk : (chunk as Buffer).toString("utf8"));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    await program.parseAsync(["help", "fake"], { from: "user" });
+  } finally {
+    process.stdout.write = origWrite;
+  }
+  const out = chunks.join("");
+  // Commander's helpInformation() output contains the command's description.
+  assert.match(out, /a fake command for testing/);
+  assert.match(out, /--flag/);
+});
+
+test("helpCommand resolves a space-separated path (e.g. 'secrets list')", async () => {
+  const program = new Command("secret-shuttle");
+  const secrets = new Command("secrets").description("secrets group");
+  secrets.addCommand(new Command("list").description("list secrets"));
+  program.addCommand(secrets);
+  program.addCommand(helpCommand());
+
+  const chunks: string[] = [];
+  const origWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: unknown) => {
+    chunks.push(typeof chunk === "string" ? chunk : (chunk as Buffer).toString("utf8"));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    await program.parseAsync(["help", "secrets", "list"], { from: "user" });
+  } finally {
+    process.stdout.write = origWrite;
+  }
+  const out = chunks.join("");
+  assert.match(out, /list secrets/);
+});
+
+test("helpCommand reports unknown command path on stderr with exit code 1", async () => {
+  const program = new Command("secret-shuttle");
+  program.addCommand(helpCommand());
+
+  const stderrChunks: string[] = [];
+  const origStderr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: unknown) => {
+    stderrChunks.push(typeof chunk === "string" ? chunk : (chunk as Buffer).toString("utf8"));
+    return true;
+  }) as typeof process.stderr.write;
+  const origExit = process.exitCode;
+  try {
+    await program.parseAsync(["help", "nope"], { from: "user" });
+  } finally {
+    process.stderr.write = origStderr;
+  }
+  const err = stderrChunks.join("");
+  assert.match(err, /unknown command 'nope'/);
+  assert.equal(process.exitCode, 1);
+  process.exitCode = origExit;
 });
 ```
 
@@ -1568,6 +1823,9 @@ import { Command } from "commander";
 /**
  * Curated, grouped one-line help. Stays under 30 lines per spec §5.8.
  * Exported as a pure function for unit testing.
+ *
+ * Only lists commands that actually exist today — no future-tense entries.
+ * Re-audit this every time a public command is added or removed.
  */
 export function renderTopLevelHelp(): string {
   return [
@@ -1576,7 +1834,7 @@ export function renderTopLevelHelp(): string {
     "Setup:",
     "  init                        Interactive first-run setup",
     "  status                      Daemon, vault, and browser health",
-    "  daemon start|stop|restart   Lifecycle",
+    "  daemon start|stop|status    Daemon lifecycle",
     "",
     "Secrets:",
     "  secrets list                List stored refs (metadata only)",
@@ -1599,19 +1857,46 @@ export function renderTopLevelHelp(): string {
   ].join("\n");
 }
 
+/**
+ * Resolve a Commander command from the registered program tree by space-
+ * separated path (e.g. "secrets list" → program → 'secrets' → 'list').
+ * Returns null if any segment isn't a registered subcommand.
+ */
+function resolveCommandPath(root: Command, path: string): Command | null {
+  const segments = path.split(/\s+/).filter((s) => s.length > 0);
+  let cur: Command = root;
+  for (const seg of segments) {
+    const next = cur.commands.find((c) => c.name() === seg);
+    if (next === undefined) return null;
+    cur = next;
+  }
+  return cur === root ? null : cur;
+}
+
 export function helpCommand(): Command {
   return new Command("help")
     .description("Show curated command list (or per-command help with: help <command>).")
-    .argument("[command]", "Command name to show detailed help for.")
-    .action(async (commandName: string | undefined) => {
-      if (commandName === undefined) {
+    .argument("[command...]", "Command name (space-separated, e.g. 'secrets list') to show detailed help for.")
+    .action(function (this: Command, commandParts: string[] | undefined) {
+      if (commandParts === undefined || commandParts.length === 0) {
         process.stdout.write(renderTopLevelHelp());
         return;
       }
-      // Per-command help: delegate to `secret-shuttle <command> --help`.
-      // We can't easily call into the same Commander program from inside an
-      // action without leaking state, so we just print a hint.
-      process.stdout.write(`Run: secret-shuttle ${commandName} --help\n`);
+      // 'this' is the help Command instance; its parent is the root program.
+      const root = (this as unknown as { parent: Command | null }).parent;
+      if (root === null) {
+        process.stderr.write("help: cannot resolve root program\n");
+        process.exitCode = 1;
+        return;
+      }
+      const path = commandParts.join(" ");
+      const target = resolveCommandPath(root, path);
+      if (target === null) {
+        process.stderr.write(`help: unknown command '${path}'\n`);
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(target.helpInformation());
     });
 }
 ```
@@ -1892,9 +2177,53 @@ git commit -m "fix(daemon): pre-handler error paths emit full structured-error c
 
 ---
 
-## Part F — Verification + CHANGELOG
+## Part F — Docs + verification + CHANGELOG
 
-### Task F1: Full test suite verification
+### Task F1: Update `docs/cli-reference.md` for Plan 2 surface changes
+
+**Files:**
+- Modify: `docs/cli-reference.md`
+
+A full rewrite of the CLI reference is Plan 5b's job. **Plan 2 ships the minimum to keep the shipped docs honest:** remove the `use-as-stdin` section (since the command is deleted in Task C2), and add a top-of-file banner pointing readers at `secret-shuttle help` + per-command `--help` for current truth.
+
+- [ ] **Step 1: Remove the use-as-stdin section**
+
+`docs/cli-reference.md` has a section `## secret-shuttle use-as-stdin` (verified at line 161). Delete that section header and its body (everything until the next `##` header). Also remove any inline mention of `use-as-stdin` elsewhere in the file:
+
+```bash
+grep -n "use-as-stdin\|use_as_stdin" docs/cli-reference.md
+```
+
+For each hit, either remove the line (if it's a reference to the command itself) or — for `--allow-action use_as_stdin` style mentions — leave a note that `use_as_stdin` remains as a vault-record action value for historical refs but no CLI command emits it.
+
+- [ ] **Step 2: Add a top-of-file banner**
+
+Insert this banner immediately after the file's existing top heading:
+
+```markdown
+> **Note (v0.2.0+):** the CLI surface was reshaped in v0.2.0 — `secrets` is the new namespace for vault primitives (`secrets list/get-ref/set/delete/rotate`), `status` replaces `doctor`, and power-user paths (`unlock`, `compare`, `migrate`, `blind`, `capture`, V0 `inject`) live under `secret-shuttle internal *`. Old names (`list`, `inspect`, `generate`, `doctor`) still work but print a deprecation warning and will be removed in v0.3.0. Run `secret-shuttle help` for the curated public-command index or `secret-shuttle <command> --help` for per-command details — those are the current source of truth while this reference is being updated.
+```
+
+This banner is honest about partial coverage and points readers at the in-CLI help (which IS up-to-date thanks to Tasks D1/D2).
+
+- [ ] **Step 3: Run a spot check**
+
+```bash
+grep -c "use-as-stdin" docs/cli-reference.md
+```
+
+Expected: 0 (or only inside the `--allow-action use_as_stdin` historical note, if you kept that). Either way, no top-level section advertising the deleted command.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add docs/cli-reference.md
+git commit -m "docs(cli-reference): remove use-as-stdin section; add v0.2.0 surface-changes banner"
+```
+
+---
+
+### Task F2: Full test suite verification
 
 - [ ] **Step 1: Run `npm test`**
 
@@ -1933,11 +2262,11 @@ Expected:
 
 - [ ] **Step 5: No-commit step (verification only)**
 
-If all the above are green, proceed to F2.
+If all the above are green, proceed to F3.
 
 ---
 
-### Task F2: CHANGELOG update
+### Task F3: CHANGELOG update
 
 **Files:**
 - Modify: `CHANGELOG.md`
@@ -1972,29 +2301,35 @@ git commit -m "docs(changelog): Plan 2 — secrets group + status + internal + h
 
 ## Self-Review
 
-**1. Spec coverage**
+**1. Spec coverage (revised post-review)**
 
 | Spec §11 deliverable | Task |
 |---|---|
 | `secret-shuttle status` (rename + shape extension) | B1 |
-| `secret-shuttle secrets list` | A1 + A2 |
-| `secret-shuttle secrets get-ref` | A1 + A3 |
-| `secret-shuttle secrets set` (paste mode deferred) | A1 + A4 |
-| `secret-shuttle secrets delete` | A5 |
-| `secret-shuttle secrets rotate` (minimal scope) | A6 |
-| `secret-shuttle help [command]` | D1 |
+| `secret-shuttle secrets list` (incl. `--include-deleted` per soft-delete invariant) | A1 + A2 + A5 |
+| `secret-shuttle secrets get-ref` (deleted refs → secret_not_found) | A1 + A3 + A5 |
+| `secret-shuttle secrets set` (paste mode rejected; not exposing internal plan numbers) | A1 + A4 |
+| `secret-shuttle secrets delete` (soft delete + invariant + public Vault API + approval action + UI copy) | A5 |
+| `secret-shuttle secrets rotate` (minimal scope; uses public `getSecret`; new ApprovalBinding action) | A6 |
+| `secret-shuttle help [command]` (real impl via Commander helpInformation walk; curated list lists only real commands) | D1 |
 | `secret-shuttle internal *` namespace + commands moved | C2 |
+| `daemon` stays public (NOT moved into internal — Plan 1 hints depend on it) | C2 (explicit non-action) |
 | `POST /v1/secrets/delete` | A5 |
 | `POST /v1/secrets/rotate` | A6 |
+| Approval binding union extended (`secrets_delete`, `secrets_rotate`) + UI copy | A5 step 2b + 2c |
 | Every command's `--help` has example in epilog | A2-A6, B1, D2 |
+| Deprecation warning surfaces in BOTH success path (`outputJson`) AND error path (CLI catch block) | C1 (steps 4-6) |
 | Pre-existing HTTP error paths fix (carry-over from Plan 1 A4 review) | E1 |
-| CHANGELOG | F2 |
-| `secret-shuttle init` rewrite | NOT in Plan 2 — deferred to Plan 5a |
+| docs/cli-reference.md: remove use-as-stdin section + v0.2.0 banner | F1 (new) |
+| CHANGELOG | F3 (renumbered) |
+| `secret-shuttle init` rewrite | NOT in Plan 2 — Plan 5a |
 | `POST /v1/keychain/unlock` | NOT in Plan 2 — Plan 5a |
 | `POST /v1/run/resolve` | NOT in Plan 2 — Plan 3 |
 | `POST /v1/inject/render` | NOT in Plan 2 — Plan 3 |
 | `POST /v1/approvals/session` | NOT in Plan 2 — Plan 4 |
 | Single-window tab reuse | NOT in Plan 2 — Plan 4 (§5.10) |
+| `secrets set --kind paste` UI flow | NOT in Plan 2 — Plan 4 (overlaps with tab reuse) |
+| Full `docs/cli-reference.md` rewrite | NOT in Plan 2 — Plan 5b |
 
 **Gaps:** none for Plan 2's scope. Items deferred to Plans 3/4/5 are correctly flagged.
 
@@ -2003,18 +2338,20 @@ git commit -m "docs(changelog): Plan 2 — secrets group + status + internal + h
 - No "TBD", "TODO", "implement later" in the plan.
 - Every code block contains complete code.
 - Every command shows expected output.
+- No user-facing references to internal plan numbers in CLI copy.
 
 **3. Type consistency**
 
 - `secretsCommand` / `secretsListCommand` / `secretsGetRefCommand` / `secretsSetCommand` / `secretsDeleteCommand` / `secretsRotateCommand` named consistently across the dispatcher (A1) and the individual files (A2–A6).
 - `statusCommand`, `internalCommand`, `helpCommand` named consistently.
-- `withPendingDeprecationWarning` / `consumePendingDeprecationWarning` named consistently between deprecation.ts (C1) and result.ts (C1) and shims (C3).
-- `softDelete(ref)` and `markRotating(ref)` on Vault are referenced consistently between vault.ts changes (A5, A6) and the daemon endpoints (A5, A6).
+- `withPendingDeprecationWarning` / `consumePendingDeprecationWarning` named consistently between `src/shared/deprecation.ts` (C1 after the move out of `src/cli/`), `src/shared/result.ts` (C1 step 4), `src/cli/index.ts` (C1 step 5), and the deprecation shims (C3).
+- `softDelete(ref)`, `markRotating(ref)`, `listRecords({ includeDeleted })`, and the updated `getSecret(ref)` on Vault are referenced consistently between vault.ts changes (A5, A6) and the daemon endpoints (A5, A6).
+- `ApprovalBinding.action` union extended with `"secrets_delete"` and `"secrets_rotate"` in A5 step 2b; both endpoints reference exactly those literals.
 - `DoctorReport` type from doctor.ts (preserved) is imported by status.ts (B1) — consistent.
 
 **4. Scope check**
 
-Plan 2 is one coherent CLI-surface migration. Two large units (secrets group + status) plus structural housekeeping (internal namespace, deprecation, help, server.ts fix). 15 tasks, each bite-sized. Estimated execution time: 4–5 hours for a fresh subagent doing one task at a time with TDD + verification.
+Plan 2 is one coherent CLI-surface migration. Two large units (secrets group + status) plus structural housekeeping (internal namespace, deprecation, help, server.ts fix, cli-reference banner). 16 tasks (A1–A6, B1, C1–C3, D1–D2, E1, F1–F3), each bite-sized. Estimated execution time: 5–6 hours for a fresh subagent doing one task at a time with TDD + verification.
 
 ---
 
