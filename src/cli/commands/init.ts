@@ -14,5 +14,11 @@ export function initCommand(): Command {
         raw_secret_read_api: false,
         value_visible_to_agent: false,
       }));
-    });
+    })
+    .addHelpText("after", `
+Examples:
+  # Run the first-run setup (today: a thin daemon-status wrapper; Plan 5a
+  # turns this into a real interactive setup):
+  secret-shuttle init
+`);
 }

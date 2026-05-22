@@ -48,5 +48,35 @@ export function revealCaptureCommand(): Command {
       if (options.approvalId !== undefined) bodyObj.approval_id = options.approvalId;
       const r = await daemonRequest("POST", "/v1/secrets/reveal-capture", bodyObj);
       outputJson(ok(r as Record<string, unknown>));
-    });
+    })
+    .addHelpText("after", `
+Examples:
+  # Click a marked reveal control, capture the value from a pre-marked field,
+  # then hide and auto-resume:
+  secret-shuttle reveal-capture \\
+    --name api_key \\
+    --env preview \\
+    --source stripe \\
+    --reveal-handle reveal-btn \\
+    --field-handle revealed-field
+
+  # Capture by focused-after-reveal (requires a marked container ancestor):
+  secret-shuttle reveal-capture \\
+    --name api_key \\
+    --env preview \\
+    --source stripe \\
+    --reveal-handle reveal-btn \\
+    --container-handle revealed-container \\
+    --capture focused-after-reveal
+
+  # Production secret — at least one --allow-domain is required:
+  secret-shuttle reveal-capture \\
+    --name api_key \\
+    --env production \\
+    --source stripe \\
+    --reveal-handle reveal-btn \\
+    --field-handle revealed-field \\
+    --allow-domain api.stripe.com \\
+    --allow-domain dashboard.stripe.com
+`);
 }

@@ -40,5 +40,26 @@ export function browserCommand(): Command {
       outputJson(ok(r as Record<string, unknown>));
     });
 
+  c.addHelpText("after", `
+Examples:
+  # Start the daemon-controlled browser (default profile "prod-config"):
+  secret-shuttle browser start
+
+  # Start with a specific profile:
+  secret-shuttle browser start --profile dev-config
+
+  # Mark the currently focused element as "api-key-field":
+  secret-shuttle browser mark focused --as api-key-field
+
+  # Mark an element via the inspect overlay (click to pick):
+  secret-shuttle browser mark pick --as submit-button
+
+  # Mark via inspect overlay with a longer wait window:
+  secret-shuttle browser mark pick --as reveal-link --timeout-ms 60000
+
+  # List all currently active marks (metadata only — no secret values):
+  secret-shuttle browser marks
+`);
+
   return c;
 }

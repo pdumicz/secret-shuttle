@@ -96,7 +96,27 @@ export function agentPrintSkillUrl(
 
 export function agentCommand(): Command {
   const agent = new Command("agent")
-    .description("Install the Secret Shuttle agent skill into a project (claude/codex/cursor/copilot) or print the raw skill URL.");
+    .description("Install the Secret Shuttle agent skill into a project (claude/codex/cursor/copilot) or print the raw skill URL.")
+    .addHelpText("after", `
+Examples:
+  # Install the skill into a Claude Code project (writes .claude/skills/secret-shuttle/SKILL.md):
+  secret-shuttle agent install claude
+
+  # Install for Codex (appends a snippet to AGENTS.md):
+  secret-shuttle agent install codex
+
+  # Install for Cursor (writes .cursor/rules/secret-shuttle.mdc):
+  secret-shuttle agent install cursor
+
+  # Install for GitHub Copilot (appends a snippet to .github/copilot-instructions.md):
+  secret-shuttle agent install copilot
+
+  # Print the canonical raw skill URL (paste into any agent that supports a remote skill URL):
+  secret-shuttle agent print-skill-url
+
+  # Print the skill URL for a non-default branch:
+  secret-shuttle agent print-skill-url --branch dev
+`);
 
   agent
     .command("install <target>")

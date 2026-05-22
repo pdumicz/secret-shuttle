@@ -27,5 +27,31 @@ export function injectSubmitCommand(): Command {
       if (options.approvalId !== undefined) bodyObj.approval_id = options.approvalId;
       const r = await daemonRequest("POST", "/v1/secrets/inject-submit", bodyObj);
       outputJson(ok(r as Record<string, unknown>));
-    });
+    })
+    .addHelpText("after", `
+Examples:
+  # Inject a secret into a pre-marked field, click a marked submit button,
+  # verify a success marker appeared, then auto-resume:
+  secret-shuttle inject-submit \\
+    --ref stripe/prod/api_key \\
+    --field-handle api-key-field \\
+    --submit-handle save-button \\
+    --success-text "Saved successfully"
+
+  # Same flow with a longer wait for the success marker:
+  secret-shuttle inject-submit \\
+    --ref stripe/prod/api_key \\
+    --field-handle api-key-field \\
+    --submit-handle save-button \\
+    --success-text "Saved successfully" \\
+    --success-timeout-ms 30000
+
+  # Don't block on user approval (caller handles polling):
+  secret-shuttle inject-submit \\
+    --ref stripe/prod/api_key \\
+    --field-handle api-key-field \\
+    --submit-handle save-button \\
+    --success-text "Saved" \\
+    --no-wait
+`);
 }

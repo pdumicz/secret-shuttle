@@ -31,5 +31,25 @@ export function templateCommand(): Command {
       const r = await daemonRequest("POST", "/v1/templates/run", body);
       outputJson(ok(r as Record<string, unknown>));
     });
+
+  c.addHelpText("after", `
+Examples:
+  # List vetted command templates available to run:
+  secret-shuttle template list
+
+  # Run the Vercel env-add template with a stored ref:
+  secret-shuttle template run vercel-env-add \\
+    --ref stripe/prod/api_key \\
+    --param key=STRIPE_KEY \\
+    --param environment=production
+
+  # Run a template without blocking on approval (caller handles polling):
+  secret-shuttle template run vercel-env-add \\
+    --ref stripe/prod/api_key \\
+    --param key=STRIPE_KEY \\
+    --param environment=production \\
+    --no-wait
+`);
+
   return c;
 }

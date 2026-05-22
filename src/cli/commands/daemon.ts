@@ -15,5 +15,18 @@ export function daemonCommand(): Command {
     await stopDaemon();
     outputJson(ok({ stopped: true }));
   });
+
+  c.addHelpText("after", `
+Examples:
+  # Start the daemon (spawns the local Unix-socket service):
+  secret-shuttle daemon start
+
+  # Check daemon health (port, pid, lifecycle state):
+  secret-shuttle daemon status
+
+  # Stop the daemon:
+  secret-shuttle daemon stop
+`);
+
   return c;
 }
