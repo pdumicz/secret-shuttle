@@ -48,28 +48,33 @@ export function errorToJson(error: unknown): Record<string, unknown> {
   if (error instanceof ShuttleError) {
     return {
       ok: false,
-      error: {
-        code: error.code,
-        message: error.message,
-      },
+      // Legacy nested block — preserved indefinitely for backward compat.
+      error: { code: error.code, message: error.message },
+      // Flat agent-friendly fields per spec §5.6:
+      error_code: error.code,
+      message: error.message,
+      hint: error.hint,
+      exit_code: error.exitCode,
     };
   }
 
   if (error instanceof Error) {
     return {
       ok: false,
-      error: {
-        code: "unexpected_error",
-        message: error.message,
-      },
+      error: { code: "unexpected_error", message: error.message },
+      error_code: "unexpected_error",
+      message: error.message,
+      hint: null,
+      exit_code: 1,
     };
   }
 
   return {
     ok: false,
-    error: {
-      code: "unexpected_error",
-      message: "Unknown error",
-    },
+    error: { code: "unexpected_error", message: "Unknown error" },
+    error_code: "unexpected_error",
+    message: "Unknown error",
+    hint: null,
+    exit_code: 1,
   };
 }

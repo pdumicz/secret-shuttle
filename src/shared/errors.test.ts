@@ -54,3 +54,47 @@ test("ShuttleError unknown code falls back to exitCode 1 / null hint", () => {
   assert.equal(err.exitCode, 1);
   assert.equal(err.hint, null);
 });
+
+import { errorToJson } from "./errors.js";
+
+test("errorToJson on ShuttleError emits BOTH legacy nested block AND flat fields", () => {
+  const err = new ShuttleError("daemon_not_running", "Daemon not running");
+  const j = errorToJson(err) as Record<string, unknown>;
+  // Legacy nested block preserved:
+  assert.equal(j.ok, false);
+  assert.deepEqual(j.error, { code: "daemon_not_running", message: "Daemon not running" });
+  // Flat agent-friendly fields:
+  assert.equal(j.error_code, "daemon_not_running");
+  assert.equal(j.message, "Daemon not running");
+  assert.equal(j.hint, "Run: secret-shuttle daemon start");
+  assert.equal(j.exit_code, 1);
+});
+
+test("errorToJson on ShuttleError with null hint emits hint: null", () => {
+  const err = new ShuttleError("invalid_ref", "Bad ref");
+  const j = errorToJson(err) as Record<string, unknown>;
+  assert.equal(j.hint, null);
+  assert.equal(j.exit_code, 2);
+  assert.equal(j.error_code, "invalid_ref");
+  assert.equal(j.message, "Bad ref");
+});
+
+test("errorToJson on plain Error emits unexpected_error with both shapes", () => {
+  const j = errorToJson(new Error("oh no")) as Record<string, unknown>;
+  assert.equal(j.ok, false);
+  assert.deepEqual(j.error, { code: "unexpected_error", message: "oh no" });
+  assert.equal(j.error_code, "unexpected_error");
+  assert.equal(j.message, "oh no");
+  assert.equal(j.hint, null);
+  assert.equal(j.exit_code, 1);
+});
+
+test("errorToJson on non-Error emits unexpected_error with default message", () => {
+  const j = errorToJson("string thrown") as Record<string, unknown>;
+  assert.equal(j.ok, false);
+  assert.deepEqual(j.error, { code: "unexpected_error", message: "Unknown error" });
+  assert.equal(j.error_code, "unexpected_error");
+  assert.equal(j.message, "Unknown error");
+  assert.equal(j.hint, null);
+  assert.equal(j.exit_code, 1);
+});
