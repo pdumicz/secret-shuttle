@@ -286,3 +286,133 @@ test("unknown route → 404 with full §5.6 error contract", async () => {
     await server.close();
   }
 });
+
+// ─── addRouteStreaming ────────────────────────────────────────────────────────
+
+async function setUpServer(): Promise<{ server: DaemonServer; url: string; token: string; stop: () => Promise<void> }> {
+  const token = "test-token-1234";
+  const server = new DaemonServer({ token });
+  const { port } = await server.listen(0);
+  return {
+    server,
+    url: `http://127.0.0.1:${port}`,
+    token,
+    stop: () => server.close(),
+  };
+}
+
+test("addRouteStreaming: 200 with chunked body when auth + Host valid", async () => {
+  const { server, url, token, stop } = await setUpServer();
+  server.addRouteStreaming("POST", "/v1/test", async (_req, body, res) => {
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/x-ndjson");
+    res.flushHeaders();
+    res.write(JSON.stringify({ chunk: 1, echo: body }) + "\n");
+    res.write(JSON.stringify({ chunk: 2 }) + "\n");
+    res.end();
+  });
+  try {
+    const r = await fetch(`${url}/v1/test`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ hello: "world" }),
+    });
+    assert.equal(r.status, 200);
+    const text = await r.text();
+    const lines = text.split("\n").filter((l) => l.length > 0);
+    assert.equal(lines.length, 2);
+    assert.deepEqual(JSON.parse(lines[0]!), { chunk: 1, echo: { hello: "world" } });
+    assert.deepEqual(JSON.parse(lines[1]!), { chunk: 2 });
+  } finally {
+    await stop();
+  }
+});
+
+test("addRouteStreaming: missing bearer token → 401 with structured error (handler NOT invoked)", async () => {
+  const { server, url, stop } = await setUpServer();
+  let handlerCalls = 0;
+  server.addRouteStreaming("POST", "/v1/test", async (_req, _body, res) => {
+    handlerCalls += 1;
+    res.statusCode = 200;
+    res.end();
+  });
+  try {
+    const r = await fetch(`${url}/v1/test`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(r.status, 401);
+    const json = await r.json() as Record<string, unknown>;
+    assert.equal((json.error as { code: string }).code, "unauthorized");
+    assert.equal(json.error_code, "unauthorized");
+    assert.equal(handlerCalls, 0, "handler MUST NOT be invoked when bearer missing");
+  } finally {
+    await stop();
+  }
+});
+
+test("addRouteStreaming: bad Host header → 400 with structured error", async () => {
+  const { server, url, token, stop } = await setUpServer();
+  let handlerCalls = 0;
+  server.addRouteStreaming("POST", "/v1/test", async (_req, _body, res) => {
+    handlerCalls += 1;
+    res.statusCode = 200;
+    res.end();
+  });
+  try {
+    // The fetch API doesn't easily let us spoof Host, so test by hand-crafting a
+    // request via net.connect — or use a node:http client and override headers.
+    const { request } = await import("node:http");
+    const port = Number(new URL(url).port);
+    const responseBody: string = await new Promise((resolve, reject) => {
+      const req = request({
+        host: "127.0.0.1",
+        port,
+        method: "POST",
+        path: "/v1/test",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Host: "evil.example.com:1234",
+          "content-type": "application/json",
+        },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      });
+      req.on("error", reject);
+      req.write(JSON.stringify({}));
+      req.end();
+    });
+    const json = JSON.parse(responseBody) as Record<string, unknown>;
+    assert.equal((json.error as { code: string }).code, "bad_host");
+    assert.equal(json.error_code, "bad_host");
+    assert.equal(handlerCalls, 0, "handler MUST NOT be invoked when Host bad");
+  } finally {
+    await stop();
+  }
+});
+
+test("addRouteStreaming: oversize body → request_too_large (handler NOT invoked)", async () => {
+  const { server, url, token, stop } = await setUpServer();
+  let handlerCalls = 0;
+  server.addRouteStreaming("POST", "/v1/test", async (_req, _body, res) => {
+    handlerCalls += 1;
+    res.statusCode = 200;
+    res.end();
+  });
+  try {
+    const huge = "x".repeat(2 * 1024 * 1024); // 2 MB > 1 MB cap
+    const r = await fetch(`${url}/v1/test`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ blob: huge }),
+    });
+    const json = await r.json() as Record<string, unknown>;
+    assert.equal((json.error as { code: string }).code, "request_too_large");
+    assert.equal(handlerCalls, 0, "handler MUST NOT be invoked when body oversize");
+  } finally {
+    await stop();
+  }
+});

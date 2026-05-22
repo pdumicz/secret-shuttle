@@ -4,6 +4,11 @@ import { ShuttleError, errorToJson } from "../shared/errors.js";
 
 type RouteHandler = (req: IncomingMessage, body: unknown) => Promise<unknown> | unknown;
 type RawHandler = (req: IncomingMessage, body: unknown, res: ServerResponse) => Promise<void> | void;
+type StreamingHandler = (
+  req: IncomingMessage,
+  body: unknown,
+  res: ServerResponse,
+) => Promise<void> | void;
 type Method = "GET" | "POST" | "DELETE";
 
 export interface DaemonServerOptions {
@@ -17,6 +22,7 @@ export class DaemonServer {
   private readonly token: string;
   private readonly routes = new Map<string, RouteHandler>();
   private readonly rawRoutes: { method: Method; pattern: RegExp; handler: RawHandler }[] = [];
+  private readonly streamingRoutes = new Map<string, StreamingHandler>();
   private server: Server | null = null;
   private port = 0;
 
@@ -36,6 +42,19 @@ export class DaemonServer {
    */
   addRouteRaw(method: Method, pattern: RegExp, handler: RawHandler): void {
     this.rawRoutes.push({ method, pattern, handler });
+  }
+
+  /**
+   * Register a route whose handler controls the response body (e.g. for chunked
+   * line-delimited JSON streaming). Identical Host + bearer-token + 1 MB body
+   * cap to addRoute — auth runs BEFORE the handler is invoked, so an unauthorized
+   * request never reaches `spawn()` or any other side-effectful code.
+   *
+   * Use this for /v1/run/resolve and similar endpoints. addRouteRaw remains for
+   * UI routes that authenticate via a per-URL token (see ui-server.ts).
+   */
+  addRouteStreaming(method: Method, path: string, handler: StreamingHandler): void {
+    this.streamingRoutes.set(`${method} ${path}`, handler);
   }
 
   async listen(port = 0): Promise<{ port: number }> {
@@ -102,6 +121,14 @@ export class DaemonServer {
       res.statusCode = 401;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(payload));
+      return;
+    }
+
+    const streamingKey = `${req.method ?? "GET"} ${urlPath}`;
+    const streamingHandler = this.streamingRoutes.get(streamingKey);
+    if (streamingHandler !== undefined) {
+      const body = req.method === "GET" ? null : await readJsonBody(req);
+      await streamingHandler(req, body, res);
       return;
     }
 
