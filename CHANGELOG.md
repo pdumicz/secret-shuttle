@@ -13,3 +13,19 @@
 
 ### Security
 - Deliberately did NOT ship a `security`-CLI-based macOS keychain implementation. The `add-generic-password -w <pw>` form puts the password in argv (recoverable via `ps`), contradicting Secret Shuttle's vault-key-never-leaks guarantee. Plan 5a replaces the stub with a native-module adapter that accepts the password through memory.
+
+### Added — Plan 2 (CLI surface)
+- `secrets` command group (`list` / `get-ref` / `set` / `delete` / `rotate`). `set` is a rename of `generate`; `--kind paste` is reserved and rejected with a deferral hint. `delete` is a soft-delete with audit trail; the soft-delete invariant is enforced inside `Vault` so every operational consumer (`inject`, `compare`, `template run`, `inject-submit`, `reveal-capture`) inherits it without per-caller changes. `rotate` generates a new ref and marks the old one as `rotating`; the destination re-push plan is empty in this release (audit-log destination synthesis is a follow-up improvement).
+- `status` command (rename of `doctor`) emits `ready: boolean` + `next_action: string | null` at the top level so agents can drive a state machine without inspecting nested fields. Existing `doctor` text formatting is preserved inside the `report` field.
+- `internal` command group (hidden from default `--help`) absorbs the power-user / deprecated paths: `compare`, `blind`, `capture`, and the V0 `inject`. **`daemon`, `unlock`, and `migrate` stay top-level** — they're the recovery commands surfaced by structured-error hints and `status.next_action`.
+- `secret-shuttle help` curated progressive-disclosure entry — grouped one-line index of public commands, ≤30 lines. `help <command>` resolves space-separated command paths (e.g. `help secrets list`) via Commander's `helpInformation()`.
+- Per-command `--help` epilogs with copy-pasteable examples for every public command.
+
+### Changed
+- Old top-level commands `list`, `inspect`, `generate`, `doctor` remain available as deprecated shims that delegate to their `secrets *` / `status` replacement. JSON output (stdout on success, stderr on failure) always carries a `warning: { message, deprecated, replacement }` field. On success, stderr additionally gets a human-readable `[deprecated] ...` line; on failure, stderr is a single parseable JSON document — no separate human line. Scheduled for removal in v0.3.0.
+- `use-as-stdin` command removed (deprecated in 0.1.x; replaced by `template run`).
+- `src/daemon/server.ts` pre-handler error paths (`bad_host`, `unauthorized`, `not_found`) now emit the full §5.6 structured-error contract (nested + flat fields) instead of the partial legacy shape.
+
+### Security
+- `src/daemon/approvals/open-url.ts`: changed the default behavior of approval URL surfacing — instead of spawning a browser tab per call (which accumulated tabs without bound during interactive sessions and test runs), the URL is now printed to stderr. Auto-open is opt-in via `SECRET_SHUTTLE_OPEN_URL=1`. The legacy kill switch `SECRET_SHUTTLE_NO_OPEN_URL=1` continues to make `openUrl` fully silent. Plan 4's tab-reuse work will introduce a proper single-window approval UI; this patch stops the bleeding in the interim.
+- Soft-delete invariant enforced in `Vault`: default reads from `getSecret` / `inspect` / `list` exclude soft-deleted records. The only opt-in is `list({ includeDeleted: true })` which returns `AgentSecretMetadata[]` (no `value` field, ever — wire-level test pins this).
