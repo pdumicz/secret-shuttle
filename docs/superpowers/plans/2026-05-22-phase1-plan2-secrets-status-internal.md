@@ -649,10 +649,15 @@ test("/v1/secrets/list with include_deleted: true returns metadata only (no valu
   // Set up an ephemeral daemon with a vault containing one active + one deleted secret.
   // (Use the existing test harness — withDaemonAndVault or similar.)
   // ...
-  const r = await daemonRequest("POST", "/v1/secrets/list", { include_deleted: true });
-  const items = (r as { items?: unknown[] }).items ?? [];
-  assert.ok(items.length >= 2, "should include both active and deleted entries");
-  for (const item of items) {
+  const r = await daemonRequest("POST", "/v1/secrets/list", { include_deleted: true }) as {
+    secrets: unknown[];
+    value_visible_to_agent: boolean;
+  };
+
+  // Route shape per src/daemon/api/routes/secrets.ts:67 is { secrets, value_visible_to_agent: false }.
+  assert.equal(r.value_visible_to_agent, false, "list endpoint contract: value is never visible to agents");
+  assert.ok(r.secrets.length >= 2, "should include both active and deleted entries");
+  for (const item of r.secrets) {
     assert.equal((item as { value?: string }).value, undefined,
       "the list endpoint must never serialize value, even with include_deleted");
   }
@@ -1349,9 +1354,14 @@ git commit -m "feat(cli): status — rename of doctor with ready boolean + next_
 - Create: `src/cli/deprecation.ts`
 - Create: `src/cli/deprecation.test.ts`
 
-**Behavior:** wraps a Commander action so that invoking the deprecated command:
-1. Writes `[deprecated] <old> is now <new>. Will be removed in v0.3.0.` to stderr.
-2. If the action's output flows through `outputJson`, includes a `warning: { message, deprecated, replacement }` object at top level.
+**Behavior:** wraps a Commander action so that invoking the deprecated command sets a process-wide pending warning. Where the warning surfaces depends on outcome:
+
+| Outcome | stderr | stdout |
+|---|---|---|
+| Success (action reaches `outputJson`) | Human line: `[deprecated] '<old>' is now '<new>'. Will be removed in v0.3.0.` | JSON includes top-level `warning: { message, deprecated, replacement }` |
+| Failure (action throws before `outputJson`) | Single JSON document — error JSON with the same `warning` field spliced in. **No separate human line.** | (empty) |
+
+This split keeps stderr machine-parseable on failure (a single JSON document) while still showing humans the deprecation line on success. The setter itself writes nothing — only the two consumers (`outputJson` for success, CLI catch for failure) emit anything.
 
 Implementation strategy: `outputJson` already exists in `src/shared/result.ts`. We extend it (or add `outputJsonWithWarning`) to accept an optional warning. The `deprecated()` helper sets a context flag that `outputJson` reads.
 
@@ -1498,7 +1508,7 @@ export function outputJson(value: unknown): void {
 
 - [ ] **Step 5: Also surface the warning in the CLI error path**
 
-The success path of a deprecated command flows through `outputJson` → JSON gets the `warning` field. **The error path doesn't** — `src/cli/index.ts:53–58` catches the thrown error and prints `errorToJson(error)` directly. Without this fix, a `list --json` run that fails because the daemon is down would emit the deprecation stderr line but NOT include the `warning` field in the JSON error.
+The success path of a deprecated command flows through `outputJson` → JSON gets the `warning` field and stderr gets the human line. **The error path needs a parallel consumer** — `src/cli/index.ts:53–58` catches the thrown error and prints `errorToJson(error)` directly. Without this fix, a `list --json` run that fails (e.g. because the daemon is down) would emit the JSON error to stderr without the `warning` field — and the pending warning would leak across the process boundary. The fix splices `warning` into the error JSON and clears the pending state, so the contract holds: stderr is exactly one JSON document on failure, containing the warning.
 
 Open `src/cli/index.ts`. The current catch block:
 
@@ -1530,7 +1540,7 @@ try {
 }
 ```
 
-This way the contract is consistent: deprecated commands surface the `warning` in JSON output whether they succeed (via `outputJson`) or fail (via the CLI's catch block). The stderr line still fires immediately regardless.
+This way the contract is consistent on the JSON surface: deprecated commands always surface the `warning` field in JSON output, whether they succeed (`outputJson` splices it into stdout) or fail (the CLI's catch block splices it into stderr). The human stderr line fires ONLY on success — the failure path keeps stderr as a single parseable JSON document.
 
 - [ ] **Step 6: Add the error-path test**
 
@@ -1894,9 +1904,19 @@ test("renderTopLevelHelp output groups commands and stays under 30 lines", () =>
   assert.match(output, /\binit\b/);
   assert.match(output, /\bstatus\b/);
   assert.match(output, /\bsecrets list\b/);
-  // Internal commands should NOT appear:
+  // Public recovery commands MUST appear — registry hints + status.next_action
+  // emit these as bare top-level commands, so the curated help has to surface
+  // them too, or agents reading help will look for the wrong place.
+  assert.match(output, /^\s*unlock\b/m);
+  assert.match(output, /\bmigrate secure-vault\b/);
+  assert.match(output, /\bdaemon start\|stop\|status\b/);
+  // Internal namespace should NOT appear in curated help:
   assert.doesNotMatch(output, /\binternal\b/);
-  assert.doesNotMatch(output, /^unlock\b/m); // old top-level deprecated; should NOT be in the curated help
+  // Deprecated names should NOT appear (they're shims, not the curated path):
+  assert.doesNotMatch(output, /^\s{2}list\b/m);    // old name; curated says "secrets list"
+  assert.doesNotMatch(output, /^\s{2}inspect\b/m); // old name; curated says "secrets get-ref"
+  assert.doesNotMatch(output, /^\s{2}generate\b/m); // old name; curated says "secrets set"
+  assert.doesNotMatch(output, /^\s{2}doctor\b/m);   // old name; curated says "status"
   // Future-tense commands must NOT appear:
   assert.doesNotMatch(output, /\brestart\b/); // daemon restart doesn't exist
 });
@@ -1991,10 +2011,12 @@ export function renderTopLevelHelp(): string {
   return [
     "secret-shuttle — Let AI agents use secrets without seeing them.",
     "",
-    "Setup:",
+    "Setup & recovery:",
     "  init                        Interactive first-run setup",
     "  status                      Daemon, vault, and browser health",
     "  daemon start|stop|status    Daemon lifecycle",
+    "  unlock                      Unlock the vault (passphrase via browser window)",
+    "  migrate secure-vault        Migrate a legacy vault to the envelope format",
     "",
     "Secrets:",
     "  secrets list                List stored refs (metadata only)",
@@ -2407,18 +2429,26 @@ Run each:
 node dist/cli/index.js help
 node dist/cli/index.js status --json   # daemon may not be running; that's fine, just check shape
 node dist/cli/index.js secrets list --json
-node dist/cli/index.js list --json 2>&1    # should emit deprecation warning to stderr + JSON warning field
-node dist/cli/index.js internal --help      # should list 6 power-user commands
+# Success scenario: deprecation human line on stderr + warning field in stdout JSON.
+node dist/cli/index.js list --json
+# Failure scenario: daemon stopped → stderr is a SINGLE JSON document with warning field.
+node dist/cli/index.js daemon stop 2>/dev/null || true
+node dist/cli/index.js list --json 2>/tmp/stderr.log 1>/dev/null
+python3 -c "import json; print(json.load(open('/tmp/stderr.log')).get('warning'))"
+
+node dist/cli/index.js internal --help      # should list 4 power-user commands
 node dist/cli/index.js --help              # should NOT show 'internal' in command list
+node dist/cli/index.js --help              # SHOULD show unlock, migrate, daemon at top level
 ```
 
 Expected:
-- `help` prints the curated grouped list.
+- `help` prints the curated grouped list (init / status / daemon / unlock / migrate visible under Setup; secrets group; provider integration; agent commands).
 - `status --json` prints `{ ok: true, ready, next_action, report }`.
 - `secrets list` succeeds (or fails with the daemon-not-running structured error).
-- `list` succeeds with a `[deprecated] 'list' is now 'secrets list'. Will be removed in v0.3.0.` to stderr AND a `warning` field in the JSON output.
-- `internal --help` shows the 6 commands.
-- Top-level `--help` doesn't include `internal`.
+- `list --json` on success: `[deprecated] 'list' is now 'secrets list'. ...` on stderr + `warning` field in stdout JSON.
+- `list --json` on failure: stderr is a single parseable JSON document with `error_code` AND `warning` fields; no separate stderr human line.
+- `internal --help` shows exactly **four** commands: `compare`, `blind`, `capture`, `inject`.
+- Top-level `--help` doesn't include `internal` but does include `unlock`, `migrate`, `daemon`.
 
 - [ ] **Step 5: No-commit step (verification only)**
 
