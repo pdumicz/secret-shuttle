@@ -308,3 +308,113 @@ test("generate produces a SecretRecord with a value and is callable without goin
     assert.equal(rec.environment, "development");
   });
 });
+
+// ---------------------------------------------------------------------------
+// resolveRefs test helpers
+// ---------------------------------------------------------------------------
+
+/** Parse a ref like "ss://source/env/NAME" into upsert fields.
+ *  Handles canonical env abbreviations (dev, prod, stg, test). */
+function makeSecret(ref: string): { name: string; environment: string; source: string; value: string } {
+  const m = ref.match(/^ss:\/\/([^/]+)\/([^/]+)\/(.+)$/);
+  if (!m) throw new Error(`makeSecret: cannot parse ref "${ref}"`);
+  const [, source, env, name] = m as [string, string, string, string];
+  const envMap: Record<string, string> = {
+    dev: "development",
+    prod: "production",
+    stg: "staging",
+    test: "test",
+  };
+  return { name, environment: envMap[env] ?? env, source, value: `val-${name}` };
+}
+
+/** Create a fresh ephemeral vault, seed it with the given secrets, return
+ *  the Vault instance. The caller is responsible for cleanup — use inside
+ *  try/finally or pair with afterEach. For tests that stay short, embed in
+ *  the test body directly (see usages below). */
+async function setUpTestVault(opts: {
+  secrets: ReturnType<typeof makeSecret>[];
+}): Promise<{ vault: Vault; cleanup: () => Promise<void> }> {
+  const home = await mkdtemp(path.join(os.tmpdir(), "secret-shuttle-resolvefs-"));
+  const originalHome = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  const key = randomBytes(32);
+  const vault = new Vault(() => key);
+  await vault.ensureInitialized();
+  for (const s of opts.secrets) {
+    await vault.upsertSecret({ ...s, allowedDomains: ["example.com"] });
+  }
+  return {
+    vault,
+    cleanup: async () => {
+      if (originalHome === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+      else process.env.SECRET_SHUTTLE_HOME = originalHome;
+      await rm(home, { recursive: true, force: true });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// resolveRefs tests
+// ---------------------------------------------------------------------------
+
+test("Vault.resolveRefs returns map of ref→record for active secrets", async () => {
+  const { vault, cleanup } = await setUpTestVault({
+    secrets: [makeSecret("ss://x/dev/A"), makeSecret("ss://x/dev/B")],
+  });
+  try {
+    const refs = ["ss://x/dev/A", "ss://x/dev/B"];
+    const result = await vault.resolveRefs(refs);
+    assert.equal(result.size, 2);
+    assert.equal(result.get("ss://x/dev/A")!.ref, "ss://x/dev/A");
+    assert.equal(typeof result.get("ss://x/dev/A")!.value, "string");
+    assert.ok(Array.isArray(result.get("ss://x/dev/A")!.allowed_actions));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Vault.resolveRefs dedupes repeated refs", async () => {
+  const { vault, cleanup } = await setUpTestVault({ secrets: [makeSecret("ss://x/dev/A")] });
+  try {
+    const result = await vault.resolveRefs(["ss://x/dev/A", "ss://x/dev/A", "ss://x/dev/A"]);
+    assert.equal(result.size, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Vault.resolveRefs throws secret_not_found for a soft-deleted ref (invariant propagates)", async () => {
+  const { vault, cleanup } = await setUpTestVault({ secrets: [makeSecret("ss://x/dev/A")] });
+  try {
+    await vault.softDelete("ss://x/dev/A");
+    await assert.rejects(
+      () => vault.resolveRefs(["ss://x/dev/A"]),
+      (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Vault.resolveRefs throws secret_not_found for a missing ref", async () => {
+  const { vault, cleanup } = await setUpTestVault({ secrets: [] });
+  try {
+    await assert.rejects(
+      () => vault.resolveRefs(["ss://x/dev/A"]),
+      (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Vault.resolveRefs empty input returns empty map", async () => {
+  const { vault, cleanup } = await setUpTestVault({ secrets: [] });
+  try {
+    const result = await vault.resolveRefs([]);
+    assert.equal(result.size, 0);
+  } finally {
+    await cleanup();
+  }
+});

@@ -241,6 +241,23 @@ export class Vault {
     return dirty;
   }
 
+  /**
+   * Resolve a list of ss:// refs to a Map<ref, SecretRecord>. Uses the
+   * deleted-aware getSecret() so refs that have been soft-deleted throw
+   * secret_not_found. Single-pass — fails fast on the first missing ref.
+   * Dedupes input. Callers should do assertSecretActionAllowed + markUsed
+   * on each returned record.
+   */
+  async resolveRefs(refs: readonly string[]): Promise<Map<string, SecretRecord>> {
+    const result = new Map<string, SecretRecord>();
+    for (const ref of refs) {
+      if (result.has(ref)) continue; // dedupe
+      const record = await this.getSecret(ref);
+      result.set(ref, record);
+    }
+    return result;
+  }
+
   /** Daemon-internal: the per-vault fingerprint HMAC key (never exposed to agents). */
   async fingerprintKey(): Promise<Buffer> {
     const pt = await this.read();
