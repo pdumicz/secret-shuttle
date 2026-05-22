@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { ensureShuttleHome, fileExists, getShuttlePaths, readJsonFile, writeJsonFileAtomic } from "../shared/config.js";
 import { ShuttleError } from "../shared/errors.js";
 import { buildSecretRef, canonicalEnvironment } from "../shared/refs.js";
+import { generateSecretValue } from "../daemon/helpers/generate-value.js";
 import { decryptVault, encryptVault } from "./crypto.js";
 import { fingerprintSecret, isLegacyFingerprint } from "./fingerprints.js";
 import type {
@@ -152,12 +153,57 @@ export class Vault {
   async markUsed(ref: string): Promise<void> {
     const plaintext = await this.read();
     const secret = plaintext.secrets.find((candidate) => candidate.ref === ref);
-    if (secret === undefined) {
+    if (secret === undefined || secret.deleted_at !== undefined) {
       throw new ShuttleError("secret_not_found", `Secret ${ref} was not found.`);
     }
     secret.last_used_at = new Date().toISOString();
     secret.updated_at = secret.updated_at;
     await this.write(plaintext);
+  }
+
+  async markRotating(ref: string): Promise<void> {
+    const plaintext = await this.read();
+    const idx = plaintext.secrets.findIndex((s) => s.ref === ref);
+    if (idx === -1 || plaintext.secrets[idx]!.deleted_at !== undefined) {
+      throw new ShuttleError("secret_not_found", `Secret ${ref} was not found.`);
+    }
+    plaintext.secrets[idx] = { ...plaintext.secrets[idx]!, rotating: true };
+    await this.write(plaintext);
+  }
+
+  /**
+   * Generate a new secret value of the given kind and upsert it. Used by both
+   * the /v1/secrets/generate route (after approval) and /v1/secrets/rotate
+   * (after secrets_rotate approval) to avoid duplicating value-generation logic.
+   * Approval enforcement is the caller's responsibility — this method does not
+   * itself require approval.
+   */
+  async generate(input: {
+    name: string;
+    environment: string;
+    source: string;
+    kind: string;
+    allowed_domains: string[];
+    allowed_actions?: SecretAction[];
+    description?: string;
+    force?: boolean;
+  }): Promise<SecretRecord> {
+    const value = generateSecretValue(input.kind);
+    await this.upsertSecret({
+      name: input.name,
+      environment: input.environment,
+      source: input.source,
+      value,
+      allowedDomains: input.allowed_domains,
+      ...(input.allowed_actions !== undefined ? { allowedActions: input.allowed_actions } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.force !== undefined ? { force: input.force } : {}),
+    });
+    // Return the canonical stored record (with `ref`) — read it back from the
+    // freshly persisted vault to keep generate/rotate code paths uniform.
+    const env = canonicalEnvironment(input.environment);
+    const ref = buildSecretRef(input.source, env, input.name);
+    return this.getSecret(ref);
   }
 
   private async read(): Promise<VaultPlaintext> {

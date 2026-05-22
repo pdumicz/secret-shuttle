@@ -7,6 +7,7 @@ import { registerStatus } from "./routes/status.js";
 import { registerBlind } from "./routes/blind.js";
 import { registerSecrets } from "./routes/secrets.js";
 import { registerSecretsDeleteRoute } from "./routes/secrets-delete.js";
+import { registerSecretsRotateRoute } from "./routes/secrets-rotate.js";
 import { registerInjectSubmit } from "./routes/inject-submit.js";
 import { registerRevealCapture } from "./routes/reveal-capture.js";
 import { registerApprovals } from "./routes/approvals.js";
@@ -28,6 +29,7 @@ export function registerRoutes(
   registerBlind(server, services, daemonPortRef);
   registerSecrets(server, services, daemonPortRef);
   registerSecretsDeleteRoute(server, services, daemonPortRef);
+  registerSecretsRotateRoute(server, services, daemonPortRef);
   registerInjectSubmit(server, services, daemonPortRef);
   registerRevealCapture(server, services, daemonPortRef);
   registerApprovals(server, services);

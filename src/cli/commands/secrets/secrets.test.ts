@@ -56,3 +56,14 @@ test("secrets delete takes a positional <ref> argument", () => {
     .registeredArguments.map((a) => a._name);
   assert.deepEqual(argNames, ["ref"]);
 });
+
+test("secrets rotate takes a positional <ref> argument and --kind option", () => {
+  const cmd = secretsCommand();
+  const rot = cmd.commands.find((c) => c.name() === "rotate");
+  assert.ok(rot);
+  const argNames = (rot as unknown as { registeredArguments: { _name: string }[] })
+    .registeredArguments.map((a) => a._name);
+  assert.deepEqual(argNames, ["ref"]);
+  const optionNames = rot.options.map((o) => o.long);
+  assert.ok(optionNames.includes("--kind"));
+});

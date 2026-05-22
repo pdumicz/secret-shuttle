@@ -243,3 +243,68 @@ test("softDelete a second time throws secret_not_found (already deleted)", async
     },
   );
 });
+
+test("markUsed throws secret_not_found for a soft-deleted ref (soft-delete invariant)", async () => {
+  await withVault(
+    [{ name: "A", environment: "development", source: "x", value: "val-A" }],
+    async (vault) => {
+      await vault.softDelete("ss://x/dev/A");
+      await assert.rejects(
+        () => vault.markUsed("ss://x/dev/A"),
+        (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+      );
+    },
+  );
+});
+
+test("markRotating sets rotating:true on the underlying SecretRecord; not exposed via metadata APIs", async () => {
+  await withVault(
+    [{ name: "A", environment: "development", source: "x", value: "val-A" }],
+    async (vault) => {
+      await vault.markRotating("ss://x/dev/A");
+      const record = await vault.getSecret("ss://x/dev/A");
+      assert.equal(record.rotating, true);
+      // AgentSecretMetadata must NOT carry `rotating` — operational state only.
+      const meta = await vault.inspect("ss://x/dev/A");
+      assert.equal((meta as unknown as { rotating?: boolean }).rotating, undefined);
+    },
+  );
+});
+
+test("markRotating throws secret_not_found for a missing ref", async () => {
+  await withVault([], async (vault) => {
+    await assert.rejects(
+      () => vault.markRotating("ss://x/dev/missing"),
+      (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+    );
+  });
+});
+
+test("markRotating throws secret_not_found for a soft-deleted ref (soft-delete invariant)", async () => {
+  await withVault(
+    [{ name: "A", environment: "development", source: "x", value: "val-A" }],
+    async (vault) => {
+      await vault.softDelete("ss://x/dev/A");
+      await assert.rejects(
+        () => vault.markRotating("ss://x/dev/A"),
+        (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+      );
+    },
+  );
+});
+
+test("generate produces a SecretRecord with a value and is callable without going through approvals", async () => {
+  await withVault([], async (vault) => {
+    const rec = await vault.generate({
+      name: "GEN_NEW",
+      environment: "development",
+      source: "stripe",
+      kind: "random_32_bytes",
+      allowed_domains: ["example.com"],
+    });
+    assert.equal(rec.ref, "ss://stripe/dev/GEN_NEW");
+    assert.equal(typeof rec.value, "string");
+    assert.ok(rec.value.length > 0);
+    assert.equal(rec.environment, "development");
+  });
+});

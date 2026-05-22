@@ -38,6 +38,8 @@ export interface SecretRecord {
   value: string;
   /** ISO-8601 if soft-deleted; field absent otherwise. */
   deleted_at?: string;
+  /** True if a newer ref has superseded this one but it hasn't been deleted yet. Operational state — not surfaced to agents. */
+  rotating?: boolean;
 }
 
 export interface AgentSecretMetadata {
