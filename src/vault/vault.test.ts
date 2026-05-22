@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { ShuttleError } from "../shared/errors.js";
 import { getShuttlePaths, writeJsonFileAtomic } from "../shared/config.js";
 import { encryptVault } from "./crypto.js";
 import { fingerprintMatches } from "./fingerprints.js";
@@ -123,4 +124,122 @@ test("legacy sha256 fingerprint is transparently migrated to hmac-sha256 on firs
     }
     await rm(home, { recursive: true, force: true });
   }
+});
+
+/** Test harness for soft-delete invariant tests: creates a fresh vault and
+ *  seeds it with one or more secrets via the public upsertSecret API. */
+async function withVault<T>(
+  seedRefs: { name: string; environment: string; source: string; value: string }[],
+  fn: (vault: Vault) => Promise<T>,
+): Promise<T> {
+  const home = await mkdtemp(path.join(os.tmpdir(), "secret-shuttle-soft-delete-"));
+  const originalHome = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  try {
+    const key = randomBytes(32);
+    const vault = new Vault(() => key);
+    await vault.ensureInitialized();
+    for (const s of seedRefs) {
+      await vault.upsertSecret({
+        name: s.name,
+        environment: s.environment,
+        source: s.source,
+        value: s.value,
+        allowedDomains: ["example.com"],
+      });
+    }
+    return await fn(vault);
+  } finally {
+    if (originalHome === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+    else process.env.SECRET_SHUTTLE_HOME = originalHome;
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+test("getSecret throws secret_not_found for a soft-deleted ref", async () => {
+  await withVault(
+    [{ name: "A", environment: "development", source: "x", value: "val-A" }],
+    async (vault) => {
+      await vault.softDelete("ss://x/dev/A");
+      await assert.rejects(
+        () => vault.getSecret("ss://x/dev/A"),
+        (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+      );
+    },
+  );
+});
+
+test("inspect throws secret_not_found for a soft-deleted ref (metadata API also blocked)", async () => {
+  await withVault(
+    [{ name: "A", environment: "development", source: "x", value: "val-A" }],
+    async (vault) => {
+      await vault.softDelete("ss://x/dev/A");
+      await assert.rejects(
+        () => vault.inspect("ss://x/dev/A"),
+        (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+      );
+    },
+  );
+});
+
+test("list excludes deleted by default; includeDeleted surfaces them as AgentSecretMetadata with deleted_at set", async () => {
+  await withVault(
+    [
+      { name: "A", environment: "development", source: "x", value: "val-A" },
+      { name: "B", environment: "development", source: "x", value: "val-B" },
+    ],
+    async (vault) => {
+      await vault.softDelete("ss://x/dev/A");
+
+      // Default list: deleted entry absent.
+      const visible = await vault.list();
+      assert.equal(visible.length, 1);
+      assert.equal(visible[0]!.ref, "ss://x/dev/B");
+      assert.equal(visible[0]!.deleted_at, undefined, "active entry should NOT carry a deleted_at");
+
+      // include-deleted: both entries present; the deleted one carries deleted_at.
+      const all = await vault.list({ includeDeleted: true });
+      assert.equal(all.length, 2);
+      const deleted = all.find((s) => s.ref === "ss://x/dev/A");
+      const active = all.find((s) => s.ref === "ss://x/dev/B");
+      assert.ok(deleted, "deleted ref should surface with includeDeleted");
+      assert.ok(
+        typeof deleted!.deleted_at === "string" && deleted!.deleted_at.length > 0,
+        "deleted entry must carry a non-empty ISO deleted_at so callers can distinguish it",
+      );
+      assert.equal(active?.deleted_at, undefined, "active entry must NOT carry a deleted_at");
+
+      // CRITICAL: even with includeDeleted, no `value` field — AgentSecretMetadata
+      // shape doesn't have one, but assert defensively in case the type ever drifts.
+      for (const entry of all) {
+        assert.equal(
+          (entry as unknown as { value?: string }).value,
+          undefined,
+          "AgentSecretMetadata must never expose value, even with includeDeleted",
+        );
+      }
+    },
+  );
+});
+
+test("softDelete on a non-existent ref throws secret_not_found", async () => {
+  await withVault([], async (vault) => {
+    await assert.rejects(
+      () => vault.softDelete("ss://x/dev/missing"),
+      (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+    );
+  });
+});
+
+test("softDelete a second time throws secret_not_found (already deleted)", async () => {
+  await withVault(
+    [{ name: "A", environment: "development", source: "x", value: "val-A" }],
+    async (vault) => {
+      await vault.softDelete("ss://x/dev/A");
+      await assert.rejects(
+        () => vault.softDelete("ss://x/dev/A"),
+        (err) => err instanceof ShuttleError && err.code === "secret_not_found",
+      );
+    },
+  );
 });

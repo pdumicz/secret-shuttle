@@ -37,6 +37,8 @@
           inject_submit: `Inject secret ${esc(g.ref ?? "")} into <b>${esc(g.field_handle_label ?? "?")}</b> on ${esc(g.destination_domain ?? "?")}, click <b>${esc(g.submit_handle_label ?? "?")}</b>, wait for success, and automatically resume observation only if the secret is verified gone`,
           reveal_capture: `Click <b>${esc(g.reveal_handle_label ?? "?")}</b> on ${esc(g.destination_domain ?? "?")}, capture the revealed secret into ${esc(g.planned_ref ?? "")} (from <b>${esc(g.field_handle_label ?? g.container_handle_label ?? "?")}</b>, mode <code>${esc(g.capture_mode ?? "?")}</code>), hide it, and automatically resume observation only if the secret is verified gone`,
           blind_end: `Resume browser observation for ${esc(g.destination_domain ?? "?")}`,
+          secrets_delete: `Delete the secret ${esc(g.ref ?? "")} from the vault (audit trail preserved).`,
+          secrets_rotate: `Rotate the secret ${esc(g.ref ?? "")}: generate a new value and mark the old as rotating.`,
         }[g.action] || `${esc(g.action)}`;
         const scope = Array.isArray(g.allowed_domains) && g.allowed_domains.length
           ? g.allowed_domains.map(esc).join(", ") : "(none yet — not injectable)";

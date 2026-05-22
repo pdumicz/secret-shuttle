@@ -15,7 +15,7 @@ import { asObject, reqString } from "../validate.js";
 import { disableObservationDomains } from "../../chrome/internal-ops.js";
 import type { InjectResult } from "../../chrome/internal-ops.js";
 
-interface ListBody { environment?: string; source?: string; }
+interface ListBody { environment?: string; source?: string; include_deleted?: boolean; }
 interface GenerateBody {
   name: string;
   environment: string;
@@ -70,6 +70,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
     const secrets = await services.vault.list({
       ...(b.environment !== undefined ? { environment: b.environment } : {}),
       ...(b.source !== undefined ? { source: b.source } : {}),
+      ...(b.include_deleted === true ? { includeDeleted: true } : {}),
     });
     return { secrets, value_visible_to_agent: false };
   });

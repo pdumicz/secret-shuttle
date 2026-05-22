@@ -36,6 +36,8 @@ export interface SecretRecord {
   requires_approval: boolean;
   classification: "production_secret" | "secret";
   value: string;
+  /** ISO-8601 if soft-deleted; field absent otherwise. */
+  deleted_at?: string;
 }
 
 export interface AgentSecretMetadata {
@@ -54,6 +56,8 @@ export interface AgentSecretMetadata {
   requires_approval: boolean;
   classification: "production_secret" | "secret";
   value_visible_to_agent: false;
+  /** ISO-8601 if soft-deleted; field absent otherwise. */
+  deleted_at?: string;
 }
 
 export interface VaultPlaintext {

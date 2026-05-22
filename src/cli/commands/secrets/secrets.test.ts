@@ -47,3 +47,12 @@ test("secrets set rejects --kind paste with a clear error (paste mode deferred t
   const kind = set.options.find((o) => o.long === "--kind");
   assert.ok(kind);
 });
+
+test("secrets delete takes a positional <ref> argument", () => {
+  const cmd = secretsCommand();
+  const del = cmd.commands.find((c) => c.name() === "delete");
+  assert.ok(del);
+  const argNames = (del as unknown as { registeredArguments: { _name: string }[] })
+    .registeredArguments.map((a) => a._name);
+  assert.deepEqual(argNames, ["ref"]);
+});

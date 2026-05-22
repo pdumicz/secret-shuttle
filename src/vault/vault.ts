@@ -103,13 +103,16 @@ export class Vault {
     return toAgentMetadata(record);
   }
 
-  async list(filters: { environment?: string; source?: string } = {}): Promise<AgentSecretMetadata[]> {
+  async list(
+    filters: { environment?: string; source?: string; includeDeleted?: boolean } = {},
+  ): Promise<AgentSecretMetadata[]> {
     const plaintext = await this.read();
     const environment =
       filters.environment !== undefined ? canonicalEnvironment(filters.environment) : undefined;
     const source = filters.source?.toLowerCase();
 
     return plaintext.secrets
+      .filter((secret) => filters.includeDeleted === true || secret.deleted_at === undefined)
       .filter((secret) => environment === undefined || secret.environment === environment)
       .filter((secret) => source === undefined || secret.source === source)
       .sort((a, b) => a.ref.localeCompare(b.ref))
@@ -117,17 +120,33 @@ export class Vault {
   }
 
   async inspect(ref: string): Promise<AgentSecretMetadata> {
-    const record = await this.getSecret(ref);
-    return toAgentMetadata(record);
+    const plaintext = await this.read();
+    const secret = plaintext.secrets.find((candidate) => candidate.ref === ref);
+    if (secret === undefined || secret.deleted_at !== undefined) {
+      throw new ShuttleError("secret_not_found", `Secret ${ref} was not found.`);
+    }
+    return toAgentMetadata(secret);
   }
 
   async getSecret(ref: string): Promise<SecretRecord> {
     const plaintext = await this.read();
     const secret = plaintext.secrets.find((candidate) => candidate.ref === ref);
-    if (secret === undefined) {
+    if (secret === undefined || secret.deleted_at !== undefined) {
       throw new ShuttleError("secret_not_found", `Secret ${ref} was not found.`);
     }
     return secret;
+  }
+
+  async softDelete(ref: string): Promise<{ ref: string; deleted_at: string }> {
+    const plaintext = await this.read();
+    const idx = plaintext.secrets.findIndex((s) => s.ref === ref);
+    if (idx === -1 || plaintext.secrets[idx]!.deleted_at !== undefined) {
+      throw new ShuttleError("secret_not_found", `Secret ${ref} was not found.`);
+    }
+    const now = new Date().toISOString();
+    plaintext.secrets[idx] = { ...plaintext.secrets[idx]!, deleted_at: now };
+    await this.write(plaintext);
+    return { ref, deleted_at: now };
   }
 
   async markUsed(ref: string): Promise<void> {
@@ -207,6 +226,7 @@ export function toAgentMetadata(secret: SecretRecord): AgentSecretMetadata {
     classification: secret.classification,
     value_visible_to_agent: false,
     ...(secret.description !== undefined ? { description: secret.description } : {}),
+    ...(secret.deleted_at !== undefined ? { deleted_at: secret.deleted_at } : {}),
   };
 }
 
