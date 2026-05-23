@@ -66,7 +66,7 @@ export function registerSessionUiRoutes(server: DaemonServer, sessionStore: Sess
     // CSP is a Plan 4b enhancement once the stable-shell UI lands.
     res.setHeader(
       "content-security-policy",
-      "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'",
+      "default-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'",
     );
     res.end(html);
   });

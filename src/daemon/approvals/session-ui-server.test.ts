@@ -72,7 +72,9 @@ test("GET /ui/session?id=&token= returns HTML with pattern embedded", async () =
     assert.equal(res.headers.get("referrer-policy"), "no-referrer");
     assert.equal(res.headers.get("x-content-type-options"), "nosniff");
     const csp = res.headers.get("content-security-policy") ?? "";
-    assert.match(csp, /frame-ancestors 'none'/);
+    // frame-ancestors relaxed from 'none' → 'self' in Plan 4b so the hub
+    // iframe can embed this page. ui_token remains the operational gate.
+    assert.match(csp, /frame-ancestors 'self'/);
     assert.match(csp, /default-src 'self'/);
     assert.match(csp, /object-src 'none'/);
   });
@@ -230,5 +232,22 @@ test("POST /ui/sessions/:id/approve on an already-denied session → 409 session
     assert.equal(r.status, 409); // conflict
     const body = await r.json() as { error_code: string };
     assert.equal(body.error_code, "session_not_pending");
+  });
+});
+
+test("GET /ui/session CSP frame-ancestors is 'self' (relaxed from 'none')", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run"],
+      ref_glob: "ss://x/prod/*",
+      destination_domains: [],
+      template_ids: ["any"],
+      ttl_ms: 60_000,
+    });
+    const res = await fetch(`http://127.0.0.1:${ctx.port}/ui/session?id=${sg.id}&token=${sg.ui_token}`);
+    const csp = res.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /frame-ancestors 'self'/);
+    assert.doesNotMatch(csp, /frame-ancestors 'none'/);
   });
 });
