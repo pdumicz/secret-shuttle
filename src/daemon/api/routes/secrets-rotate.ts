@@ -1,7 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import { ShuttleError } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
-import type { ApprovalBinding } from "../../approvals/store.js";
+import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 
@@ -10,6 +10,7 @@ interface RotateBody {
   kind?: string;
   approval_id?: string;
   wait_for_approval?: boolean;
+  session_id?: string;
 }
 
 interface RouteRegistrar {
@@ -32,6 +33,13 @@ export function registerSecretsRotateRoute(
       throw new ShuttleError("missing_param", "ref is required.");
     }
 
+    // Hoisted OUTSIDE the try so the catch-block audit can carry session_id
+    // when applicable. secrets_rotate is NOT a SessionAction — destructive
+    // ops are always human-gated — so the matcher refuses and requireApproval
+    // falls back to single-use; grant.session_id is therefore always
+    // undefined and the conditional spread evaluates to nothing. We still
+    // wire the spread to preserve a single audit shape across all routes.
+    let grant: ApprovalGrant | undefined;
     try {
       // Public getSecret enforces the soft-delete invariant: rotating an
       // already-deleted ref is secret_not_found, which is correct.
@@ -51,10 +59,12 @@ export function registerSecretsRotateRoute(
           template_params: null,
           allowed_domains: oldRecord.allowed_domains,
         };
-        await requireApproval({
+        grant = await requireApproval({
           store: services.approvals,
           binding,
           daemonPort: daemonPortRef(),
+          sessionStore: services.sessionStore,
+          ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
           ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
           ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
         });
@@ -81,6 +91,7 @@ export function registerSecretsRotateRoute(
         ok: true,
         ref: b.ref,
         environment: oldRecord.environment,
+        ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
 
       return {
@@ -96,6 +107,7 @@ export function registerSecretsRotateRoute(
         ok: false,
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
         ...(b.ref !== undefined ? { ref: b.ref } : {}),
+        ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       throw err;
     }
