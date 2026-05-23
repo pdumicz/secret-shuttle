@@ -1,6 +1,7 @@
 import type { ServerResponse } from "node:http";
 import { ShuttleError, errorToJson } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
+import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { buildChildEnv } from "../../safe-env.js";
 import type { DaemonServer } from "../../server.js";
@@ -205,6 +206,7 @@ export function registerRunResolveRoute(
           binding,
           daemonPort: daemonPortRef(),
           sessionStore: services.sessionStore,
+          openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
           ...(body.session_id !== undefined ? { sessionId: body.session_id } : {}),
           ...(body.approval_id !== undefined ? { approvalIdFromClient: body.approval_id } : {}),
           ...(body.wait_for_approval === false ? { waitMs: 0 } : {}),
