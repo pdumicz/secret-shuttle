@@ -12,6 +12,8 @@ import type { ProxyServer } from "./proxy/cdp-proxy.js";
 import { randomUUID } from "node:crypto";
 import { writeDaemonAudit } from "./audit.js";
 import { getShuttlePaths } from "../shared/config.js";
+import { HubBroker } from "./hub/hub-broker.js";
+import { openUrl } from "./approvals/open-url.js";
 
 export interface UnlockSession {
   id: string;
@@ -37,6 +39,19 @@ export class UnlockSessions {
   get(id: string): UnlockSession | undefined {
     return this.map.get(id);
   }
+}
+
+export interface DaemonServicesOptions {
+  hubBroker?: HubBroker;
+  /**
+   * Override the `openUrlImpl` used when constructing the DEFAULT
+   * HubBroker. This is the hook tests use to prove the default
+   * constructor path — without this, the only way to inject a spy
+   * would be to construct a HubBroker entirely outside DaemonServices,
+   * which doesn't actually exercise the default wiring. Ignored when
+   * `hubBroker` is provided.
+   */
+  hubOpenUrlImpl?: (url: string) => void;
 }
 
 export class DaemonServices {
@@ -78,4 +93,16 @@ export class DaemonServices {
   /** Internal CDP client for the running Chrome process; null before browser start. */
   cdp: CdpClient | null = null;
   cdpProxy: ProxyServer | null = null;
+  readonly hubBroker: HubBroker;
+
+  constructor(opts: DaemonServicesOptions = {}) {
+    // Production: real openUrl (which honors SECRET_SHUTTLE_NO_OPEN_URL=1
+    // as a no-op for tests). The hubOpenUrlImpl hook lets tests prove
+    // this very wiring without bypassing it. Without the explicit
+    // `openUrl` here, the broker would queue URLs internally and never
+    // open a tab — silently broken in prod.
+    this.hubBroker =
+      opts.hubBroker ??
+      new HubBroker({ openUrlImpl: opts.hubOpenUrlImpl ?? openUrl });
+  }
 }

@@ -19,6 +19,7 @@ import { registerUnlockSession } from "./routes/unlock-session.js";
 import { registerHealth } from "./routes/health.js";
 import { registerRunResolveRoute } from "./routes/run-resolve.js";
 import { registerInjectRenderRoute } from "./routes/inject-render.js";
+import { registerHubRoutes } from "../hub/hub-server.js";
 
 export function registerRoutes(
   server: DaemonServer,
@@ -27,6 +28,7 @@ export function registerRoutes(
 ): void {
   registerUiRoutes(server, services.approvals);
   registerSessionUiRoutes(server, services.sessionStore);
+  registerHubRoutes(server, services.hubBroker);
   registerStatus(server, services);
   registerHealth(server, services);
   registerUnlock(server, services);
