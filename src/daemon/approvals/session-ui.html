@@ -92,10 +92,50 @@
       const uiToken = "__UI_TOKEN__";
       const url = (verb) => `/ui/sessions/${encodeURIComponent(sessionId)}/${verb}?token=${encodeURIComponent(uiToken)}`;
       const status = document.getElementById("status");
+
+      // ── Plan 4b: hub integration ────────────────────────────────
+      const params = new URLSearchParams(location.search);
+      const rawHubSeq = params.get("hub_seq");
+      const parsedHubSeq = rawHubSeq === null ? null : Number(rawHubSeq);
+      const hasHubSeq = parsedHubSeq !== null && Number.isSafeInteger(parsedHubSeq) && parsedHubSeq > 0;
+
+      function notifyHubIfFramed() {
+        if (!hasHubSeq) return;
+        if (window.parent !== window) {
+          window.parent.postMessage({ type: "operation_done", seq: parsedHubSeq }, location.origin);
+        }
+      }
+
+      const terminalStatuses = new Set(["granted", "denied", "expired", "revoked"]);
+      let pollTimer = null;
+      async function pollForTerminal() {
+        try {
+          const r = await fetch(`/ui/sessions/${sessionId}?token=${encodeURIComponent(uiToken)}`);
+          if (!r.ok) return;
+          const body = await r.json();
+          if (terminalStatuses.has(body.status)) {
+            stopPolling();
+            notifyHubIfFramed();
+          }
+        } catch { /* network blip; next tick will retry */ }
+      }
+      function startPolling() { pollTimer = setInterval(pollForTerminal, 2000); }
+      function stopPolling() { if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; } }
+      window.addEventListener("beforeunload", stopPolling);
+      // ────────────────────────────────────────────────────────────
+
       function done(verb, ok) {
         document.querySelectorAll("button").forEach((b) => { b.disabled = true; });
         status.textContent = ok ? `Session ${verb}. You can close this tab.` : `Failed to ${verb}; refresh and try again.`;
+        // Success-only gate: notify the hub queue ONLY when the daemon
+        // actually advanced state. Failed POSTs leave polling active so
+        // a server-side commit race still surfaces eventually.
+        if (ok) {
+          stopPolling();
+          notifyHubIfFramed();
+        }
       }
+
       document.getElementById("approve").addEventListener("click", async () => {
         const r = await fetch(url("approve"), { method: "POST" });
         done("approved", r.ok);
@@ -104,6 +144,8 @@
         const r = await fetch(url("deny"), { method: "POST" });
         done("denied", r.ok);
       });
+
+      startPolling();
     })();
   </script>
 </body>
