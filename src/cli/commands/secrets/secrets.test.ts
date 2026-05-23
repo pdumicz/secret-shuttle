@@ -67,3 +67,10 @@ test("secrets rotate takes a positional <ref> argument and --kind option", () =>
   const optionNames = rot.options.map((o) => o.long);
   assert.ok(optionNames.includes("--kind"));
 });
+
+test("secrets set: --session flag accepted", () => {
+  const cmd = secretsCommand();
+  const set = cmd.commands.find((c) => c.name() === "set");
+  assert.ok(set);
+  assert.ok(set.options.map((o) => o.long).includes("--session"));
+});

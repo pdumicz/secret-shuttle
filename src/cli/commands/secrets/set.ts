@@ -17,6 +17,7 @@ export function secretsSetCommand(): Command {
     .option("--description <description>", "Free-form description (stored in metadata).")
     .option("--force", "Overwrite an existing secret with the same ref.", false)
     .option("--approval-id <id>", "Pre-issued approval id (skip the approval window).")
+    .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
     .option("--no-wait", "Return approval_required without waiting.")
     .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
     .action(async (options) => {
@@ -49,6 +50,7 @@ export function secretsSetCommand(): Command {
       if (actions.length > 0) body.allowed_actions = actions;
       if (options.description !== undefined) body.description = options.description;
       if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      if (options.session !== undefined) body.session_id = options.session;
       const r = await daemonRequest("POST", "/v1/secrets/generate", body);
       outputJson(ok(r as Record<string, unknown>));
     })
