@@ -280,7 +280,8 @@ async function postDone(seq) {
   // Retry transient failures so a single network blip can't strand the
   // daemon's activeUrl forever. Cap at MAX_ATTEMPTS; auth/400 errors
   // are terminal (no retry). After all attempts fail, fall through to
-  // the terminal banner so the user knows to reload.
+  // the terminal banner so the user knows to reload AND close the SSE
+  // connection so the broker detaches and a future surface() respawns.
   const MAX_ATTEMPTS = 5;
   const BASE_DELAY_MS = 250;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -299,12 +300,19 @@ async function postDone(seq) {
     }
     await new Promise((resolve) => setTimeout(resolve, BASE_DELAY_MS * (attempt + 1)));
   }
-  // All attempts exhausted (or terminal error) → surface to user.
+  // All attempts exhausted (or terminal error) → surface to user AND
+  // tear down the SSE connection. Without es.close() the broker still
+  // sees currentSubscriber !== null and new surfaces enqueue behind a
+  // permanently-stuck activeUrl. Closing the SSE triggers the daemon's
+  // detach callback → currentSubscriber=null → next surface() respawns.
+  // activeUrl stays set so reload/reattach resends the operation.
   terminal = true;
+  es?.close();
   showBanner("Failed to advance Secret Shuttle. Reload to continue.", "disconnected");
 }
 
 window.addEventListener("message", (ev) => {
+  if (terminal) return; // suppress late iframe messages after terminal state
   if (ev.origin !== location.origin) return;
   if (ev.source !== iframe.contentWindow) return;
   const data = ev.data;
@@ -575,8 +583,17 @@ Cases:
   - **Success-only gate**: assert that the approve/deny POST handler calls `notifyHubIfFramed()` only under `r.ok === true` (or equivalent). The drift assertion: source must contain `if (r.ok)` (or `if (ok)`) preceding a `notifyHubIfFramed()` call; or alternatively, source must NOT contain `notifyHubIfFramed()` reachable from the `!r.ok` branch.
 - **`session-ui.html` drift-guard** (new test file `src/daemon/approvals/session-ui-html-drift.test.ts`): same assertions adapted for session terminal statuses: `"granted"`, `"denied"`, `"expired"`, `"revoked"` (no `"used"` — sessions don't have that state). Additionally pin the **success-only gate**: assert that `notifyHubIfFramed()` is reachable from the `r.ok === true` branch (or `done(verb, true)` branch) and that the `r.ok === false` / `done(verb, false)` branch does NOT call it. The crude form: assert the source contains `if (r.ok)` (or `if (ok)`) preceding the notify call, OR that `notifyHubIfFramed()` is NOT reachable from a `done("approved", false)` / `done("denied", false)` line.
 - **`unlock-ui.html` drift-guard** (extend existing or new `unlock-ui-html-drift.test.ts`): assert `notifyHubIfFramed()` called from the success branch ONLY. Assert no `pollForTerminal` (unlock skips polling — documented design choice).
+- **`hub-ui.html` drift-guard** (new test file `src/daemon/hub/hub-ui-html-drift.test.ts`): pins the `postDone()` retry shape and terminal-state cascade. Without a JS DOM harness, this is a text-pattern assertion suite that catches accidental deletion of the retry semantics. Assert presence of:
+  - `postDone` function name (the retry wrapper around fetch).
+  - `MAX_ATTEMPTS` literal (numeric 5) — drift would mean someone disabled retries.
+  - Network-error retry: source contains `try` + `catch` inside the loop body.
+  - HTTP-error terminal breaks: literals `401`, `403`, `400` AND `break` keyword within the loop body. These statuses must short-circuit retry.
+  - `r.ok` check (success exit).
+  - Exhaustion-path teardown: `terminal = true` AND `es?.close()` (or `es.close()`) AND `showBanner(` reachable from the post-loop code path. Without `es.close()` the broker stays attached to a dead hub.
+  - Message-handler suppression: `if (terminal) return` (or equivalent) at the top of the `window.addEventListener("message", ...)` callback.
+  - `consecutiveFailures` reset on `open`: source contains both `addEventListener("open"` and `consecutiveFailures = 0`.
 
-The assertions are crude text matches; they don't run the JS. They exist as a tripwire against accidental deletion. If the polling logic is ever refactored to a different shape, update the assertions to match — the refactor is the right time to revisit them.
+The assertions are crude text matches; they don't run the JS. They exist as a tripwire against accidental deletion. If the polling or retry logic is ever refactored to a different shape, update the assertions to match — the refactor is the right time to revisit them. If 4c/5a/5b accumulate more browser-side logic, revisit and introduce a jsdom harness for real DOM testing.
 
 ### Layer 5 — End-to-end via real broker
 Real `HubBroker` + real route harness + fake `openUrlImpl` spy. New file: `src/daemon/hub/hub-e2e.test.ts`.
@@ -594,8 +611,8 @@ Cases (named to mirror data flow):
   7. `attach(sub2)` → activeUrl=url1 → resend navigate(url1, seq=1). markDone(1) → promote url2 (seq=2). markDone(2) → promote url3 (seq=3). markDone(3) → empty.
   - **Assertions:** `openUrlSpy.calls.length === 3`. Subscriber received events: `[displaced (no — first attach), navigate(url1,1), navigate(url1,1), navigate(url2,2), navigate(url3,3)]` — the first attach has no prior to displace; the second attach gets a resend.
 - **"Tab-close mid-op stays within spawn window"** (2 opens variant): Steps 1–4 above, skip 5–6, attach sub2. Asserts `openUrlSpy.calls.length === 2` and resend-then-drain.
-- **"`/ui/hub/done` transient failure retries and recovers"**: trigger surface → attach sub1 → write navigate(url1, seq=1) → simulate iframe done by directly calling `POST /ui/hub/done` with one fake-failed attempt followed by a successful one (mock fetch at the daemon-end-to-end boundary, or use the daemon route's actual response and inject a one-shot 503 from a wrapping middleware). Asserts the broker eventually advances on the retry, NOT on the first failed attempt. Verifies `activeUrl === null` only after the successful POST.
-- **"`/ui/hub/done` permanent failure surfaces terminal banner"**: after MAX_ATTEMPTS failures (or a 401 returned immediately), the hub-side `postDone` exhausts retries and sets `terminal = true`. Verifies the broker's `activeUrl` remains set (so a future hub reattach would resend) and that the iframe-side code stops further postMessage handling.
+- **"`/ui/hub/done` route smoke for retry recovery"**: trigger surface → attach sub1 → write navigate(url1, seq=1) → call `POST /ui/hub/done` once with the matching seq, asserts broker advances. Then call again with the same seq (idempotent) and assert no further events. This validates the daemon route under retry-shaped traffic; the hub-side retry loop itself is covered by the drift guard in Layer 4 (hub-ui drift).
+- **"Permanent postDone failure → SSE detach → respawn-on-next-surface"** (server-side observable consequence of the hub-side terminal branch): manually close sub1 to simulate the hub-side `es.close()` that the terminal branch triggers. Surface url2. Assert broker's `currentSubscriber === null` after detach, `activeUrl` still set to url1, `openUrlSpy.calls.length === 2` (initial + respawn). On the second attach, broker resends navigate(url1, seq=1) — the operation is recoverable.
 
 ### Layer 6 — `SECRET_SHUTTLE_NO_OPEN_URL` regression
 With env var set: `surface()` works (state mutates), `openUrl` no-ops. Test:
