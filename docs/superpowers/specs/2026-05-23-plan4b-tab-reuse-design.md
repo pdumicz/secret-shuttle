@@ -326,7 +326,7 @@ connect();
 
 ### 4. Operation-page modifications
 
-All three pages add `hub_seq` parsing + `notifyHubIfFramed()` + polling. Patterns differ slightly per page because of their existing JS structure.
+All three pages add `hub_seq` parsing + `notifyHubIfFramed()`. The two approval/session pages also add a poll loop. **Unlock UI does not poll** — it's a blocking, retry-oriented form, and a polled "terminal" status would race against the in-form retry semantics. Unlock notifies only on the success branch, which is the only path that actually advances the daemon's vault state. Patterns differ slightly per page because of their existing JS structure.
 
 **`src/daemon/approvals/ui.html` (`/ui/approve`).**
 - Add to existing inline script:
@@ -375,12 +375,25 @@ All three pages add `hub_seq` parsing + `notifyHubIfFramed()` + polling. Pattern
 
 ### 5. `src/daemon/services.ts`
 
-Adds:
+Adds an optional constructor parameter so tests can inject a HubBroker with a spied `openUrlImpl` and synthetic clock. Without injection, callers (`bin/secret-shuttle`, lifecycle.ts) keep working unchanged.
+
 ```ts
 import { HubBroker } from "./hub/hub-broker.js";
-// inside DaemonServices:
-readonly hubBroker = new HubBroker();
+
+export interface DaemonServicesOptions {
+  hubBroker?: HubBroker;
+}
+
+export class DaemonServices {
+  // existing readonly fields unchanged: vault, lock, approvals, sessionStore, etc.
+  readonly hubBroker: HubBroker;
+
+  constructor(opts: DaemonServicesOptions = {}) {
+    this.hubBroker = opts.hubBroker ?? new HubBroker();
+  }
+}
 ```
+Existing `new DaemonServices()` callers continue to work (default arg). The constructor is the injection point used by Layer 5 e2e tests to swap in `new HubBroker({ openUrlImpl: spy, now: fixedClock })`.
 
 ### 6. `src/daemon/api/router.ts`
 
