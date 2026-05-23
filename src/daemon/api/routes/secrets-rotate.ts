@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import { ShuttleError } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
+import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
@@ -64,6 +65,7 @@ export function registerSecretsRotateRoute(
           binding,
           daemonPort: daemonPortRef(),
           sessionStore: services.sessionStore,
+          openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
           ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
           ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
           ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
