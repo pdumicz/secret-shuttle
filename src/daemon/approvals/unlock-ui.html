@@ -13,9 +13,31 @@ button{font-size:1rem;padding:0.5rem 1rem;background:#0a7;color:#fff;border:0;ma
 <script type="module">
 const params=new URLSearchParams(location.search);
 const id=params.get("id");const token=params.get("token");const create=params.get("create")==="1";
+
+// ── Plan 4b: hub integration ────────────────────────────────
+// Unlock is blocking + retry-oriented; no polling. Notify only on success.
+const rawHubSeq = params.get("hub_seq");
+const parsedHubSeq = rawHubSeq === null ? null : Number(rawHubSeq);
+const hasHubSeq = parsedHubSeq !== null && Number.isSafeInteger(parsedHubSeq) && parsedHubSeq > 0;
+
+function notifyHubIfFramed() {
+  if (!hasHubSeq) return;
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: "operation_done", seq: parsedHubSeq }, location.origin);
+  }
+}
+// ────────────────────────────────────────────────────────────
+
 if(create)document.getElementById("hint").textContent="Create a new vault passphrase.";
 document.getElementById("f").addEventListener("submit",async(e)=>{e.preventDefault();
 const p=document.getElementById("p").value;
 const r=await fetch(`/ui/unlock/${id}?token=${token}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({passphrase:p,set_passphrase:create})});
-const j=await r.json();if(!j.ok){document.getElementById("err").textContent=j.error?.message??"failed";}else{document.body.innerHTML="<h1>Unlocked. You can close this window.</h1>";}});
+const j=await r.json();
+if(!j.ok){
+  document.getElementById("err").textContent=j.error?.message??"failed";
+}else{
+  document.body.innerHTML="<h1>Unlocked. You can close this window.</h1>";
+  notifyHubIfFramed();
+}
+});
 </script></body></html>
