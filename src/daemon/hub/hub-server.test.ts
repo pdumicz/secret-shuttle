@@ -144,3 +144,115 @@ test("Second SSE connection displaces the first", async () => {
     assert.equal((navigate as { type: string }).type, "navigate");
   });
 });
+
+test("POST /ui/hub/done with valid token + matching seq → 200 ok:true; broker advances", async () => {
+  await withHubDaemon(async (ctx) => {
+    const fakeSub: import("./hub-broker.js").HubSubscriber = {
+      write: () => undefined,
+      close: () => undefined,
+    };
+    ctx.broker.attach(fakeSub);
+    ctx.broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+    assert.equal(ctx.broker.peekState().activeSeq, 1);
+
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ seq: 1 }),
+    });
+    assert.equal(r.status, 200);
+    const body = await r.json() as { ok: boolean };
+    assert.equal(body.ok, true);
+    assert.equal(ctx.broker.peekState().activeUrl, null);
+  });
+});
+
+test("POST /ui/hub/done with wrong token → 401 ui_token_mismatch", async () => {
+  await withHubDaemon(async (ctx) => {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/done?token=WRONG`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ seq: 1 }),
+    });
+    assert.equal(r.status, 401);
+  });
+});
+
+test("POST /ui/hub/done mismatched seq → 200 (idempotent no-op)", async () => {
+  await withHubDaemon(async (ctx) => {
+    const fakeSub: import("./hub-broker.js").HubSubscriber = {
+      write: () => undefined,
+      close: () => undefined,
+    };
+    ctx.broker.attach(fakeSub);
+    ctx.broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ seq: 999 }),
+    });
+    assert.equal(r.status, 200);
+    // Still active — mismatched seq did NOT advance.
+    assert.equal(ctx.broker.peekState().activeUrl, "http://127.0.0.1:5555/ui/approve?id=a&token=t");
+  });
+});
+
+test("POST /ui/hub/done malformed JSON → 400 bad_request", async () => {
+  await withHubDaemon(async (ctx) => {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not-json",
+    });
+    assert.equal(r.status, 400);
+    const body = await r.json() as { error: { code: string } };
+    assert.equal(body.error.code, "bad_request");
+  });
+});
+
+test("POST /ui/hub/done {seq:'abc'} → 400 bad_request", async () => {
+  await withHubDaemon(async (ctx) => {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ seq: "abc" }),
+    });
+    assert.equal(r.status, 400);
+    const body = await r.json() as { error: { code: string } };
+    assert.equal(body.error.code, "bad_request");
+  });
+});
+
+test("POST /ui/hub/done {seq:-1} → 400 bad_request", async () => {
+  await withHubDaemon(async (ctx) => {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ seq: -1 }),
+    });
+    assert.equal(r.status, 400);
+  });
+});
+
+test("POST /ui/hub/done missing body → 400", async () => {
+  await withHubDaemon(async (ctx) => {
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`, {
+      method: "POST",
+    });
+    assert.equal(r.status, 400);
+  });
+});
+
+test("POST /ui/hub/done body > 1024 bytes → request_too_large", async () => {
+  await withHubDaemon(async (ctx) => {
+    const oversized = JSON.stringify({ seq: 1, padding: "x".repeat(2000) });
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversized,
+    });
+    assert.notEqual(r.status, 200);
+    const body = await r.json() as { error: { code: string } };
+    assert.equal(body.error.code, "request_too_large");
+  });
+});

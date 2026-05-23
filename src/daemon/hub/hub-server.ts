@@ -100,6 +100,67 @@ export function registerHubRoutes(server: DaemonServer, broker: HubBroker): void
 
     req.on("close", cleanup);
   });
+
+  server.addRouteRaw("POST", /^\/ui\/hub\/done$/, async (req, _body, res) => {
+    const url = new URL(req.url ?? "", "http://127.0.0.1");
+    const token = url.searchParams.get("token");
+    if (token === null || token.length === 0) {
+      writeError(res, 400, new ShuttleError("bad_request", "Missing token."));
+      return;
+    }
+    if (!broker.tokenMatches(token)) {
+      writeError(res, 401, new ShuttleError("ui_token_mismatch", "Invalid UI token."));
+      return;
+    }
+    let payload: unknown;
+    try {
+      payload = await readBoundedJson(req, 1024);
+    } catch (e) {
+      // request_too_large maps to its registered exit code via errorToJson.
+      const status = e instanceof ShuttleError && e.code === "request_too_large" ? 400 : 400;
+      writeError(res, status, e);
+      return;
+    }
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+      writeError(res, 400, new ShuttleError("bad_request", "Body must be a JSON object."));
+      return;
+    }
+    const seqRaw = (payload as Record<string, unknown>).seq;
+    if (typeof seqRaw !== "number" || !Number.isInteger(seqRaw) || seqRaw <= 0) {
+      writeError(res, 400, new ShuttleError("bad_request", "seq must be a positive integer."));
+      return;
+    }
+    broker.markDone(seqRaw);
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/json");
+    setHardeningHeaders(res);
+    res.end(JSON.stringify({ ok: true }));
+  });
+}
+
+async function readBoundedJson(
+  req: import("node:http").IncomingMessage,
+  maxBytes: number,
+): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    total += buf.length;
+    if (total > maxBytes) {
+      throw new ShuttleError("request_too_large", `Body exceeds ${maxBytes} bytes.`);
+    }
+    chunks.push(buf);
+  }
+  if (total === 0) {
+    throw new ShuttleError("bad_request", "Empty body.");
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ShuttleError("bad_request", "Malformed JSON body.");
+  }
 }
 
 function setHardeningHeaders(res: import("node:http").ServerResponse): void {
