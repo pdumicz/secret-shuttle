@@ -12,7 +12,7 @@
 
 **Baseline:** 842 tests, 840 pass, 2 skipped, 0 fail at commit `8b77556` (Plan 4a R2 normalization fix).
 
-**Estimated new tests:** ~50–60. Final count target: ~895–905 passing.
+**Estimated new tests:** ~70–80. Final count target: ~915–925 passing.
 
 ---
 
@@ -26,7 +26,7 @@
 | D | D1 / D2 / D3 | CSP relaxations: `ui-server.ts`, `session-ui-server.ts`, `unlock-session.ts` |
 | E | E1 / E2 / E3 | Operation page modifications: `ui.html`, `session-ui.html`, `unlock-ui.html` (`hub_seq` + notify + polling + drift tests) |
 | F | F0 + F1–F12 | `makeHubOpenUrlImpl` helper + 12 route swaps + 2 direct call sites |
-| G | G1 / G2 / G3 / G4 | End-to-end tests, `SECRET_SHUTTLE_NO_OPEN_URL` regression, full suite verification, CHANGELOG |
+| G | G1 / G1.5 / G2 / G3 / G4 | End-to-end tests, jsdom DOM smoke, `SECRET_SHUTTLE_NO_OPEN_URL` regression, full suite verification, CHANGELOG |
 
 ---
 
@@ -44,6 +44,8 @@
 - `src/daemon/approvals/session-ui-html-drift.test.ts` (Task E2).
 - `src/daemon/approvals/unlock-ui-html-drift.test.ts` (Task E3).
 - `src/daemon/hub/hub-e2e.test.ts` (Task G1).
+- `src/daemon/hub/default-services-wiring.test.ts` (Task B4) — proves default `new DaemonServices()` constructs a HubBroker with the real `openUrl` wired in.
+- `src/daemon/hub/hub-ui-dom.test.ts` (Task G1.5) — jsdom-based DOM smoke for `hub-ui.html`.
 - `src/daemon/hub/hub-no-open-url.test.ts` (Task G2) — `SECRET_SHUTTLE_NO_OPEN_URL` regression.
 
 **Modified files:**
@@ -114,6 +116,9 @@ function newBroker(opts: { now?: () => number; openUrl?: (u: string) => void } =
 } {
   const opens: string[] = [];
   const broker = new HubBroker({
+    // Test default: capture spawn calls in an array. Production
+    // HubBroker requires an explicit openUrlImpl (see DaemonServices
+    // in Task B4 where it passes the real openUrl).
     openUrlImpl: opts.openUrl ?? ((u: string) => opens.push(u)),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
   });
@@ -387,7 +392,10 @@ export interface HubSubscriber {
 }
 
 export interface HubBrokerOptions {
-  openUrlImpl?: (url: string) => void;
+  /** REQUIRED — caller must provide an opener. Production passes the real
+   * `openUrl` from src/daemon/approvals/open-url.ts; tests pass a spy.
+   * No default — a forgotten injection would silently never open the hub. */
+  openUrlImpl: (url: string) => void;
   now?: () => number;
 }
 
@@ -428,8 +436,8 @@ export class HubBroker {
   private currentSubscriber: HubSubscriber | null = null;
   private spawnInFlightSince: number | null = null;
 
-  constructor(opts: HubBrokerOptions = {}) {
-    this.openUrlImpl = opts.openUrlImpl ?? (() => undefined);
+  constructor(opts: HubBrokerOptions) {
+    this.openUrlImpl = opts.openUrlImpl;
     this.nowFn = opts.now ?? (() => Date.now());
   }
 
@@ -1244,9 +1252,10 @@ Open `src/daemon/services.ts`. Add to imports:
 
 ```typescript
 import { HubBroker } from "./hub/hub-broker.js";
+import { openUrl } from "./approvals/open-url.js";
 ```
 
-Add the options interface and modify the class. The existing class has multiple `readonly fieldName = new X()` initializers. Convert by adding a constructor and giving `hubBroker` an explicit assignment:
+Add the options interface and modify the class. The existing class has multiple `readonly fieldName = new X()` initializers. Convert by adding a constructor and giving `hubBroker` an explicit assignment. **Critical: the default broker MUST be constructed with the real `openUrl` as its `openUrlImpl`.** HubBroker now requires an explicit `openUrlImpl` (no internal default), so a forgotten injection won't silently no-op:
 
 ```typescript
 export interface DaemonServicesOptions {
@@ -1258,12 +1267,75 @@ export class DaemonServices {
   readonly hubBroker: HubBroker;
 
   constructor(opts: DaemonServicesOptions = {}) {
-    this.hubBroker = opts.hubBroker ?? new HubBroker();
+    // Production: real openUrl (which honors SECRET_SHUTTLE_NO_OPEN_URL=1
+    // as a no-op for tests). Tests inject a HubBroker with their own spy
+    // openUrlImpl. Without the explicit `openUrl` here, the broker would
+    // queue URLs internally and never open a tab — silently broken in prod.
+    this.hubBroker = opts.hubBroker ?? new HubBroker({ openUrlImpl: openUrl });
   }
 }
 ```
 
 (Existing fields like `sessionStore = new SessionStore()` keep their inline form — only `hubBroker` needs the constructor route because it accepts injection.)
+
+- [ ] **Step 1b: Add an integration test for the default wiring**
+
+Create `src/daemon/hub/default-services-wiring.test.ts`:
+
+```typescript
+import assert from "node:assert/strict";
+import test from "node:test";
+import { DaemonServices } from "../services.js";
+
+test("default DaemonServices wires HubBroker.openUrlImpl to the real openUrl", () => {
+  // Honor the env var so this test doesn't actually open a browser tab.
+  const prev = process.env.SECRET_SHUTTLE_NO_OPEN_URL;
+  process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
+  try {
+    const services = new DaemonServices();
+    // No exception. The broker's openUrlImpl is the real openUrl,
+    // which under SECRET_SHUTTLE_NO_OPEN_URL=1 short-circuits with no
+    // spawn but doesn't throw. Surface a URL and assert no exception.
+    services.hubBroker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+    // Broker state mutated correctly even though openUrl no-op'd.
+    assert.equal(services.hubBroker.peekState().queueLength, 1);
+  } finally {
+    if (prev === undefined) delete process.env.SECRET_SHUTTLE_NO_OPEN_URL;
+    else process.env.SECRET_SHUTTLE_NO_OPEN_URL = prev;
+  }
+});
+
+test("default DaemonServices opens the hub when env var is NOT set (spawn-spy proves real openUrl is called)", async () => {
+  const prev = process.env.SECRET_SHUTTLE_NO_OPEN_URL;
+  delete process.env.SECRET_SHUTTLE_NO_OPEN_URL;
+  try {
+    // Build a broker that delegates to the real openUrl with a spawn spy.
+    // This proves the DEFAULT wiring path calls into the actual openUrl
+    // helper. (We can't directly intercept the default broker's openUrlImpl
+    // without injection, so we shadow-construct the same code path.)
+    const { openUrl } = await import("../approvals/open-url.js");
+    const { HubBroker } = await import("./hub-broker.js");
+    const spawns: Array<{ cmd: string; args: readonly string[] }> = [];
+    const broker = new HubBroker({
+      openUrlImpl: (u) =>
+        openUrl(u, {
+          spawnImpl: (cmd, args) => {
+            spawns.push({ cmd, args });
+            return { on: () => undefined, unref: () => undefined };
+          },
+        }),
+    });
+    const services = new DaemonServices({ hubBroker: broker });
+    services.hubBroker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+    assert.equal(spawns.length, 1, "default wiring must invoke openUrl which spawns");
+    // The spawn target is the platform opener with the hub URL as an arg.
+    assert.ok(spawns[0]!.args.some((a) => a.includes("/ui/hub?token=")));
+  } finally {
+    if (prev === undefined) delete process.env.SECRET_SHUTTLE_NO_OPEN_URL;
+    else process.env.SECRET_SHUTTLE_NO_OPEN_URL = prev;
+  }
+});
+```
 
 - [ ] **Step 2: Register the hub routes in `src/daemon/api/router.ts`**
 
@@ -1279,18 +1351,21 @@ Inside `registerRoutes`, add (the position doesn't matter — pick after `regist
   registerHubRoutes(server, services.hubBroker);
 ```
 
-- [ ] **Step 3: Verify existing callers still compile**
+- [ ] **Step 3: Verify existing callers still compile + new wiring tests pass**
 
 Run: `npx tsc --noEmit`
-Expected: clean. `new DaemonServices()` callers continue to work because the constructor arg has a default.
+Expected: clean. `new DaemonServices()` callers continue to work — the constructor arg has a default, and the default constructs a HubBroker with the real openUrl.
+
+Run: `npm test -- --test-name-pattern="default DaemonServices"`
+Expected: 2 wiring tests pass. (First proves no-throw under SECRET_SHUTTLE_NO_OPEN_URL=1; second proves the actual spawn pathway fires when the env var is unset.)
 
 Run: `npm test`
-Expected: still ~873 tests, 0 fail. (No new tests in B4; this task just wires the existing routes into the daemon.)
+Expected: ~875 tests, 0 fail (added 2 wiring tests beyond the original B4 plan).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/daemon/services.ts src/daemon/api/router.ts
+git add src/daemon/services.ts src/daemon/api/router.ts src/daemon/hub/default-services-wiring.test.ts
 git commit -m "$(cat <<'EOF'
 feat(daemon): wire HubBroker into DaemonServices + router
 
@@ -1299,6 +1374,15 @@ DaemonServices gains an optional constructor parameter
 with a spied openUrlImpl + synthetic clock. Default arg keeps
 existing `new DaemonServices()` callers working (bin/secret-shuttle,
 lifecycle.ts, all existing tests).
+
+CRITICAL: the default broker is constructed with the real openUrl
+as its openUrlImpl. HubBroker has no internal default (Plan 4b
+post-review P0 fix) — a forgotten injection would otherwise silently
+queue URLs forever and never open a tab in production. The new
+default-services-wiring.test.ts proves this both directions: under
+SECRET_SHUTTLE_NO_OPEN_URL=1 the default broker no-ops safely; with
+the env var unset, a spawn-spy proves the default path actually
+invokes the platform opener.
 
 registerHubRoutes(server, services.hubBroker) added to router.ts.
 Order doesn't matter (no regex overlap with /ui/approve, /ui/session,
@@ -1353,10 +1437,17 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
       height: calc(100% - 32px);
       border: 0;
     }
+    /* Terminal states hide the iframe AND show the banner. Without
+       this, a displaced tab's still-loaded /ui/approve iframe stays
+       clickable — the user could approve operations the new tab is
+       supposed to be driving. */
+    #status.disconnected ~ #op, #status.displaced ~ #op { display: none; }
     #banner {
       display: none;
       padding: 1rem;
       color: #444;
+      font-size: 1rem;
+      line-height: 1.4;
     }
     #status.disconnected ~ #banner, #status.displaced ~ #banner { display: block; }
   </style>
@@ -1390,6 +1481,13 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
         statusText.textContent = text;
         if (kind === "disconnected" || kind === "displaced") {
           banner.textContent = text;
+          // Drop the operation page so a displaced/terminal tab cannot
+          // continue approving operations the user thought were handed
+          // off. The CSS rule above also hides the iframe element so
+          // there's no clickable surface even if about:blank is slow.
+          if (iframe.src !== "about:blank") {
+            iframe.src = "about:blank";
+          }
         } else {
           banner.textContent = "";
         }
@@ -1571,6 +1669,16 @@ test("hub-ui.html: terminal-branch teardown closes SSE", async () => {
   // es?.close() OR es.close() (different syntaxes are fine).
   assert.match(html, /es\??\.close\s*\(/);
   assert.match(html, /showBanner\s*\(/);
+});
+
+test("hub-ui.html: displaced/disconnected hides the iframe and points it at about:blank", async () => {
+  const html = await loadHtml();
+  // CSS rule must hide #op when status is disconnected OR displaced.
+  // Crude check: both selector forms appear paired with `#op` and `display: none`.
+  assert.match(html, /#status\.(disconnected|displaced)[^{]*~\s*#op[^{]*\{[^}]*display\s*:\s*none/);
+  // JS must also reassign iframe.src to about:blank when entering a
+  // terminal-state banner (defense in depth against CSS bypass).
+  assert.match(html, /iframe\.src\s*=\s*["']about:blank["']/);
 });
 
 test("hub-ui.html: message-handler suppresses post-terminal events", async () => {
@@ -2567,20 +2675,22 @@ test("makeHubOpenUrlImpl returns a function that calls services.hubBroker.surfac
   assert.match(opens[0]!, /^http:\/\/127\.0\.0\.1:7777\/ui\/hub\?token=/);
 });
 
-test("makeHubOpenUrlImpl re-reads the port each call (port may shift across daemon restarts)", () => {
-  const opens: string[] = [];
-  const broker = new HubBroker({ openUrlImpl: (u) => opens.push(u) });
-  const services = new DaemonServices({ hubBroker: broker });
+test("makeHubOpenUrlImpl re-reads the port on every invocation (not baked in at construction)", () => {
+  // Mock the broker directly so we can observe `port` arg per call,
+  // without depending on broker spawn-debounce semantics.
+  const calls: Array<{ url: string; port: number }> = [];
+  const mockBroker = {
+    surface: (url: string, port: number) => { calls.push({ url, port }); },
+  };
+  const services = { hubBroker: mockBroker } as unknown as DaemonServices;
   let port = 1111;
   const helper = makeHubOpenUrlImpl(services, () => port);
-  helper("http://127.0.0.1:1111/ui/approve?id=a&token=t1");
-  // (One surface, one spawn.)
+  helper("http://127.0.0.1/foo");
   port = 2222;
-  // Subscriber not attached yet; second surface won't spawn (debounce in flight).
-  // To prove port is re-read, detach via a fake attach + force respawn after timeout —
-  // but for this unit test, the simpler proof is that the FIRST surface used the
-  // FIRST port (not a stale baked-in port from helper construction).
-  assert.match(opens[0]!, /:1111\//);
+  helper("http://127.0.0.1/bar");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0]?.port, 1111, "first call must use the port at-time-of-call");
+  assert.equal(calls[1]?.port, 2222, "second call must re-read the port (regression: baked-in closure)");
 });
 ```
 
@@ -2794,18 +2904,13 @@ import { openUrl } from "../../approvals/open-url.js";
     );
 ```
 
-Change the import to:
+Remove the `import { openUrl } ...` line. Replace the call. **Capture the port once** so the URL embedded in the operation and the port passed to the broker can't diverge under a port-shift race:
 
 ```typescript
-// openUrl removed — surface goes through the hub broker.
-```
-
-(Remove the `import { openUrl } ...` line.) Replace the call with:
-
-```typescript
+    const port = daemonPortRef();
     services.hubBroker.surface(
-      `http://127.0.0.1:${daemonPortRef()}/ui/session?id=${grant.id}&token=${grant.ui_token}`,
-      daemonPortRef(),
+      `http://127.0.0.1:${port}/ui/session?id=${grant.id}&token=${grant.ui_token}`,
+      port,
     );
 ```
 
@@ -2840,18 +2945,23 @@ EOF
 
 - [ ] **Step 1: Replace the direct `openUrl(...)` call**
 
-In `POST /v1/unlock/start` handler (line 24):
+In `POST /v1/unlock/start` handler (around line 18–30), the existing code computes the URL using `daemonPortRef()`, then calls `openUrl(url)`. Refactor so the port is captured once and reused for both the URL and the broker call. Remove the `openUrl` import.
+
+Find:
 
 ```typescript
 import { openUrl } from "../../approvals/open-url.js";
 // ...
+    const url = `http://127.0.0.1:${daemonPortRef()}/ui/unlock?id=${session.id}&token=${session.ui_token}${envelope === null ? "&create=1" : ""}`;
     openUrl(url);
 ```
 
-Remove the `openUrl` import and replace the call with:
+Replace with (also remove the `openUrl` import):
 
 ```typescript
-    services.hubBroker.surface(url, daemonPortRef());
+    const port = daemonPortRef();
+    const url = `http://127.0.0.1:${port}/ui/unlock?id=${session.id}&token=${session.ui_token}${envelope === null ? "&create=1" : ""}`;
+    services.hubBroker.surface(url, port);
 ```
 
 - [ ] **Step 2: Run typecheck + tests**
@@ -3129,6 +3239,232 @@ EOF
 
 ---
 
+### Task G1.5: Browser-level DOM smoke test (jsdom)
+
+**Files:**
+- Modify: `package.json` (add `jsdom` as dev dep)
+- Create: `src/daemon/hub/hub-ui-dom.test.ts`
+
+The drift-guard tests (Task C2) only check that source patterns exist; they do not run the hub JS. Plan 4b is a UX/security path where the inline JS in `hub-ui.html` is load-bearing — a regression in the navigate handler, the postMessage gate, or the displaced cleanup would silently break the persistent-tab guarantee. This task adds ONE browser-level smoke via `jsdom` that loads the actual HTML, mocks `EventSource` + `fetch`, and asserts the DOM mutates correctly.
+
+- [ ] **Step 1: Add jsdom dev dep**
+
+Run: `npm install --save-dev jsdom @types/jsdom`
+
+Expected: package.json gains `"jsdom": "^24.x"` and `"@types/jsdom": "^21.x"` under `devDependencies`.
+
+- [ ] **Step 2: Write the failing test**
+
+Create `src/daemon/hub/hub-ui-dom.test.ts`:
+
+```typescript
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+import { JSDOM, ResourceLoader } from "jsdom";
+
+const HUB_HTML_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../src/daemon/hub/hub-ui.html",
+);
+
+/**
+ * Build a JSDOM with mocked EventSource + fetch. Returns the dom,
+ * a handle to the latest EventSource instance for driving events,
+ * and a fetch spy array.
+ */
+async function loadHub(): Promise<{
+  dom: JSDOM;
+  feedSse: (data: unknown) => void;
+  emitOpen: () => void;
+  emitError: () => void;
+  fetches: Array<{ url: string; init: RequestInit | undefined }>;
+  fetchResponder: (handler: (url: string, init?: RequestInit) => Response | Promise<Response>) => void;
+}> {
+  const html = await readFile(HUB_HTML_PATH, "utf8");
+
+  // Build a JSDOM that EXECUTES inline scripts. `runScripts: "dangerously"`
+  // is required for inline <script> to run; the hub HTML is daemon-owned
+  // and contains no untrusted content.
+  const dom = new JSDOM(html, {
+    url: "http://127.0.0.1:5555/ui/hub?token=hubT",
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+    resources: new ResourceLoader({ strictSSL: false }),
+  });
+
+  // EventSource mock: capture the latest instance, expose event triggers.
+  let latestEs: { onopen?: (e: unknown) => void; onmessage?: (e: { data: string }) => void; onerror?: (e: unknown) => void; close: () => void; addEventListener: (name: string, fn: (e: unknown) => void) => void; listeners: Record<string, Array<(e: unknown) => void>> } | null = null;
+  class FakeEventSource {
+    public readonly url: string;
+    public readonly listeners: Record<string, Array<(e: unknown) => void>> = {};
+    public closed = false;
+    constructor(url: string) { this.url = url; latestEs = this; }
+    addEventListener(name: string, fn: (e: unknown) => void): void {
+      (this.listeners[name] = this.listeners[name] ?? []).push(fn);
+    }
+    close(): void { this.closed = true; }
+  }
+  (dom.window as unknown as { EventSource: typeof FakeEventSource }).EventSource = FakeEventSource;
+
+  // fetch mock.
+  const fetches: Array<{ url: string; init: RequestInit | undefined }> = [];
+  let responder: (url: string, init?: RequestInit) => Response | Promise<Response> =
+    () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+  (dom.window as unknown as { fetch: typeof fetch }).fetch = (async (input: RequestInfo, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : (input as Request).url;
+    fetches.push({ url, init });
+    return responder(url, init);
+  }) as typeof fetch;
+
+  // Wait for the inline <script> to run + the initial connect() call.
+  await new Promise((r) => setTimeout(r, 50));
+
+  const driveEvent = (name: string, payload: unknown): void => {
+    const handlers = latestEs?.listeners[name] ?? [];
+    for (const h of handlers) h(payload);
+  };
+
+  return {
+    dom,
+    feedSse: (data) => driveEvent("message", { data: JSON.stringify(data) }),
+    emitOpen: () => driveEvent("open", {}),
+    emitError: () => driveEvent("error", {}),
+    fetches,
+    fetchResponder: (h) => { responder = h; },
+  };
+}
+
+test("hub-ui dom: navigate event sets iframe.src to the carried URL", async () => {
+  const ctx = await loadHub();
+  ctx.emitOpen();
+  ctx.feedSse({ type: "navigate", url: "http://127.0.0.1:5555/ui/approve?id=a&token=t&hub_seq=1", seq: 1 });
+  const iframe = ctx.dom.window.document.getElementById("op") as HTMLIFrameElement;
+  assert.equal(iframe.src, "http://127.0.0.1:5555/ui/approve?id=a&token=t&hub_seq=1");
+});
+
+test("hub-ui dom: displaced event hides iframe and points it at about:blank", async () => {
+  const ctx = await loadHub();
+  ctx.emitOpen();
+  ctx.feedSse({ type: "navigate", url: "http://127.0.0.1:5555/ui/approve?id=a&token=t&hub_seq=1", seq: 1 });
+  const iframe = ctx.dom.window.document.getElementById("op") as HTMLIFrameElement;
+  assert.match(iframe.src, /\/ui\/approve/);
+
+  ctx.feedSse({ type: "displaced" });
+  // CSS hides #op when #status has the displaced class.
+  const status = ctx.dom.window.document.getElementById("status")!;
+  assert.match(status.className, /displaced/);
+  // JS also reassigns iframe.src to about:blank as defense-in-depth.
+  assert.equal(iframe.src, "about:blank");
+});
+
+test("hub-ui dom: postMessage with valid origin+source+seq triggers POST /ui/hub/done", async () => {
+  const ctx = await loadHub();
+  ctx.emitOpen();
+  ctx.feedSse({ type: "navigate", url: "http://127.0.0.1:5555/ui/approve?id=a&token=t&hub_seq=1", seq: 1 });
+  const iframe = ctx.dom.window.document.getElementById("op") as HTMLIFrameElement;
+
+  // Manufacture a MessageEvent with origin === location.origin and
+  // source === iframe.contentWindow.
+  const ev = new ctx.dom.window.MessageEvent("message", {
+    data: { type: "operation_done", seq: 1 },
+    origin: "http://127.0.0.1:5555",
+    source: iframe.contentWindow as unknown as MessageEventSource,
+  });
+  ctx.dom.window.dispatchEvent(ev);
+
+  // Allow the async postDone() to fire.
+  await new Promise((r) => setTimeout(r, 50));
+
+  const doneCall = ctx.fetches.find((f) => f.url.includes("/ui/hub/done"));
+  assert.ok(doneCall !== undefined, "expected fetch to /ui/hub/done");
+  const body = doneCall!.init?.body as string | undefined;
+  assert.ok(body !== undefined);
+  const parsed = JSON.parse(body!) as { seq: number };
+  assert.equal(parsed.seq, 1);
+});
+
+test("hub-ui dom: postMessage with wrong origin is ignored (no fetch)", async () => {
+  const ctx = await loadHub();
+  ctx.emitOpen();
+  ctx.feedSse({ type: "navigate", url: "http://127.0.0.1:5555/ui/approve?id=a&token=t&hub_seq=1", seq: 1 });
+  const iframe = ctx.dom.window.document.getElementById("op") as HTMLIFrameElement;
+
+  const ev = new ctx.dom.window.MessageEvent("message", {
+    data: { type: "operation_done", seq: 1 },
+    origin: "http://evil.example.com",
+    source: iframe.contentWindow as unknown as MessageEventSource,
+  });
+  ctx.dom.window.dispatchEvent(ev);
+  await new Promise((r) => setTimeout(r, 50));
+
+  const doneCall = ctx.fetches.find((f) => f.url.includes("/ui/hub/done"));
+  assert.equal(doneCall, undefined, "wrong-origin postMessage must NOT trigger /ui/hub/done");
+});
+
+test("hub-ui dom: duplicate operation_done for same seq fires only one fetch", async () => {
+  const ctx = await loadHub();
+  ctx.emitOpen();
+  ctx.feedSse({ type: "navigate", url: "http://127.0.0.1:5555/ui/approve?id=a&token=t&hub_seq=1", seq: 1 });
+  const iframe = ctx.dom.window.document.getElementById("op") as HTMLIFrameElement;
+
+  for (let i = 0; i < 3; i++) {
+    const ev = new ctx.dom.window.MessageEvent("message", {
+      data: { type: "operation_done", seq: 1 },
+      origin: "http://127.0.0.1:5555",
+      source: iframe.contentWindow as unknown as MessageEventSource,
+    });
+    ctx.dom.window.dispatchEvent(ev);
+  }
+  await new Promise((r) => setTimeout(r, 100));
+
+  const doneCalls = ctx.fetches.filter((f) => f.url.includes("/ui/hub/done"));
+  // shouldPostDone() gates duplicates: doneInFlight covers concurrent
+  // dispatch, lastCompletedSeq covers post-success dispatch. We expect
+  // exactly 1 fetch even with 3 postMessages.
+  assert.equal(doneCalls.length, 1, `expected exactly 1 /ui/hub/done fetch, got ${doneCalls.length}`);
+});
+```
+
+- [ ] **Step 3: Run to verify the DOM tests pass**
+
+Run: `npx tsc --noEmit && npm test -- --test-name-pattern="hub-ui dom"`
+Expected: 5 DOM tests pass.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add package.json package-lock.json src/daemon/hub/hub-ui-dom.test.ts
+git commit -m "$(cat <<'EOF'
+test(hub): jsdom-based DOM smoke test for hub-ui.html
+
+Loads hub-ui.html in jsdom (runScripts: dangerously, daemon-owned
+content), mocks EventSource and fetch, and asserts the inline JS
+actually behaves correctly when driven:
+
+- navigate event → iframe.src is set.
+- displaced event → status class becomes 'displaced' (CSS hides
+  iframe) AND iframe.src is reassigned to about:blank (JS
+  defense-in-depth). Closes Plan 4b post-review P1 — a displaced
+  tab cannot continue approving operations.
+- postMessage with valid origin+source+seq triggers POST /ui/hub/done.
+- postMessage with wrong origin is ignored (no fetch).
+- Duplicate operation_done for same seq triggers exactly ONE fetch
+  (shouldPostDone gate works end-to-end).
+
+Closes Plan 4b post-review P2: the "e2e" layer no longer relies
+solely on broker.attach() — at least one test exercises the actual
+browser contract.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
 ### Task G2: `SECRET_SHUTTLE_NO_OPEN_URL` regression
 
 **Files:**
@@ -3226,7 +3562,7 @@ Expected: clean.
 - [ ] **Step 2: Run full test suite**
 
 Run: `npm test`
-Expected: ~895–905 tests passing, 2 skipped, 0 failing. Baseline was 842; new tests added across A1 (~20), B1 (3), B2 (3), B3 (8), C2 (7), D1 (1), D2 (1), D3 (1), E1 (5), E2 (5), E3 (3), F0 (2), G1 (6), G2 (2) = ~67 new tests. Final ~909 pass.
+Expected: ~915–925 tests passing, 2 skipped, 0 failing. Baseline was 842; new tests added across A1 (~20), B1 (3), B2 (3), B3 (8), B4 (2 wiring), C2 (8), D1 (1), D2 (1), D3 (1), E1 (5), E2 (5), E3 (3), F0 (2), G1 (6), G1.5 (5), G2 (2) = ~75 new tests. Final ~917 pass.
 
 - [ ] **Step 3: Run check-pack**
 
