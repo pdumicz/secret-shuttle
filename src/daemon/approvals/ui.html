@@ -24,6 +24,35 @@
       const params = new URLSearchParams(location.search);
       const id = params.get("id");
       const token = params.get("token");
+      // ── Plan 4b: hub integration ────────────────────────────────
+      const rawHubSeq = params.get("hub_seq");
+      const parsedHubSeq = rawHubSeq === null ? null : Number(rawHubSeq);
+      const hasHubSeq = parsedHubSeq !== null && Number.isSafeInteger(parsedHubSeq) && parsedHubSeq > 0;
+
+      function notifyHubIfFramed() {
+        if (!hasHubSeq) return;
+        if (window.parent !== window) {
+          window.parent.postMessage({ type: "operation_done", seq: parsedHubSeq }, location.origin);
+        }
+      }
+
+      const terminalStatuses = new Set(["granted", "denied", "expired", "used"]);
+      let pollTimer = null;
+      async function pollForTerminal() {
+        try {
+          const r = await fetch(`/ui/approvals/${id}?token=${token}`);
+          if (!r.ok) return;
+          const body = await r.json();
+          if (terminalStatuses.has(body.status)) {
+            stopPolling();
+            notifyHubIfFramed();
+          }
+        } catch { /* network blip; next tick will retry */ }
+      }
+      function startPolling() { pollTimer = setInterval(pollForTerminal, 2000); }
+      function stopPolling() { if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; } }
+      window.addEventListener("beforeunload", stopPolling);
+      // ────────────────────────────────────────────────────────────
       async function load() {
         const r = await fetch(`/ui/approvals/${id}?token=${token}`);
         const g = await r.json();
@@ -74,7 +103,13 @@
       }
       async function send(action) {
         const r = await fetch(`/ui/approvals/${id}/${action}?token=${token}`, { method: "POST" });
-        if (r.ok) document.getElementById("status").textContent = `Status: ${action}d`;
+        if (r.ok) {
+          document.getElementById("status").textContent = `Status: ${action}d`;
+          stopPolling();
+          notifyHubIfFramed();
+        }
+        // On !r.ok: leave polling active. If the daemon actually committed
+        // (race), the next poll catches the terminal status and notifies.
       }
       document.getElementById("actions").innerHTML = `
         <button class="approve" id="ok">Approve</button>
@@ -82,7 +117,7 @@
       `;
       document.getElementById("ok").addEventListener("click", () => send("approve"));
       document.getElementById("no").addEventListener("click", () => send("deny"));
-      load();
+      load().then(() => startPolling());
     </script>
   </body>
 </html>
