@@ -375,3 +375,109 @@ test("no raw secret and no observed text appears in any response", async () => {
     assert.equal(s.includes(SECRET), false);
   });
 });
+
+/** Read every line of audit.jsonl and parse as JSON. Used by the session
+ *  tests below to assert which audit records the route wrote. */
+interface AuditLine {
+  action: string;
+  ok?: boolean;
+  ref?: string;
+  session_id?: string;
+  error_code?: string;
+  [k: string]: unknown;
+}
+async function readAuditLines(home: string): Promise<AuditLine[]> {
+  const text = await readFile(getShuttlePaths(home).auditLogPath, "utf8").catch(() => "");
+  return text.split("\n").filter(Boolean).map((line) => JSON.parse(line) as AuditLine);
+}
+
+test("inject-submit: matching session mints grant → audit carries session_id; sessionStore.uses incremented", async () => {
+  await withDaemon(async ({ port, services, home }) => {
+    services.browser = stub({ observeText: async () => true, proveAbsence: async () => ({ passed: true }) });
+    await setup(services, port);
+    // Mint and approve an inject-submit session covering this ref + domain.
+    const sg = services.sessionStore.create({
+      actions: ["inject-submit"],
+      ref_glob: "ss://stripe/prod/*",
+      destination_domains: ["vercel.com"],
+      ttl_ms: 60_000,
+    });
+    services.sessionStore.approve(sg.id);
+
+    const r = await call(port, "POST", "/v1/secrets/inject-submit", body({ session_id: sg.id }));
+    assert.equal(r.status, 200, `expected 200, got ${r.status} body=${JSON.stringify(r.body)}`);
+    assert.equal((r.body as { submitted: unknown }).submitted, true);
+
+    // Audit: the most-recent inject_submit line carries session_id with ok:true.
+    const lines = await readAuditLines(home);
+    const isLine = [...lines].reverse().find((l) => l.action === "inject_submit");
+    assert.ok(isLine, "expected at least one inject_submit audit line");
+    assert.equal(isLine!.ok, true, "success audit must carry ok:true");
+    assert.equal(
+      isLine!.session_id,
+      sg.id,
+      "success audit must carry session_id of the consumed session",
+    );
+
+    // Session usage counter advanced exactly once.
+    const session = services.sessionStore.get(sg.id)!;
+    assert.equal(session.uses, 1, "session.uses should be incremented to 1");
+  });
+});
+
+test("inject-submit: failure AFTER session mint still records session_id; uses still incremented", async () => {
+  // Exploit the pre-write revalidate path: revalidateHandle succeeds on the
+  // first two calls (pre-approval, BEFORE requireApproval mints the session
+  // grant) and throws on the third (post-approval, pre-write). The session IS
+  // minted and the use counter IS incremented; the throw lands in the outer
+  // catch and the failure audit MUST carry session_id.
+  await withDaemon(async ({ port, services, home }) => {
+    let calls = 0;
+    services.browser = stub({
+      revalidateHandle: async () => {
+        calls += 1;
+        if (calls > 2) throw new ShuttleError("handle_invalid", "gone");
+      },
+    });
+    await setup(services, port);
+    const sg = services.sessionStore.create({
+      actions: ["inject-submit"],
+      ref_glob: "ss://stripe/prod/*",
+      destination_domains: ["vercel.com"],
+      ttl_ms: 60_000,
+    });
+    services.sessionStore.approve(sg.id);
+
+    const r = await call(port, "POST", "/v1/secrets/inject-submit", body({ session_id: sg.id }));
+    assert.equal(r.status, 400);
+    assert.equal(
+      (r.body as { error: { code: string } }).error.code,
+      "handle_invalid",
+      "post-mint failure must surface as handle_invalid (pre-write revalidate re-thrown)",
+    );
+
+    // Audit: the most-recent inject_submit failure line carries session_id with ok:false.
+    const lines = await readAuditLines(home);
+    const isLine = [...lines].reverse().find((l) => l.action === "inject_submit");
+    assert.ok(isLine, "expected at least one inject_submit audit line");
+    assert.equal(isLine!.ok, false, "failure audit must carry ok:false");
+    assert.equal(
+      isLine!.session_id,
+      sg.id,
+      "post-mint failure audit MUST still carry session_id (the session was charged a use)",
+    );
+    assert.equal(
+      isLine!.error_code,
+      "handle_invalid",
+      "failure audit must carry the underlying error_code",
+    );
+
+    // Session usage counter still advanced — the mint was real.
+    const session = services.sessionStore.get(sg.id)!;
+    assert.equal(
+      session.uses,
+      1,
+      "session.uses must still be 1: session was minted before the post-mint throw",
+    );
+  });
+});

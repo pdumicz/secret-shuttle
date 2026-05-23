@@ -1,6 +1,6 @@
 import { ShuttleError } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
-import type { ApprovalBinding } from "../../approvals/store.js";
+import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { domainMatches } from "../../../policy/domain-policy.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
@@ -20,6 +20,7 @@ interface InjectSubmitBody {
   success_timeout_ms?: number;
   approval_id?: string;
   wait_for_approval?: boolean;
+  session_id?: string;
 }
 
 const SUCCESS_TIMEOUT_DEFAULT_MS = 15_000;
@@ -35,6 +36,13 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
     const successText = reqString(o, "success_text");
     const b = raw as InjectSubmitBody;
     let blindStarted = false;
+    // Hoisted OUTSIDE the try so a post-mint failure (e.g. pre-write
+    // revalidateHandle throws AFTER requireApproval consumed the session)
+    // still carries grant.session_id into the failure audit.  Optional-chained
+    // at use site because grant remains undefined if requireApproval itself
+    // threw (pre-mint failure), in which case no session was consumed and
+    // audit MUST NOT carry session_id.
+    let grant: ApprovalGrant | undefined;
     try {
       if (services.browser === null) {
         throw new ShuttleError("browser_not_started", "Run `secret-shuttle browser start` first.");
@@ -105,11 +113,19 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
         ...(fieldHandle.page_title !== "" ? { page_title: fieldHandle.page_title } : {}),
         ...(fieldHandle.page_url_host !== "" ? { page_url_host: fieldHandle.page_url_host } : {}),
       };
-      await requireApproval({
+      // Single requireApproval call — handles both the initial (no approval_id)
+      // and the retry (approval_id supplied) paths.  When session_id is set and
+      // the binding matches an inject-submit session pattern (ref +
+      // destination_domain), the call mints a used grant from the session and
+      // the audits emitted below carry grant.session_id; otherwise the call
+      // falls back to the single-use flow and grant.session_id is undefined.
+      grant = await requireApproval({
         store: services.approvals,
         binding,
         daemonPort: daemonPortRef(),
         force: true,
+        sessionStore: services.sessionStore,
+        ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
         ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
@@ -182,6 +198,7 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
         await writeDaemonAudit({
           action: "inject_submit", ok: false, ref: secret.ref, environment: secret.environment,
           domain, submitted: "unknown", blind_mode: true,
+          ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
         });
         return {
           submitted: "unknown", secret_ref: secret.ref, domain,
@@ -219,6 +236,7 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
           await writeDaemonAudit({
             action: "inject_submit", ok: true, ref: secret.ref, environment: secret.environment,
             domain, submitted: true, success_signal: "text_matched", absence_proof: "passed", blind_mode: false,
+            ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
           });
           return {
             submitted: true, secret_ref: secret.ref, domain,
@@ -233,6 +251,7 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
       await writeDaemonAudit({
         action: "inject_submit", ok: true, ref: secret.ref, environment: secret.environment,
         domain, submitted: "unknown", blind_mode: true,
+        ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       return {
         submitted: "unknown", secret_ref: secret.ref, domain,
@@ -247,6 +266,11 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
         ok: false,
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
         ...(ref !== undefined ? { ref } : {}),
+        // Optional-chain: grant is undefined if requireApproval itself threw
+        // (pre-mint failure — no session consumed → audit MUST NOT carry
+        // session_id).  Otherwise grant.session_id is the source session iff
+        // the binding matched the session pattern.
+        ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       throw err;
     }
