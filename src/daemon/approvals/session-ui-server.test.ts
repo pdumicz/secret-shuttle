@@ -100,3 +100,135 @@ test("GET /ui/session unknown id → 404", async () => {
     assert.equal(res.status, 404);
   });
 });
+
+test("GET /ui/sessions/:id with valid token → 200 with session JSON + hardening headers", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run"],
+      ref_glob: "ss://x/prod/*",
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
+      ttl_ms: 60_000,
+    });
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/sessions/${sg.id}?token=${sg.ui_token}`);
+    assert.equal(r.status, 200);
+    const body = await r.json() as { id: string; status: string; actions: string[]; ref_glob: string };
+    assert.equal(body.id, sg.id);
+    assert.equal(body.status, "pending");
+    assert.deepEqual(body.actions, ["template-run"]);
+    assert.equal(body.ref_glob, "ss://x/prod/*");
+    // Token-bearing JSON routes MUST set the hardening triplet.
+    assert.equal(r.headers.get("cache-control"), "no-store");
+    assert.equal(r.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(r.headers.get("x-content-type-options"), "nosniff");
+  });
+});
+
+test("GET /ui/sessions/:id with WRONG token → 401 ui_token_mismatch", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run"],
+      ref_glob: "ss://x/prod/*",
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
+      ttl_ms: 60_000,
+    });
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/sessions/${sg.id}?token=WRONG`);
+    assert.equal(r.status, 401);
+    const body = await r.json() as { error_code: string };
+    assert.equal(body.error_code, "ui_token_mismatch");
+  });
+});
+
+test("GET /ui/sessions/:id unknown id → 404 session_not_found", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/sessions/missing?token=any`);
+    assert.equal(r.status, 404);
+    const body = await r.json() as { error_code: string };
+    assert.equal(body.error_code, "session_not_found");
+  });
+});
+
+test("POST /ui/sessions/:id/approve transitions status + resets expires_at", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run"],
+      ref_glob: "ss://x/prod/*",
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
+      ttl_ms: 60_000,
+    });
+    const r = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/sessions/${sg.id}/approve?token=${sg.ui_token}`,
+      { method: "POST" },
+    );
+    assert.equal(r.status, 200);
+    const granted = ctx.services.sessionStore.get(sg.id)!;
+    assert.equal(granted.status, "granted");
+    assert.ok(granted.approved_at !== null);
+  });
+});
+
+test("POST /ui/sessions/:id/deny transitions status", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run"],
+      ref_glob: "ss://x/prod/*",
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
+      ttl_ms: 60_000,
+    });
+    const r = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/sessions/${sg.id}/deny?token=${sg.ui_token}`,
+      { method: "POST" },
+    );
+    assert.equal(r.status, 200);
+    assert.equal(ctx.services.sessionStore.get(sg.id)!.status, "denied");
+  });
+});
+
+test("POST /ui/sessions/:id/approve with wrong token → 401", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run"],
+      ref_glob: "ss://x/prod/*",
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
+      ttl_ms: 60_000,
+    });
+    const r = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/sessions/${sg.id}/approve?token=WRONG`,
+      { method: "POST" },
+    );
+    assert.equal(r.status, 401);
+  });
+});
+
+test("POST /ui/sessions/:id/approve on an already-denied session → 409 session_not_pending", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run"],
+      ref_glob: "ss://x/prod/*",
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
+      ttl_ms: 60_000,
+    });
+    // Deny first via HTTP.
+    await fetch(`http://127.0.0.1:${ctx.port}/ui/sessions/${sg.id}/deny?token=${sg.ui_token}`, { method: "POST" });
+    // Now try to approve.
+    const r = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/sessions/${sg.id}/approve?token=${sg.ui_token}`,
+      { method: "POST" },
+    );
+    assert.equal(r.status, 409); // conflict
+    const body = await r.json() as { error_code: string };
+    assert.equal(body.error_code, "session_not_pending");
+  });
+});

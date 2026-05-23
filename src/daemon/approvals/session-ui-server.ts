@@ -70,6 +70,83 @@ export function registerSessionUiRoutes(server: DaemonServer, sessionStore: Sess
     );
     res.end(html);
   });
+
+  // GET /ui/sessions/:id?token=<ui_token>
+  server.addRouteRaw("GET", /^\/ui\/sessions\/[^/]+$/, async (req, _body, res) => {
+    const url = new URL(req.url ?? "", "http://127.0.0.1");
+    const m = url.pathname.match(/^\/ui\/sessions\/([^/]+)$/);
+    if (m === null) {
+      writeError(res, 400, new ShuttleError("bad_request", "Bad URL."));
+      return;
+    }
+    const id = m[1] as string;
+    const token = url.searchParams.get("token") ?? "";
+    const grant = sessionStore.get(id);
+    if (grant === undefined) {
+      writeError(res, 404, new ShuttleError("session_not_found", "Unknown session id."));
+      return;
+    }
+    if (!tokensMatch(grant.ui_token, token)) {
+      writeError(res, 401, new ShuttleError("ui_token_mismatch", "Invalid UI token."));
+      return;
+    }
+    setHardeningHeaders(res);
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({
+      id: grant.id,
+      status: grant.status,
+      actions: grant.actions,
+      ref_glob: grant.ref_glob,
+      destination_domains: grant.destination_domains,
+      ...(grant.template_ids !== undefined ? { template_ids: grant.template_ids } : {}),
+      ...(grant.allowed_actions !== undefined ? { allowed_actions: grant.allowed_actions } : {}),
+      ttl_ms: grant.ttl_ms,
+      ...(grant.max_uses !== undefined ? { max_uses: grant.max_uses } : {}),
+      created_at: grant.created_at,
+      approved_at: grant.approved_at,
+      expires_at: grant.expires_at,
+    }));
+  });
+
+  // POST /ui/sessions/:id/approve?token=<ui_token>
+  // POST /ui/sessions/:id/deny?token=<ui_token>
+  server.addRouteRaw("POST", /^\/ui\/sessions\/[^/]+\/(approve|deny)$/, async (req, _body, res) => {
+    const url = new URL(req.url ?? "", "http://127.0.0.1");
+    const m = url.pathname.match(/^\/ui\/sessions\/([^/]+)\/(approve|deny)$/);
+    if (m === null) {
+      writeError(res, 400, new ShuttleError("bad_request", "Bad URL."));
+      return;
+    }
+    const id = m[1] as string;
+    const verb = m[2] as "approve" | "deny";
+    const token = url.searchParams.get("token") ?? "";
+    const grant = sessionStore.get(id);
+    if (grant === undefined) {
+      writeError(res, 404, new ShuttleError("session_not_found", "Unknown session id."));
+      return;
+    }
+    if (!tokensMatch(grant.ui_token, token)) {
+      writeError(res, 401, new ShuttleError("ui_token_mismatch", "Invalid UI token."));
+      return;
+    }
+    try {
+      if (verb === "approve") sessionStore.approve(id);
+      else sessionStore.deny(id);
+    } catch (e) {
+      // session_not_pending → 409 conflict.
+      if (e instanceof ShuttleError && e.code === "session_not_pending") {
+        writeError(res, 409, e);
+        return;
+      }
+      writeError(res, 400, e);
+      return;
+    }
+    setHardeningHeaders(res);
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ok: true, status: verb === "approve" ? "granted" : "denied" }));
+  });
 }
 
 function htmlEscape(s: string): string {
