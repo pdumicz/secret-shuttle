@@ -136,10 +136,11 @@ test("registry total entry count (sanity check)", () => {
   // Plan 3 Task B2 adds 6 more (spawn_failed, env_file_parse_error,
   // inject_template_parse_error, env_file_not_found, inject_output_path_unsafe,
   // inject_output_write_failed) = 110 total.
+  // Plan 4a Task C1 adds 7 more session-related codes = 117 total.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 110, `expected 110 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 117, `expected 117 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -150,4 +151,9 @@ test("registry total entry count (sanity check)", () => {
   assert.ok(lookupErrorCode("env_file_parse_error"));
   assert.ok(lookupErrorCode("inject_output_path_unsafe"));
   assert.ok(lookupErrorCode("spawn_failed"));
+
+  // Spot-check new C1 session entries.
+  for (const c of ["session_not_found", "session_expired", "session_max_uses_exceeded", "session_pattern_no_match", "session_pattern_invalid_glob"]) {
+    assert.ok(lookupErrorCode(c), `${c} should be registered`);
+  }
 });

@@ -87,6 +87,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   unsupported_secret_kind: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   env_file_parse_error: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   inject_template_parse_error: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  session_pattern_invalid_glob: { exitCode: EXIT_CODE_USAGE, hint: () => null },
 
   // ── Not found ──────────────────────────────────────────────────────────────
   not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -117,6 +118,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   skill_bundled_file_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   template_tmpdir_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   env_file_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
+  session_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
 
   // ── Permission ─────────────────────────────────────────────────────────────
   bad_host: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
@@ -160,6 +162,10 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   },
   inject_output_path_unsafe: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   inject_output_write_failed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  session_expired: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  session_max_uses_exceeded: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  session_pattern_no_match: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  session_unauthorized: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
 
   // ── Conflict ───────────────────────────────────────────────────────────────
   already_migrated: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
@@ -173,6 +179,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   snippet_ambiguous: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   template_env_file_collision: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   template_env_file_write_failed: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
+  session_not_pending: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
 
   // ── Keychain (Part B; full implementations come in Plan 5a) ────────────────
   keychain_not_implemented: {
