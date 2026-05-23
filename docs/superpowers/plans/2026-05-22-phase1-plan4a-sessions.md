@@ -1012,6 +1012,42 @@ test("secrets-set: binding.allowed_actions wider than pattern → false", () => 
   assert.equal(matchesSessionPattern(b, p), false);
 });
 
+test("secrets-set: binding.allowed_actions undefined → false (defense in depth)", () => {
+  // The generate route populates binding.allowed_actions before requireApproval,
+  // so an undefined value here means the binding came from somewhere that
+  // doesn't carry the contract. Refuse rather than silently auto-approve a
+  // secret with no action scope.
+  const p = makePattern({
+    actions: ["secrets-set"],
+    allowed_actions: ["use_as_stdin"],
+  });
+  const b = makeBinding({
+    action: "generate",
+    ref: null,
+    planned_ref: "ss://stripe/prod/A",
+    allowed_domains: ["vercel.com"],
+    // allowed_actions: undefined  ← intentionally omitted
+  });
+  assert.equal(matchesSessionPattern(b, p), false);
+});
+
+test("secrets-set: binding.allowed_actions explicit empty [] → true (deliberately narrow scope)", () => {
+  // An empty array is a deliberately narrow scope — the binding wants the
+  // secret to allow NO actions. ⊆ pattern.allowed_actions vacuously holds.
+  const p = makePattern({
+    actions: ["secrets-set"],
+    allowed_actions: ["use_as_stdin"],
+  });
+  const b = makeBinding({
+    action: "generate",
+    ref: null,
+    planned_ref: "ss://stripe/prod/A",
+    allowed_domains: ["vercel.com"],
+    allowed_actions: [], // explicit empty — narrower than the pattern, OK
+  });
+  assert.equal(matchesSessionPattern(b, p), true);
+});
+
 // =============================================================================
 // run / inject_render are NOT SessionActions in Plan 4a — see the pass-through
 // refusal tests at the bottom of this file.
@@ -1193,9 +1229,14 @@ function secretsSetMatches(binding: ApprovalBinding, pattern: SessionPattern): b
   for (const d of allowedDomains) {
     if (!domainPatternSet.has(d)) return false; // binding widens the approved domains
   }
-  const allowedActions = binding.allowed_actions ?? [];
+  // Defense-in-depth: refuse if the binding doesn't carry an explicit action
+  // scope at all. The generate route populates binding.allowed_actions before
+  // requireApproval, so missing-undefined here means the binding came from
+  // somewhere that doesn't carry the contract; don't session-approve. An
+  // explicit empty array ([]) is allowed — that's a deliberately narrow scope.
+  if (binding.allowed_actions === undefined) return false;
   const actionsPatternSet = new Set(pattern.allowed_actions);
-  for (const a of allowedActions) {
+  for (const a of binding.allowed_actions) {
     if (!actionsPatternSet.has(a)) return false; // binding widens the approved actions
   }
   return true;
@@ -3155,30 +3196,82 @@ git commit -m "feat(audit): DaemonAuditEvent.session_id field"
 - [ ] **Step 1-4: One commit per session-capable route.** Each of the four session-capable routes (`templates.ts`, `secrets.ts` generate endpoint, `inject-submit.ts`, `reveal-capture.ts`) gets its own commit. Each commit:
   - Adds `session_id` body param.
   - Passes through to `requireApproval` with `sessionStore: services.sessionStore`.
-  - Records `grant.session_id` in audit entries when set.
+  - Hoists `let grant: ApprovalGrant | undefined;` OUTSIDE the try block; assigns it from the `requireApproval` return value INSIDE the try; references `grant?.session_id` in BOTH the success audit AND the catch-block failure audit. This is what guarantees the failure audit carries `session_id` whenever the session was consumed but the op then threw.
   - Adds TWO tests (both required):
     (1) **Success path** — session matches; operation succeeds. Asserts:
       (a) the audit line carries `session_id`,
       (b) the audit line has `ok: true`,
       (c) `sessionStore.get(id).uses` was incremented to 1.
-    (2) **Failure-after-mint path** — session matches (use IS consumed) but the underlying operation then fails (e.g. the route hits a vault error, the secret was soft-deleted between mint and use, a downstream template assertion throws). Asserts:
-      (a) the audit line STILL carries `session_id` (the human needs to be able to trace why no approval window appeared even though the op failed),
+    (2) **Failure-AFTER-mint path** — the operation must fail at a point AFTER `requireApproval` returns (so the session is genuinely consumed). Asserts:
+      (a) the audit line STILL carries `session_id`,
       (b) the audit line has `ok: false`,
-      (c) `sessionStore.get(id).uses` was still incremented to 1 (the use was consumed at mint time, regardless of downstream outcome).
+      (c) `sessionStore.get(id).uses` was incremented to 1.
 
-The failure-after-mint test usually exploits a vault-level failure: seed a secret, create + approve a matching session, then `softDelete` the secret BEFORE invoking the route. The route resolves the ref → secret_not_found → audit failure. The session was consumed; the audit must reflect both facts.
+**CRITICAL — the failure must come AFTER `requireApproval` returns.** Most routes do work BEFORE the approval call (ref resolution, policy checks, etc.). Failures there consume nothing — they happen before mint. The R5 draft suggested `softDelete`-ing the secret to trigger `secret_not_found`, but for `templates.ts` the resolve happens at line 48, BEFORE `requireApproval` at line 106 — that's a pre-mint failure and would NOT exercise the audit contract we want. Per-route post-mint failure paths to use instead:
+
+  - **`templates.ts`** — exploit the `resolveErr` path: register a template whose `binary` resolves to a path that doesn't exist on disk. The route captures `resolveErr` BEFORE `requireApproval` (line 80-85) but RE-THROWS it AFTER (line 116: `if (resolveErr !== null) throw resolveErr;`). Session is consumed at the requireApproval call; the throw happens after.
+  - **`secrets.ts` generate endpoint** — call generate with a planned_ref that already exists in the vault and `force: false`. `services.vault.upsertSecret` throws `secret_exists` AFTER the approval call. (Verify the call order: validation + planned_ref construction happens before requireApproval; the actual upsert call is after.)
+  - **`inject-submit.ts`** — force a post-approval failure via a vault state change between mint and submit (e.g. the test fixture's vault swaps the secret value for one that fails `assertSecretActionAllowed("inject_submit")` between requireApproval returning and the submit call). Alternative: mock the browser submit dispatcher to throw. The test should clearly show the failure point is AFTER `requireApproval`.
+  - **`reveal-capture.ts`** — same shape as inject-submit: the actual capture step happens after requireApproval; a mocked browser failure or a vault-state-flip between approve and capture triggers the post-mint failure.
+
+  When in doubt, the implementer can grep the route file for `requireApproval` and verify every operation BELOW that line is a candidate for post-mint failure; everything ABOVE happens before mint and is irrelevant to this test.
+
+**Code pattern for the route's grant + audit handling:**
+
+```typescript
+let grant: ApprovalGrant | undefined;
+let auditErrorCode: string | undefined;
+try {
+  // ... pre-approval work (resolve, validate, etc.) — may throw, but those
+  //     throws happen BEFORE mint and so don't carry session_id.
+  grant = await requireApproval({
+    store: services.approvals,
+    binding,
+    daemonPort: daemonPortRef(),
+    sessionStore: services.sessionStore,
+    ...(sessionId !== undefined ? { sessionId } : {}),
+    ...(approvalId !== undefined ? { approvalIdFromClient: approvalId } : {}),
+    ...(waitForApproval === false ? { waitMs: 0 } : {}),
+  });
+  // ... post-approval work — anything that throws here MUST audit with session_id.
+  const result = await doTheThing();
+  await writeDaemonAudit({
+    action: "template_run",
+    ok: true,
+    ref: ...,
+    ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
+  });
+  return result;
+} catch (e) {
+  auditErrorCode = e instanceof ShuttleError ? e.code : "unexpected_error";
+  await writeDaemonAudit({
+    action: "template_run",
+    ok: false,
+    ref: ...,
+    error_code: auditErrorCode,
+    // CRITICAL: grant?.session_id, not grant.session_id — grant may be
+    // undefined here if requireApproval itself threw (pre-mint failure).
+    // The optional chain preserves the contract: session_id appears in audit
+    // iff the session was actually consumed.
+    ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
+  });
+  throw e;
+}
+```
 
 Example commit message for a session-capable route:
 
 ```
-feat(routes/templates): accept session_id; audit records source session
+feat(routes/templates): accept session_id; audit records source session on both paths
 
 If session_id is supplied and the binding matches the session pattern,
 requireApproval mints a used grant from the session and skips the per-op
-approval window. The grant carries session_id which the route writes into
-the template_run audit entry on BOTH success and failure paths — so the
-audit log preserves the "why no approval window?" provenance even when
-the op fails after the session was consumed.
+approval window. The grant is hoisted outside the try block so its
+session_id flows into BOTH the success audit AND the catch-block failure
+audit. New post-mint failure test (exploit resolveErr by registering a
+template whose binary resolves to a nonexistent path) proves the failure
+audit carries session_id when the session was consumed but the op then
+threw after mint.
 ```
 
 - [ ] **Step 5-9: One commit per pass-through route.** Each of the five pass-through routes gets its own commit:
@@ -3465,7 +3558,7 @@ secret-shuttle template run vercel-env-add --ref ss://local/prod/X --session <id
 
 ### Security
 - The matcher for `secrets-set` checks `binding.allowed_domains ⊆ pattern.destination_domains` (subset, not equality). An agent can't widen the domain set the human approved.
-- The matcher for `secrets-set` similarly checks `binding.allowed_actions ⊆ pattern.allowed_actions` when `pattern.allowed_actions` is set.
+- The matcher for `secrets-set` similarly checks `binding.allowed_actions ⊆ pattern.allowed_actions`. `pattern.allowed_actions` is REQUIRED non-empty for any pattern listing `secrets-set` (entries validated against `ALL_SECRET_ACTIONS`). The matcher also refuses if `binding.allowed_actions` is undefined — defense in depth: a binding without an explicit action scope is not session-approvable.
 - Patterns cannot use full globs — only literal prefix + optional single trailing `*`. Reduces matcher complexity and "I didn't think it would match THAT" surprises.
 - TTL is hard-capped at 15 minutes. Beyond that the human re-approves.
 ```
