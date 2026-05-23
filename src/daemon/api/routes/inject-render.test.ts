@@ -439,3 +439,59 @@ test("POST /v1/inject/render: failed stdout passthrough does NOT mark value_visi
     );
   });
 });
+
+test("POST /v1/inject/render: session pass-through — audit lacks session_id; uses stays at 0", async () => {
+  // inject_render is NOT a SessionAction in v0.2.0 — the matcher refuses,
+  // requireApproval falls back to single-use. With wait_for_approval:false we
+  // surface approval_required. The per-ref audit entry MUST NOT carry
+  // session_id, and the session use-counter MUST stay at 0.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "production", name: "PROD_K", value: "v",
+    });
+    // Broadest legal pattern still won't match the inject_render binding
+    // because canonicalAction returns null for it.
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
+      ref_glob: "",
+      destination_domains: ["any.com"],
+      template_ids: ["any"],
+      allowed_actions: [
+        "capture_from_page",
+        "inject_into_field",
+        "compare_fingerprint",
+        "use_as_stdin",
+        "inject_submit",
+      ],
+      ttl_ms: 60_000,
+    });
+    ctx.services.sessionStore.approve(sg.id);
+
+    const r = await call(ctx, "POST", "/v1/inject/render", {
+      template: `k: ${ref}`,
+      output_path: path.join(ctx.home, "passthrough.yml"),
+      session_id: sg.id,
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error_code: string }).error_code, "approval_required");
+
+    const auditPath = path.join(ctx.home, "audit.jsonl");
+    const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
+    const matches = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.action === "inject_render" && e.ref === ref);
+    assert.ok(matches.length > 0, "expected at least one inject_render audit entry");
+    for (const e of matches) {
+      assert.equal(
+        (e as { session_id?: string }).session_id,
+        undefined,
+        "pass-through: audit must NOT carry session_id (matcher refused → single-use fallback)",
+      );
+    }
+
+    // Session was NOT minted — uses stays at 0.
+    assert.equal(ctx.services.sessionStore.get(sg.id)!.uses, 0);
+  });
+});

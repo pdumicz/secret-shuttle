@@ -4,7 +4,7 @@ import os from "node:os";
 import { randomBytes } from "node:crypto";
 import { ShuttleError } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
-import type { ApprovalBinding } from "../../approvals/store.js";
+import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { parseTemplate } from "../../inject/template.js";
@@ -25,6 +25,7 @@ export function registerInjectRenderRoute(
     const outputPath = reqString(o, "output_path");
     const approvalId = optString(o, "approval_id");
     const waitForApproval = optBool(o, "wait_for_approval");
+    const sessionId = optString(o, "session_id");
 
     const parsed = parseTemplate(template);
 
@@ -40,6 +41,13 @@ export function registerInjectRenderRoute(
     let auditOk = false;
     let auditErrorCode: string | undefined;
     let valueVisibleToAgent = false;
+    // grant is hoisted so the finally-block audit can carry session_id when
+    // applicable. inject_render is NOT a SessionAction in v0.2.0 — the matcher
+    // canonicalizes the action to null and refuses; requireApproval falls back
+    // to single-use and grant.session_id is undefined. The conditional spread
+    // in the audit write evaluates to nothing on that path, but we still wire
+    // the spread to preserve a single audit shape across all routes.
+    let grant: ApprovalGrant | undefined;
 
     try {
       resolved = await services.vault.resolveRefs(parsed.refs);
@@ -68,10 +76,12 @@ export function registerInjectRenderRoute(
           },
           allowed_domains: [],
         };
-        await requireApproval({
+        grant = await requireApproval({
           store: services.approvals,
           binding,
           daemonPort: daemonPortRef(),
+          sessionStore: services.sessionStore,
+          ...(sessionId !== undefined ? { sessionId } : {}),
           ...(approvalId !== undefined ? { approvalIdFromClient: approvalId } : {}),
           ...(waitForApproval === false ? { waitMs: 0 } : {}),
         });
@@ -259,6 +269,12 @@ export function registerInjectRenderRoute(
           value_visible_to_agent: valueVisibleToAgent,
           ...(record !== undefined ? { environment: record.environment } : {}),
           ...(auditErrorCode !== undefined ? { error_code: auditErrorCode } : {}),
+          // For inject_render this conditional spread always evaluates to
+          // nothing: the action is not a SessionAction, the matcher refuses,
+          // requireApproval falls back to single-use, and grant.session_id is
+          // undefined. We still write the spread so the audit-shape contract
+          // matches the session-capable routes.
+          ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
         });
       }
     }
