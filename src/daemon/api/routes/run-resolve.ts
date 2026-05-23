@@ -1,7 +1,7 @@
 import type { ServerResponse } from "node:http";
 import { ShuttleError, errorToJson } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
-import type { ApprovalBinding } from "../../approvals/store.js";
+import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { buildChildEnv } from "../../safe-env.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
@@ -20,6 +20,7 @@ interface RunResolveBody {
   cwd: string;
   approval_id?: string;
   wait_for_approval?: boolean;
+  session_id?: string;
 }
 
 export function registerRunResolveRoute(
@@ -32,6 +33,17 @@ export function registerRunResolveRoute(
     // DaemonServer.addRouteStreaming before this handler runs.
 
     services.lock.requireKey();
+
+    // Hoisted OUTSIDE the production block so its session_id (if any) flows
+    // into EVERY audit emission below — both pre-spawn failure paths (where
+    // grant remains undefined for non-production refs) and the post-spawn
+    // success/failure paths. For the run action this only ever holds a
+    // single-use grant (run is NOT a SessionAction; the session matcher
+    // refuses and requireApproval falls back), so grant.session_id is
+    // ALWAYS undefined and the conditional spread evaluates to nothing —
+    // but we still wire the spread to preserve a single audit shape across
+    // all routes.
+    let grant: ApprovalGrant | undefined;
 
     // Strict body validation. Reject — never silently coerce or drop — anything
     // that doesn't match the wire contract. The existing route validators in
@@ -99,6 +111,7 @@ export function registerRunResolveRoute(
 
       const approvalId = optString(o, "approval_id");
       const waitForApproval = optBool(o, "wait_for_approval");
+      const sessionId = optString(o, "session_id");
 
       // cwd is required AND must be absolute. Use optString here (not reqString)
       // so a missing cwd flows into the explicit `missing_param` check below,
@@ -116,6 +129,7 @@ export function registerRunResolveRoute(
         cwd: cwdOpt ?? "",
         ...(approvalId !== undefined ? { approval_id: approvalId } : {}),
         ...(waitForApproval !== undefined ? { wait_for_approval: waitForApproval } : {}),
+        ...(sessionId !== undefined ? { session_id: sessionId } : {}),
       };
     } catch (e) {
       // Validation throws before any side effect — safe to surface as pre-stream JSON.
@@ -145,7 +159,7 @@ export function registerRunResolveRoute(
       resolved = await services.vault.resolveRefs(body.refs);
     } catch (e) {
       const code = e instanceof ShuttleError ? e.code : "unexpected_error";
-      await auditPerRequestedRef(body.refs, false, code);
+      await auditPerRequestedRef(body.refs, false, code, grant?.session_id);
       writeJsonError(res, 400, e);
       return;
     }
@@ -158,7 +172,7 @@ export function registerRunResolveRoute(
     } catch (e) {
       const code = e instanceof ShuttleError ? e.code : "unexpected_error";
       // We have full records here, so audit with environment populated.
-      await auditPerRef(body.refs, resolved, false, code);
+      await auditPerRef(body.refs, resolved, false, code, grant?.session_id);
       writeJsonError(res, 400, e);
       return;
     }
@@ -186,16 +200,21 @@ export function registerRunResolveRoute(
         allowed_domains: [],
       };
       try {
-        await requireApproval({
+        grant = await requireApproval({
           store: services.approvals,
           binding,
           daemonPort: daemonPortRef(),
+          sessionStore: services.sessionStore,
+          ...(body.session_id !== undefined ? { sessionId: body.session_id } : {}),
           ...(body.approval_id !== undefined ? { approvalIdFromClient: body.approval_id } : {}),
           ...(body.wait_for_approval === false ? { waitMs: 0 } : {}),
         });
       } catch (e) {
         // Approval failed (denied, expired, required-but-no-wait). Audit per ref.
-        await auditPerRef(body.refs, resolved, false, e instanceof ShuttleError ? e.code : "unexpected_error");
+        // grant?.session_id is undefined here unless the session fast-path
+        // succeeded — for the run binding, the matcher always refuses (run is
+        // NOT a SessionAction), so the spread evaluates to nothing.
+        await auditPerRef(body.refs, resolved, false, e instanceof ShuttleError ? e.code : "unexpected_error", grant?.session_id);
         writeJsonError(res, 400, e);
         return;
       }
@@ -208,7 +227,7 @@ export function registerRunResolveRoute(
         const record = resolved.get(entry.value);
         if (record === undefined) {
           // Should not happen — resolveRefs would have thrown — but guard anyway.
-          await auditPerRef(body.refs, resolved, false, "secret_not_found");
+          await auditPerRef(body.refs, resolved, false, "secret_not_found", grant?.session_id);
           writeJsonError(res, 400, new ShuttleError("secret_not_found", `Ref ${entry.value} could not be resolved.`));
           return;
         }
@@ -329,7 +348,7 @@ export function registerRunResolveRoute(
     for (const ref of resolved.keys()) {
       await services.vault.markUsed(ref).catch(() => undefined);
     }
-    await auditPerRef(body.refs, resolved, ok, ok ? undefined : "child_exit_nonzero");
+    await auditPerRef(body.refs, resolved, ok, ok ? undefined : "child_exit_nonzero", grant?.session_id);
 
     // Close the response only if we still can. On the cancel path, res is
     // already destroyed/ended — writableEnded check prevents the double-end
@@ -344,6 +363,7 @@ export function registerRunResolveRoute(
     resolved: Awaited<ReturnType<typeof services.vault.resolveRefs>>,
     ok: boolean,
     errorCode: string | undefined,
+    sessionId: string | undefined,
   ): Promise<void> {
     for (const ref of refs) {
       const record = resolved.get(ref);
@@ -353,6 +373,7 @@ export function registerRunResolveRoute(
         ref,
         ...(record !== undefined ? { environment: record.environment } : {}),
         ...(errorCode !== undefined ? { error_code: errorCode } : {}),
+        ...(sessionId !== undefined ? { session_id: sessionId } : {}),
       });
     }
   }
@@ -366,6 +387,7 @@ export function registerRunResolveRoute(
     refs: readonly string[],
     ok: boolean,
     errorCode: string | undefined,
+    sessionId: string | undefined,
   ): Promise<void> {
     for (const ref of refs) {
       await writeDaemonAudit({
@@ -373,6 +395,7 @@ export function registerRunResolveRoute(
         ok,
         ref,
         ...(errorCode !== undefined ? { error_code: errorCode } : {}),
+        ...(sessionId !== undefined ? { session_id: sessionId } : {}),
       });
     }
   }

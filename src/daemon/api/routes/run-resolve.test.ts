@@ -218,6 +218,68 @@ test("POST /v1/run/resolve: production refs require approval (pre-stream JSON 40
   });
 });
 
+test("POST /v1/run/resolve: session pass-through — audit lacks session_id; uses stays at 0", async () => {
+  // run is NOT a SessionAction in Plan 4a — the matcher canonicalizes `run`
+  // to null and refuses. The route still accepts session_id in the body
+  // (CLI uniformity), threads it to requireApproval, but the call falls
+  // back to the single-use flow. With wait_for_approval:false we surface
+  // approval_required. The audit entry MUST NOT carry session_id, and the
+  // session use-counter MUST stay at 0 — no session was minted.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "production", name: "PROD_SECRET", value: "v",
+    });
+    // The broadest legal session pattern still won't match the `run` binding
+    // because canonicalAction(run) returns null. See session-matchers.ts.
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
+      ref_glob: "",
+      destination_domains: ["any.com"],
+      template_ids: ["any"],
+      allowed_actions: [
+        "capture_from_page",
+        "inject_into_field",
+        "compare_fingerprint",
+        "use_as_stdin",
+        "inject_submit",
+      ],
+      ttl_ms: 60_000,
+    });
+    ctx.services.sessionStore.approve(sg.id);
+
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [ref],
+      env: [{ key: "PROD_SECRET", value: ref, isRef: true }],
+      command: process.execPath,
+      args: ["-e", ""],
+      cwd: process.cwd(),
+      session_id: sg.id,
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.errorBody as { error_code: string }).error_code, "approval_required");
+
+    // The most-recent `run` audit line must NOT carry session_id.
+    const auditPath = path.join(ctx.home, "audit.jsonl");
+    const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
+    const entries = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.action === "run" && e.ref === ref);
+    assert.ok(entries.length > 0, "expected at least one run audit entry");
+    for (const e of entries) {
+      assert.equal(
+        (e as { session_id?: string }).session_id,
+        undefined,
+        "pass-through: audit must NOT carry session_id (matcher refused → single-use fallback)",
+      );
+    }
+
+    // Session was NOT minted — uses stays at 0.
+    assert.equal(ctx.services.sessionStore.get(sg.id)!.uses, 0);
+  });
+});
+
 // -----------------------------------------------------------------------------
 // Error paths (pre-stream)
 // -----------------------------------------------------------------------------
