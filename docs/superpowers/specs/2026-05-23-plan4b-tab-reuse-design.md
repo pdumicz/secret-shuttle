@@ -276,6 +276,19 @@ function connect() {
   });
 }
 
+const doneInFlight = new Set();
+let lastCompletedSeq = 0;
+
+function shouldPostDone(seq) {
+  // Suppress duplicate operation_done events for the same seq.
+  // Without this, a dup that hits the terminal-failure path after a
+  // dup-#1 already succeeded would close SSE and detach a working hub.
+  if (seq <= lastCompletedSeq) return false; // already completed
+  if (doneInFlight.has(seq)) return false;   // currently retrying
+  doneInFlight.add(seq);
+  return true;
+}
+
 async function postDone(seq) {
   // Retry transient failures so a single network blip can't strand the
   // daemon's activeUrl forever. Cap at MAX_ATTEMPTS; auth/400 errors
@@ -284,31 +297,37 @@ async function postDone(seq) {
   // connection so the broker detaches and a future surface() respawns.
   const MAX_ATTEMPTS = 5;
   const BASE_DELAY_MS = 250;
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    try {
-      const r = await fetch(`/ui/hub/done?token=${encodeURIComponent(hubToken)}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ seq }),
-      });
-      if (r.ok) return;
-      // Auth + malformed body are terminal — retrying won't help.
-      if (r.status === 401 || r.status === 403 || r.status === 400) break;
-      // 5xx falls through to retry.
-    } catch {
-      // Network failure; retry.
+  let succeeded = false;
+  try {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      try {
+        const r = await fetch(`/ui/hub/done?token=${encodeURIComponent(hubToken)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ seq }),
+        });
+        if (r.ok) { succeeded = true; return; }
+        // Auth + malformed body are terminal — retrying won't help.
+        if (r.status === 401 || r.status === 403 || r.status === 400) break;
+        // 5xx falls through to retry.
+      } catch {
+        // Network failure; retry.
+      }
+      await new Promise((resolve) => setTimeout(resolve, BASE_DELAY_MS * (attempt + 1)));
     }
-    await new Promise((resolve) => setTimeout(resolve, BASE_DELAY_MS * (attempt + 1)));
+    // All attempts exhausted (or terminal error) → surface to user AND
+    // tear down the SSE connection. Without es.close() the broker still
+    // sees currentSubscriber !== null and new surfaces enqueue behind a
+    // permanently-stuck activeUrl. Closing the SSE triggers the daemon's
+    // detach callback → currentSubscriber=null → next surface() respawns.
+    // activeUrl stays set so reload/reattach resends the operation.
+    terminal = true;
+    es?.close();
+    showBanner("Failed to advance Secret Shuttle. Reload to continue.", "disconnected");
+  } finally {
+    doneInFlight.delete(seq);
+    if (succeeded) lastCompletedSeq = Math.max(lastCompletedSeq, seq);
   }
-  // All attempts exhausted (or terminal error) → surface to user AND
-  // tear down the SSE connection. Without es.close() the broker still
-  // sees currentSubscriber !== null and new surfaces enqueue behind a
-  // permanently-stuck activeUrl. Closing the SSE triggers the daemon's
-  // detach callback → currentSubscriber=null → next surface() respawns.
-  // activeUrl stays set so reload/reattach resends the operation.
-  terminal = true;
-  es?.close();
-  showBanner("Failed to advance Secret Shuttle. Reload to continue.", "disconnected");
 }
 
 window.addEventListener("message", (ev) => {
@@ -318,6 +337,7 @@ window.addEventListener("message", (ev) => {
   const data = ev.data;
   if (data?.type !== "operation_done") return;
   if (!Number.isSafeInteger(data.seq) || data.seq <= 0) return;
+  if (!shouldPostDone(data.seq)) return; // suppress duplicates for same seq
   postDone(data.seq);
 });
 
@@ -527,7 +547,7 @@ V0 (3) — same file, three more handlers:
 
 **Test bypass.** `SECRET_SHUTTLE_NO_OPEN_URL=1` continues to short-circuit `openUrl`. HubBroker calls `openUrl` for the hub spawn, so the env var disables spawn entirely under test. Tests inject `openUrlImpl: spy` for state-machine coverage.
 
-**Queue cap.** No explicit cap for v0.2.0. Per-grant TTLs (2 min for single-use approval, 15 min max for sessions) plus polling-driven self-drain bound the queue in practice. If real-world usage hits this, add `queue.length > 100 → throw hub_queue_full` in 0.3.
+**Queue cap.** No explicit cap for v0.2.0. Approval and session items self-drain: per-grant TTLs (2 min for single-use approval, 15 min max for sessions) combined with operation-page polling guarantee the iframe will eventually observe a terminal status and emit `operation_done`, advancing the broker. **Unlock items do NOT self-drain** — unlock is intentionally user-blocking (no polling, no TTL on the form), so an unlock queue entry stays active until the user either succeeds (notifies) or closes the tab (SSE drop, activeUrl preserved for the next attach to resend). If real-world usage hits a queue-length problem from queued unlocks piling up behind a stuck unlock, add `queue.length > 100 → throw hub_queue_full` in 0.3. For v0.2.0, the unlock-blocks-everything semantic is documented in the CHANGELOG.
 
 ---
 
@@ -605,6 +625,7 @@ Cases:
   - Exhaustion-path teardown: `terminal = true` AND `es?.close()` (or `es.close()`) AND `showBanner(` reachable from the post-loop code path. Without `es.close()` the broker stays attached to a dead hub.
   - Message-handler suppression: `if (terminal) return` (or equivalent) at the top of the `window.addEventListener("message", ...)` callback.
   - `consecutiveFailures` reset on `open`: source contains both `addEventListener("open"` and `consecutiveFailures = 0`.
+  - **Duplicate-done suppression**: source contains `doneInFlight` (the Set) AND `lastCompletedSeq` (the high-water mark) AND `shouldPostDone` (the guard function). The message handler must call `shouldPostDone(data.seq)` and return early when it returns false, BEFORE invoking `postDone`. The `postDone` function must wrap its work in a `try/finally` that removes from `doneInFlight` and updates `lastCompletedSeq` on success — assert presence of `doneInFlight.delete` AND `lastCompletedSeq = Math.max`. Without this, a duplicate `operation_done` whose retries all fail can run the terminal branch after a sibling duplicate already succeeded, closing SSE and detaching a working hub.
 
 The assertions are crude text matches; they don't run the JS. They exist as a tripwire against accidental deletion. If the polling or retry logic is ever refactored to a different shape, update the assertions to match — the refactor is the right time to revisit them. If 4c/5a/5b accumulate more browser-side logic, revisit and introduce a jsdom harness for real DOM testing.
 
@@ -645,7 +666,12 @@ With env var set: `surface()` works (state mutates), `openUrl` no-ops. Test:
 - Hub tab survives SSE network blip with one auto-reconnect attempt; second failure leaves user with a clear banner.
 - Per-URL `ui_token` security property unchanged (each operation's iframe still authenticates via its own token).
 - `SECRET_SHUTTLE_NO_OPEN_URL=1` continues to fully silence tab spawning.
-- Test suite passes; new tests in `hub-broker.test.ts`, `hub-server.test.ts`, `hub-e2e.test.ts`; existing CSP tests updated for `frame-ancestors 'self'`.
+- Test suite passes. New tests:
+  - `src/daemon/hub/hub-broker.test.ts` (Layer 1).
+  - `src/daemon/hub/hub-server.test.ts` (Layer 2).
+  - `src/daemon/hub/hub-e2e.test.ts` (Layer 5).
+  - Four drift-guard tests (Layer 4): `src/daemon/approvals/ui-html-drift.test.ts`, `src/daemon/approvals/session-ui-html-drift.test.ts`, `src/daemon/approvals/unlock-ui-html-drift.test.ts`, `src/daemon/hub/hub-ui-html-drift.test.ts`. Each text-pattern-asserts the inline JS contract for its HTML.
+- Existing CSP tests updated for `frame-ancestors 'self'` on the three operation routes (Layer 3).
 - CHANGELOG documents: tab-reuse mechanism, CSP relaxation (operational tradeoff), the unlock UI's blocking semantics.
 
 ---
@@ -660,6 +686,10 @@ With env var set: `surface()` works (state mutates), `openUrl` no-ops. Test:
 - `src/daemon/hub/hub-ui.html`
 - `src/daemon/hub/route-helpers.ts` (`makeHubOpenUrlImpl`)
 - `src/daemon/hub/hub-e2e.test.ts`
+- `src/daemon/hub/hub-ui-html-drift.test.ts` (Layer 4 drift guard for hub-ui.html)
+- `src/daemon/approvals/ui-html-drift.test.ts` (Layer 4 drift guard for ui.html)
+- `src/daemon/approvals/session-ui-html-drift.test.ts` (Layer 4 drift guard for session-ui.html)
+- `src/daemon/approvals/unlock-ui-html-drift.test.ts` (Layer 4 drift guard for unlock-ui.html)
 
 **Modified files:**
 - `src/daemon/services.ts` — add `hubBroker`.
