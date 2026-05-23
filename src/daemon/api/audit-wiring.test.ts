@@ -206,6 +206,58 @@ test("blind end succeeds when the browser blanks verifiably", async () => {
   });
 });
 
+test("POST /v1/blind/end: session pass-through — audit lacks session_id; uses stays at 0", async () => {
+  // blind_end is NOT a SessionAction (re-revealing the page after a blind
+  // mask is a destructive privacy boundary). The route still accepts
+  // session_id in the body for CLI uniformity, threads it to requireApproval.
+  // The matcher canonicalizes blind_end to null and refuses; requireApproval
+  // falls back to the single-use flow. With wait_for_approval:false we
+  // surface approval_required. The audit entry MUST NOT carry session_id,
+  // and the session use-counter MUST stay at 0.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/blind/start", { domain: "dashboard.stripe.com", reason: "r" });
+
+    // Broadest legal pattern still won't match the blind_end binding —
+    // canonicalAction returns null. See session-matchers.ts.
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
+      ref_glob: "",
+      destination_domains: ["any.com"],
+      template_ids: ["any"],
+      allowed_actions: [
+        "capture_from_page",
+        "inject_into_field",
+        "compare_fingerprint",
+        "use_as_stdin",
+        "inject_submit",
+      ],
+      ttl_ms: 60_000,
+    });
+    ctx.services.sessionStore.approve(sg.id);
+
+    const r = await call(ctx, "POST", "/v1/blind/end", {
+      session_id: sg.id,
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "approval_required");
+
+    // Audit assertion: most-recent blind_end entry must NOT carry session_id.
+    const events = await readAudit(ctx.home);
+    const entry = [...events].reverse().find((e) => e["action"] === "blind_end");
+    assert.ok(entry, "expected a blind_end audit entry");
+    assert.equal(
+      (entry as { session_id?: string }).session_id,
+      undefined,
+      "pass-through: audit must NOT carry session_id (matcher refused → single-use fallback)",
+    );
+
+    // Session was NOT minted — uses stays at 0.
+    assert.equal(ctx.services.sessionStore.get(sg.id)!.uses, 0);
+  });
+});
+
 test("approval_mismatch is audited on bound-binding failure", async () => {
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });

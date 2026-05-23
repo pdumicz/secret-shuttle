@@ -4,10 +4,10 @@ import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { requireApproval } from "../../approvals/require-approval.js";
-import type { ApprovalBinding } from "../../approvals/store.js";
+import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 
 interface StartBody { domain?: string; reason?: string; }
-interface EndBody { approval_id?: string; wait_for_approval?: boolean; }
+interface EndBody { approval_id?: string; wait_for_approval?: boolean; session_id?: string; }
 
 export function registerBlind(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/blind/start", async (_req, raw) => {
@@ -45,7 +45,15 @@ export function registerBlind(server: DaemonServer, services: DaemonServices, da
   });
   server.addRoute("POST", "/v1/blind/end", async (_req, raw) => {
     const b = (raw ?? {}) as EndBody;
-    const { approval_id, wait_for_approval } = b;
+    const { approval_id, wait_for_approval, session_id } = b;
+    // Hoisted OUTSIDE the try so the catch-block audit can carry session_id
+    // when applicable. blind_end is NOT a SessionAction — re-revealing the
+    // page after a blind mask is a destructive privacy boundary — so the
+    // matcher refuses and requireApproval falls back to single-use;
+    // grant.session_id is therefore always undefined and the conditional
+    // spread evaluates to nothing. We still wire the spread to preserve a
+    // single audit shape across all routes.
+    let grant: ApprovalGrant | undefined;
     try {
       // If blind mode is not active, this is an idempotent no-op — no approval needed.
       const activeBlind = services.blind.current();
@@ -68,11 +76,13 @@ export function registerBlind(server: DaemonServer, services: DaemonServices, da
         template_id: null,
         template_params: null,
       };
-      await requireApproval({
+      grant = await requireApproval({
         store: services.approvals,
         binding,
         daemonPort: daemonPortRef(),
         force: true,
+        sessionStore: services.sessionStore,
+        ...(session_id !== undefined ? { sessionId: session_id } : {}),
         ...(approval_id !== undefined ? { approvalIdFromClient: approval_id } : {}),
         ...(wait_for_approval === false ? { waitMs: 0 } : {}),
       });
@@ -86,13 +96,19 @@ export function registerBlind(server: DaemonServer, services: DaemonServices, da
       }
 
       const result = services.blind.end();
-      await writeDaemonAudit({ action: "blind_end", ok: true, domain: blindDomain });
+      await writeDaemonAudit({
+        action: "blind_end",
+        ok: true,
+        domain: blindDomain,
+        ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
+      });
       return result;
     } catch (err) {
       await writeDaemonAudit({
         action: "blind_end",
         ok: false,
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+        ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       throw err;
     }
