@@ -74,3 +74,10 @@ test("secrets set: --session flag accepted", () => {
   assert.ok(set);
   assert.ok(set.options.map((o) => o.long).includes("--session"));
 });
+
+test("secrets delete: --session flag accepted", () => {
+  const cmd = secretsCommand();
+  const del = cmd.commands.find((c) => c.name() === "delete");
+  assert.ok(del);
+  assert.ok(del.options.map((o) => o.long).includes("--session"));
+});
