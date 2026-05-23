@@ -653,7 +653,10 @@ async function withHubDaemon<T>(
   const prev = process.env.SECRET_SHUTTLE_HOME;
   process.env.SECRET_SHUTTLE_HOME = home;
   const server = new DaemonServer({ token: "t" });
-  const broker = new HubBroker();
+  // HubBroker.openUrlImpl is required (Task A1); a no-op opener is fine
+  // here because Task B1's tests only exercise the route surface, not the
+  // surface()-driven spawn path.
+  const broker = new HubBroker({ openUrlImpl: () => undefined });
   registerHubRoutes(server, broker);
   const { port } = await server.listen(0);
   try {
@@ -1260,6 +1263,15 @@ Add the options interface and modify the class. The existing class has multiple 
 ```typescript
 export interface DaemonServicesOptions {
   hubBroker?: HubBroker;
+  /**
+   * Override the `openUrlImpl` used when constructing the DEFAULT
+   * HubBroker. This is the hook tests use to prove the default
+   * constructor path — without this, the only way to inject a spy
+   * would be to construct a HubBroker entirely outside DaemonServices,
+   * which doesn't actually exercise the default wiring. Ignored when
+   * `hubBroker` is provided.
+   */
+  hubOpenUrlImpl?: (url: string) => void;
 }
 
 export class DaemonServices {
@@ -1268,10 +1280,13 @@ export class DaemonServices {
 
   constructor(opts: DaemonServicesOptions = {}) {
     // Production: real openUrl (which honors SECRET_SHUTTLE_NO_OPEN_URL=1
-    // as a no-op for tests). Tests inject a HubBroker with their own spy
-    // openUrlImpl. Without the explicit `openUrl` here, the broker would
-    // queue URLs internally and never open a tab — silently broken in prod.
-    this.hubBroker = opts.hubBroker ?? new HubBroker({ openUrlImpl: openUrl });
+    // as a no-op for tests). The hubOpenUrlImpl hook lets tests prove
+    // this very wiring without bypassing it. Without the explicit
+    // `openUrl` here, the broker would queue URLs internally and never
+    // open a tab — silently broken in prod.
+    this.hubBroker =
+      opts.hubBroker ??
+      new HubBroker({ openUrlImpl: opts.hubOpenUrlImpl ?? openUrl });
   }
 }
 ```
@@ -1305,19 +1320,21 @@ test("default DaemonServices wires HubBroker.openUrlImpl to the real openUrl", (
   }
 });
 
-test("default DaemonServices opens the hub when env var is NOT set (spawn-spy proves real openUrl is called)", async () => {
+test("default DaemonServices wires the default HubBroker through openUrl (hubOpenUrlImpl hook exercises the actual default constructor path)", async () => {
   const prev = process.env.SECRET_SHUTTLE_NO_OPEN_URL;
   delete process.env.SECRET_SHUTTLE_NO_OPEN_URL;
   try {
-    // Build a broker that delegates to the real openUrl with a spawn spy.
-    // This proves the DEFAULT wiring path calls into the actual openUrl
-    // helper. (We can't directly intercept the default broker's openUrlImpl
-    // without injection, so we shadow-construct the same code path.)
     const { openUrl } = await import("../approvals/open-url.js");
-    const { HubBroker } = await import("./hub-broker.js");
     const spawns: Array<{ cmd: string; args: readonly string[] }> = [];
-    const broker = new HubBroker({
-      openUrlImpl: (u) =>
+    // Use the hubOpenUrlImpl hook so we're testing the REAL default
+    // constructor path. The hook is consumed by the same line that
+    // production hits (`new HubBroker({ openUrlImpl: opts.hubOpenUrlImpl
+    // ?? openUrl })`) — so a future regression where DaemonServices
+    // accidentally ignores the hook OR swaps `?? openUrl` for `?? noop`
+    // would fail this test. If the test instead injected a fully-built
+    // HubBroker, it would NOT catch that class of regression.
+    const services = new DaemonServices({
+      hubOpenUrlImpl: (u) =>
         openUrl(u, {
           spawnImpl: (cmd, args) => {
             spawns.push({ cmd, args });
@@ -1325,10 +1342,8 @@ test("default DaemonServices opens the hub when env var is NOT set (spawn-spy pr
           },
         }),
     });
-    const services = new DaemonServices({ hubBroker: broker });
     services.hubBroker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
     assert.equal(spawns.length, 1, "default wiring must invoke openUrl which spawns");
-    // The spawn target is the platform opener with the hub URL as an arg.
     assert.ok(spawns[0]!.args.some((a) => a.includes("/ui/hub?token=")));
   } finally {
     if (prev === undefined) delete process.env.SECRET_SHUTTLE_NO_OPEN_URL;
@@ -1464,6 +1479,16 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
     (() => {
       const params = new URLSearchParams(location.search);
       const hubToken = params.get("token") ?? "";
+      // Strip the hub_token from the address bar after bootstrap so it
+      // no longer appears in screenshots, screen-sharing, Referer
+      // headers, or window.parent.location.search reads from any
+      // iframe content. The token survives only as a closure-local
+      // JS variable, which (because it's not assigned to `window` or
+      // any reachable global) is not accessible via
+      // window.parent.hubToken from inside the iframe.
+      try {
+        history.replaceState({}, "", "/ui/hub");
+      } catch { /* environments without history API (test stubs) — fine */ }
       const iframe = document.getElementById("op");
       const statusEl = document.getElementById("status");
       const statusText = document.getElementById("status-text");
@@ -1711,6 +1736,15 @@ test("hub-ui.html: window message origin + source guards", async () => {
 test("hub-ui.html: iframe sandbox attribute is restrictive", async () => {
   const html = await loadHtml();
   assert.match(html, /<iframe[^>]*sandbox=["']allow-scripts allow-same-origin allow-forms["']/);
+});
+
+test("hub-ui.html: strips hub_token from URL after bootstrap (history.replaceState)", async () => {
+  const html = await loadHtml();
+  // Defense against token leakage via address bar, screenshots,
+  // Referer headers, and window.parent.location.search reads from
+  // iframe content. The token must be read into a closure-local
+  // variable, then immediately replaced via history.replaceState.
+  assert.match(html, /history\.replaceState\s*\(\s*\{\s*\}\s*,\s*["']["']\s*,\s*["']\/ui\/hub["']\s*\)/);
 });
 ```
 
@@ -3247,11 +3281,11 @@ EOF
 
 The drift-guard tests (Task C2) only check that source patterns exist; they do not run the hub JS. Plan 4b is a UX/security path where the inline JS in `hub-ui.html` is load-bearing — a regression in the navigate handler, the postMessage gate, or the displaced cleanup would silently break the persistent-tab guarantee. This task adds ONE browser-level smoke via `jsdom` that loads the actual HTML, mocks `EventSource` + `fetch`, and asserts the DOM mutates correctly.
 
-- [ ] **Step 1: Add jsdom dev dep**
+- [ ] **Step 1: Add jsdom dev dep (pinned major)**
 
-Run: `npm install --save-dev jsdom @types/jsdom`
+Run: `npm install --save-dev jsdom@^24.0.0 @types/jsdom@^21.1.0`
 
-Expected: package.json gains `"jsdom": "^24.x"` and `"@types/jsdom": "^21.x"` under `devDependencies`.
+Expected: package.json gains `"jsdom": "^24.0.0"` and `"@types/jsdom": "^21.1.0"` under `devDependencies`. Pinning the major because jsdom's `runScripts` / `beforeParse` API has shifted between majors in the past; we want a known-good baseline for the drift guard to follow.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -3271,9 +3305,13 @@ const HUB_HTML_PATH = path.resolve(
 );
 
 /**
- * Build a JSDOM with mocked EventSource + fetch. Returns the dom,
- * a handle to the latest EventSource instance for driving events,
- * and a fetch spy array.
+ * Build a JSDOM with mocked EventSource + fetch INSTALLED BEFORE the
+ * inline <script> parses. The hub script runs `connect()` (which calls
+ * `new EventSource(...)`) immediately during parse — if we installed
+ * the mocks after `new JSDOM(...)`, the script would have already run
+ * against the (missing) default EventSource and errored. The
+ * `beforeParse(window)` hook lets us install the globals before the
+ * parser touches the HTML.
  */
 async function loadHub(): Promise<{
   dom: JSDOM;
@@ -3285,42 +3323,47 @@ async function loadHub(): Promise<{
 }> {
   const html = await readFile(HUB_HTML_PATH, "utf8");
 
-  // Build a JSDOM that EXECUTES inline scripts. `runScripts: "dangerously"`
-  // is required for inline <script> to run; the hub HTML is daemon-owned
-  // and contains no untrusted content.
-  const dom = new JSDOM(html, {
-    url: "http://127.0.0.1:5555/ui/hub?token=hubT",
-    runScripts: "dangerously",
-    pretendToBeVisual: true,
-    resources: new ResourceLoader({ strictSSL: false }),
-  });
+  let latestEs: { listeners: Record<string, Array<(e: unknown) => void>>; closed: boolean } | null = null;
+  const fetches: Array<{ url: string; init: RequestInit | undefined }> = [];
+  let responder: (url: string, init?: RequestInit) => Response | Promise<Response> = () =>
+    new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
 
-  // EventSource mock: capture the latest instance, expose event triggers.
-  let latestEs: { onopen?: (e: unknown) => void; onmessage?: (e: { data: string }) => void; onerror?: (e: unknown) => void; close: () => void; addEventListener: (name: string, fn: (e: unknown) => void) => void; listeners: Record<string, Array<(e: unknown) => void>> } | null = null;
   class FakeEventSource {
     public readonly url: string;
     public readonly listeners: Record<string, Array<(e: unknown) => void>> = {};
     public closed = false;
-    constructor(url: string) { this.url = url; latestEs = this; }
+    constructor(url: string) {
+      this.url = url;
+      latestEs = this;
+    }
     addEventListener(name: string, fn: (e: unknown) => void): void {
       (this.listeners[name] = this.listeners[name] ?? []).push(fn);
     }
     close(): void { this.closed = true; }
   }
-  (dom.window as unknown as { EventSource: typeof FakeEventSource }).EventSource = FakeEventSource;
 
-  // fetch mock.
-  const fetches: Array<{ url: string; init: RequestInit | undefined }> = [];
-  let responder: (url: string, init?: RequestInit) => Response | Promise<Response> =
-    () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
-  (dom.window as unknown as { fetch: typeof fetch }).fetch = (async (input: RequestInfo, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : (input as Request).url;
-    fetches.push({ url, init });
-    return responder(url, init);
-  }) as typeof fetch;
+  const dom = new JSDOM(html, {
+    url: "http://127.0.0.1:5555/ui/hub?token=hubT",
+    runScripts: "dangerously",
+    pretendToBeVisual: true,
+    resources: new ResourceLoader({ strictSSL: false }),
+    // CRITICAL: install globals BEFORE the parser touches the inline
+    // <script>. The hub script calls connect() at the bottom, which
+    // does `new EventSource(...)` — without these mocks in place at
+    // parse time, the script throws.
+    beforeParse(window) {
+      (window as unknown as { EventSource: typeof FakeEventSource }).EventSource = FakeEventSource;
+      (window as unknown as { fetch: typeof fetch }).fetch = (async (input: RequestInfo, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : (input as Request).url;
+        fetches.push({ url, init });
+        return responder(url, init);
+      }) as typeof fetch;
+    },
+  });
 
-  // Wait for the inline <script> to run + the initial connect() call.
-  await new Promise((r) => setTimeout(r, 50));
+  // Yield once to let any post-parse microtasks complete (e.g., the
+  // connect() call's synchronous initial EventSource construction).
+  await new Promise((r) => setTimeout(r, 10));
 
   const driveEvent = (name: string, payload: unknown): void => {
     const handlers = latestEs?.listeners[name] ?? [];
@@ -3610,9 +3653,13 @@ In `CHANGELOG.md`, find the `## Unreleased` section. After the existing `### Add
 - **Drift-guard tests** for `ui.html`, `session-ui.html`, `unlock-ui.html`, and `hub-ui.html`. Crude text-pattern assertions on inline JS that catch accidental removal of polling, hub_seq parsing, terminal-state cascade, duplicate-done suppression, and `postDone` retry shape.
 
 ### Security
-- The hub `hub_token` is daemon-lifetime (minted via `randomUUID()` at HubBroker construction) and held in memory only. Daemon restart → new token → any still-open hub from the prior process gets 401 on next SSE attempt → banner appears → user reloads.
-- Hub status bar shows connection state + daemon port only. **No vault state, no token preview** — adding a `/ui/hub/status` route just for the status bar was out of scope, and a token preview would risk screenshot/screenshare leakage.
-- Per-URL `ui_token` security property unchanged: each operation iframe still authenticates via its own short-lived token. A leaked `hub_token` does NOT grant access to any operation.
+- **Two-layer capability model.** The `hub_token` (minted via `randomUUID()` at `HubBroker` construction; held in memory only) grants subscription to `/ui/hub/stream` — the SSE feed that carries each operation's `{type:"navigate", url, seq}` event. Each operation URL inside those events carries its own short-lived `ui_token` that gates the actual approve/deny action. **The two tokens compose:** without `hub_token` an attacker cannot observe operations; without `ui_token` an attacker cannot act on a specific operation. A leaked `hub_token` is roughly equivalent to a leaked daemon bearer token in scope — the attacker can observe everything the daemon surfaces. The model is "two layers, not one stronger than the other."
+- **Daemon binds 127.0.0.1.** The threat model assumes hostile local processes that can already enumerate ports. The hub adds no new network surface; it inherits the daemon's localhost-only constraint.
+- **`hub_token` stripped from address bar after bootstrap.** On load, `hub-ui.html` reads `params.get("token")` into a closure-local `hubToken` variable then immediately calls `history.replaceState({}, "", "/ui/hub")` so the token is no longer visible in (a) the address bar (screenshot/screenshare leakage), (b) `Referer` headers when fetching `/ui/hub/stream` or `/ui/hub/done`, or (c) `window.parent.location.search` reads from iframe content. The token survives only as a JS closure variable — not reachable via `window.parent.hubToken` because it's never assigned to `window`.
+- **Hub status bar shows connection state + daemon port only.** No vault state (would require an authenticated status route — out of scope for v0.2.0), no token preview (would defeat the address-bar strip above).
+- **Daemon restart rotates `hub_token`.** Any still-open hub from the prior process gets 401 on next SSE attempt → banner appears → user reloads.
+- **Iframe is `sandbox="allow-scripts allow-same-origin allow-forms"`.** Same-origin is required so the iframe's existing approval/session JS can POST to `/ui/approvals/...` and `/ui/sessions/...`. The CSP `frame-ancestors 'self'` ensures only the daemon's own hub can frame these pages — a same-origin restriction the per-URL `ui_token` further hardens at the action layer.
+- **Displaced / disconnected tabs are non-interactive.** When SSE delivers `{type:"displaced"}` OR the reconnect strikes-out, `hub-ui.html` reassigns `iframe.src = "about:blank"` AND a CSS rule hides the iframe element. A displaced tab cannot continue approving operations the user thought were handed off to the new tab.
 - `SECRET_SHUTTLE_NO_OPEN_URL=1` continues to silence all tab spawning (including the hub spawn). Tests rely on this; `npm test` sets it.
 - **Unlock-blocking semantic** documented: an unlock that never succeeds blocks the hub queue until the user closes the tab. Acceptable for v0.2.0 since unlock is rare and a stuck unlock is operationally visible. An explicit `hub_queue_full` error is deferred to v0.3.
 ```
