@@ -79,7 +79,8 @@ This plan was originally the unified "Plan 4" (sessions + tab reuse + stdin). A 
 | `src/cli/commands/secrets/delete.ts` | Same (will be rejected by daemon as no_match; CLI passes through anyway for uniformity). |
 | `src/cli/commands/secrets/rotate.ts` | Same. |
 | `src/cli/commands/secrets/set.ts` | Same. |
-| `src/cli/commands/template-run.ts` | Same. |
+| `src/cli/commands/template.ts` | Same — `--session` on the `run` subcommand (file is `template.ts`, the subcommand is `template run`). |
+| `src/cli/commands/blind.ts` | Same — `--session` on the `end` subcommand (blind_end is approval-gated; pass-through fallback). |
 | `src/cli/commands/inject-submit.ts` | Same. |
 | `src/cli/commands/reveal-capture.ts` | Same. |
 | `CHANGELOG.md` | Plan 4a entries. |
@@ -97,11 +98,12 @@ The corrected matcher table:
 | `template-run` | `binding.ref`, `binding.template_id` | `ref_glob`, `template_ids` (REQUIRED non-empty); `destination_domains` ignored (current bindings never set it for templates) |
 | `inject-submit` | `binding.ref`, `binding.destination_domain` | `ref_glob`, `destination_domains` (REQUIRED non-empty) |
 | `reveal-capture` | `binding.planned_ref`, `binding.destination_domain` | `ref_glob`, `destination_domains` (REQUIRED non-empty) |
-| `secrets-set` | `binding.planned_ref`, `binding.allowed_domains`, `binding.allowed_actions` | `ref_glob`, `destination_domains` (REQUIRED non-empty; must be a SUPERSET of binding.allowed_domains), `allowed_actions` (must be a SUPERSET of binding.allowed_actions when set) |
+| `secrets-set` | `binding.planned_ref`, `binding.allowed_domains`, `binding.allowed_actions` | `ref_glob`, `destination_domains` (REQUIRED non-empty; must be a SUPERSET of binding.allowed_domains), `allowed_actions` (REQUIRED non-empty for secrets-set patterns; entries validated against `ALL_SECRET_ACTIONS`; binding.allowed_actions must be ⊆ pattern.allowed_actions) |
 
-Three pattern-validation requirements at session-CREATE time (close round-2 P1 "empty destination_domains for domain-bearing actions"):
+Four pattern-validation requirements at session-CREATE time:
 - A pattern listing **template-run** MUST set non-empty `template_ids`.
 - A pattern listing **inject-submit**, **reveal-capture**, or **secrets-set** MUST set non-empty `destination_domains`.
+- A pattern listing **secrets-set** MUST set non-empty `allowed_actions`. Entries are validated against `ALL_SECRET_ACTIONS` from `src/vault/types.ts` (`capture_from_page`, `inject_into_field`, `compare_fingerprint`, `use_as_stdin`, `inject_submit`). Without this rule, a `secrets-set` session could auto-approve a secret whose action set the human never explicitly scoped — the failure mode is "I approved 'create a stripe-prod key' and the agent created one that ALSO permits inject-into-field on github.com later".
 - (A pattern with only template-run does NOT need `destination_domains`; it's allowed empty.)
 
 Note the **superset-not-equal** semantic for secrets-set: pattern.destination_domains is the SET OF ALLOWED domains for any minted secret; the operation's binding.allowed_domains must be ⊆ pattern.destination_domains. The agent can't widen the domain set the human approved.
@@ -394,6 +396,48 @@ test("assertSessionPatternValid: template-run with template_ids undefined throws
   );
 });
 
+// secrets-set requires allowed_actions (round-4 P1 fix).
+test("assertSessionPatternValid: secrets-set with empty allowed_actions throws", () => {
+  assert.throws(
+    () => assertSessionPatternValid(makePattern({
+      actions: ["secrets-set"],
+      destination_domains: ["vercel.com"],
+      allowed_actions: [], // empty
+    })),
+    (err: Error & { code?: string }) => err.code === "bad_request",
+  );
+});
+
+test("assertSessionPatternValid: secrets-set with allowed_actions undefined throws", () => {
+  assert.throws(
+    () => assertSessionPatternValid(makePattern({
+      actions: ["secrets-set"],
+      destination_domains: ["vercel.com"],
+      // allowed_actions unset
+    })),
+    (err: Error & { code?: string }) => err.code === "bad_request",
+  );
+});
+
+test("assertSessionPatternValid: allowed_actions entry outside ALL_SECRET_ACTIONS throws", () => {
+  assert.throws(
+    () => assertSessionPatternValid(makePattern({
+      actions: ["secrets-set"],
+      destination_domains: ["vercel.com"],
+      allowed_actions: ["use_as_stdin", "nope_invalid"],
+    })),
+    (err: Error & { code?: string }) => err.code === "bad_request",
+  );
+});
+
+test("assertSessionPatternValid: secrets-set with valid allowed_actions passes", () => {
+  assert.doesNotThrow(() => assertSessionPatternValid(makePattern({
+    actions: ["secrets-set"],
+    destination_domains: ["vercel.com"],
+    allowed_actions: ["use_as_stdin", "inject_into_field"],
+  })));
+});
+
 test("assertSessionPatternValid: max_uses 0 throws", () => {
   assert.throws(
     () => assertSessionPatternValid(makePattern({ max_uses: 0 })),
@@ -463,6 +507,31 @@ const DOMAIN_REQUIRED: ReadonlySet<SessionAction> = new Set<SessionAction>([
  */
 const TEMPLATE_IDS_REQUIRED: ReadonlySet<SessionAction> = new Set<SessionAction>([
   "template-run",
+]);
+
+/**
+ * Actions that REQUIRE non-empty pattern.allowed_actions at pattern-creation
+ * time. Only secrets-set. Without this the matcher would auto-approve a
+ * secret whose action set the human never explicitly scoped (e.g. the
+ * pattern "create a stripe prod key for vercel.com" would default-grant
+ * the FULL DEFAULT_ACTIONS set on the new secret, including inject_submit
+ * which the human never authorized for vercel.com).
+ */
+const ALLOWED_ACTIONS_REQUIRED: ReadonlySet<SessionAction> = new Set<SessionAction>([
+  "secrets-set",
+]);
+
+/**
+ * Canonical SecretAction enum (mirrors src/vault/types.ts:ALL_SECRET_ACTIONS).
+ * Pattern.allowed_actions entries are validated against this set at
+ * create time.
+ */
+const VALID_SECRET_ACTIONS = new Set<string>([
+  "capture_from_page",
+  "inject_into_field",
+  "compare_fingerprint",
+  "use_as_stdin",
+  "inject_submit",
 ]);
 
 export interface SessionPattern {
@@ -591,6 +660,29 @@ export function assertSessionPatternValid(pattern: SessionPattern): void {
         `Session action '${action}' requires non-empty template_ids. ` +
           `Use --template-id to restrict the session to specific templates.`,
       );
+    }
+    if (ALLOWED_ACTIONS_REQUIRED.has(action) &&
+        (pattern.allowed_actions === undefined || pattern.allowed_actions.length === 0)) {
+      throw new ShuttleError(
+        "bad_request",
+        `Session action '${action}' requires non-empty allowed_actions. ` +
+          `Use --allowed-action to scope what the minted secret will permit. ` +
+          `Valid values: ${[...VALID_SECRET_ACTIONS].join(", ")}.`,
+      );
+    }
+  }
+  // When allowed_actions is provided, validate every entry against the
+  // canonical SecretAction enum. Catches typos and prevents the pattern
+  // from passing an action name the daemon would silently ignore.
+  if (pattern.allowed_actions !== undefined) {
+    for (const a of pattern.allowed_actions) {
+      if (!VALID_SECRET_ACTIONS.has(a)) {
+        throw new ShuttleError(
+          "bad_request",
+          `allowed_actions entry '${a}' is not a valid SecretAction. ` +
+            `Valid values: ${[...VALID_SECRET_ACTIONS].join(", ")}.`,
+        );
+      }
     }
   }
   if (pattern.allowed_actions !== undefined) {
@@ -848,50 +940,58 @@ test("reveal-capture: domain mismatch → false", () => {
 // secrets-set (planned_ref + allowed_domains + allowed_actions semantics)
 // =============================================================================
 
-test("secrets-set: planned_ref matches glob; allowed_domains ⊆ pattern.destination_domains → true", () => {
+test("secrets-set: planned_ref matches glob; allowed_domains ⊆ pattern.destination_domains; allowed_actions ⊆ pattern.allowed_actions → true", () => {
   const p = makePattern({
     actions: ["secrets-set"],
     ref_glob: "ss://stripe/prod/*",
     destination_domains: ["vercel.com", "github.com"],
+    allowed_actions: ["use_as_stdin", "inject_into_field"], // required for secrets-set
   });
   const b = makeBinding({
     action: "generate",
     ref: null,
     planned_ref: "ss://stripe/prod/NEW_KEY",
     allowed_domains: ["vercel.com"], // ⊆ pattern.destination_domains
+    allowed_actions: ["use_as_stdin"], // ⊆ pattern.allowed_actions
   });
   assert.equal(matchesSessionPattern(b, p), true);
 });
 
 test("secrets-set: planned_ref outside glob → false", () => {
-  const p = makePattern({ actions: ["secrets-set"] });
+  const p = makePattern({
+    actions: ["secrets-set"],
+    allowed_actions: ["use_as_stdin"], // required for secrets-set
+  });
   const b = makeBinding({
     action: "generate",
     ref: null,
     planned_ref: "ss://stripe/dev/NEW_KEY", // dev not prod
     allowed_domains: ["vercel.com"],
+    allowed_actions: ["use_as_stdin"],
   });
   assert.equal(matchesSessionPattern(b, p), false);
 });
 
 test("secrets-set: binding.allowed_domains contains a domain NOT in pattern → false (NOT superset-allowed)", () => {
-  // This is the security-relevant case: the session pre-approves vercel.com,
-  // the agent tries to mint a secret that ALSO allows github.com. Refuse —
-  // the human approved vercel.com only.
+  // Security-relevant: the session pre-approves vercel.com, the agent tries
+  // to mint a secret that ALSO allows github.com. Refuse — the human
+  // approved vercel.com only.
   const p = makePattern({
     actions: ["secrets-set"],
     destination_domains: ["vercel.com"],
+    allowed_actions: ["use_as_stdin"], // required for secrets-set
   });
   const b = makeBinding({
     action: "generate",
     ref: null,
     planned_ref: "ss://stripe/prod/A",
     allowed_domains: ["vercel.com", "github.com"], // github.com is wider
+    allowed_actions: ["use_as_stdin"],
   });
   assert.equal(matchesSessionPattern(b, p), false);
 });
 
-test("secrets-set: pattern.allowed_actions set + binding.allowed_actions ⊆ pattern → true", () => {
+test("secrets-set: pattern.allowed_actions + binding.allowed_actions ⊆ pattern → true", () => {
   const p = makePattern({
     actions: ["secrets-set"],
     allowed_actions: ["use_as_stdin", "inject_into_field"],
@@ -906,7 +1006,7 @@ test("secrets-set: pattern.allowed_actions set + binding.allowed_actions ⊆ pat
   assert.equal(matchesSessionPattern(b, p), true);
 });
 
-test("secrets-set: pattern.allowed_actions set + binding has wider actions → false", () => {
+test("secrets-set: binding.allowed_actions wider than pattern → false", () => {
   const p = makePattern({
     actions: ["secrets-set"],
     allowed_actions: ["use_as_stdin"],
@@ -916,7 +1016,7 @@ test("secrets-set: pattern.allowed_actions set + binding has wider actions → f
     ref: null,
     planned_ref: "ss://stripe/prod/A",
     allowed_domains: ["vercel.com"],
-    allowed_actions: ["use_as_stdin", "inject_submit"],
+    allowed_actions: ["use_as_stdin", "inject_submit"], // wider
   });
   assert.equal(matchesSessionPattern(b, p), false);
 });
@@ -1083,8 +1183,8 @@ function revealCaptureMatches(binding: ApprovalBinding, pattern: SessionPattern)
 
 /**
  * secrets-set: planned_ref + allowed_domains ⊆ pattern.destination_domains
- * + allowed_actions ⊆ pattern.allowed_actions (when set).
- * The agent cannot widen what the human approved.
+ * + allowed_actions ⊆ pattern.allowed_actions.
+ * The agent cannot widen what the human approved on either axis.
  */
 function secretsSetMatches(binding: ApprovalBinding, pattern: SessionPattern): boolean {
   const plannedRef = binding.planned_ref ?? null;
@@ -1092,19 +1192,20 @@ function secretsSetMatches(binding: ApprovalBinding, pattern: SessionPattern): b
     if (plannedRef === null) return false;
     if (!globToRegExp(pattern.ref_glob).test(plannedRef)) return false;
   }
-  // destination_domains is REQUIRED non-empty by assertSessionPatternValid.
+  // Both REQUIRED non-empty by assertSessionPatternValid. Defense-in-depth: if
+  // a pattern slipped past validation without one of these, refuse outright
+  // rather than silently auto-approve a too-wide secret.
   if (pattern.destination_domains.length === 0) return false;
-  const allowed = binding.allowed_domains ?? [];
-  const patternSet = new Set(pattern.destination_domains);
-  for (const d of allowed) {
-    if (!patternSet.has(d)) return false; // binding widens the approved set
+  if (pattern.allowed_actions === undefined || pattern.allowed_actions.length === 0) return false;
+  const allowedDomains = binding.allowed_domains ?? [];
+  const domainPatternSet = new Set(pattern.destination_domains);
+  for (const d of allowedDomains) {
+    if (!domainPatternSet.has(d)) return false; // binding widens the approved domains
   }
-  if (pattern.allowed_actions !== undefined) {
-    const bindingActions = binding.allowed_actions ?? [];
-    const actionsPatternSet = new Set(pattern.allowed_actions);
-    for (const a of bindingActions) {
-      if (!actionsPatternSet.has(a)) return false;
-    }
+  const allowedActions = binding.allowed_actions ?? [];
+  const actionsPatternSet = new Set(pattern.allowed_actions);
+  for (const a of allowedActions) {
+    if (!actionsPatternSet.has(a)) return false; // binding widens the approved actions
   }
   return true;
 }
@@ -2568,8 +2669,16 @@ test("GET /ui/session?id=&token= returns HTML with pattern embedded", async () =
     assert.ok(html.includes("template-run")); // pattern visible
     assert.ok(html.includes("vercel-env-add"));
     assert.ok(html.includes(sg.id)); // session id embedded for the form
-    // Cache-Control: no-store (we don't want browser caching the token-bearing page).
+    // Token-bearing HTML pages MUST set these four headers. The meta tag in
+    // the HTML body is not sufficient — browsers ignore meta CSP for
+    // frame-ancestors enforcement.
     assert.equal(res.headers.get("cache-control"), "no-store");
+    assert.equal(res.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    const csp = res.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /frame-ancestors 'none'/);
+    assert.match(csp, /default-src 'self'/);
+    assert.match(csp, /object-src 'none'/);
   });
 });
 
@@ -2647,6 +2756,15 @@ server.addRouteRaw("GET", /^\/ui\/session(?:\?.*)?$/, async (req, _body, res) =>
   res.setHeader("content-type", "text/html; charset=utf-8");
   res.setHeader("cache-control", "no-store");
   res.setHeader("referrer-policy", "no-referrer");
+  res.setHeader("x-content-type-options", "nosniff");
+  // Real CSP HTTP header — the <meta http-equiv> inside the HTML is widely
+  // ignored for `frame-ancestors` enforcement; only the HTTP header counts.
+  // Inline script is permitted via 'unsafe-inline' for v0.2.0; a nonce-based
+  // CSP is a Plan 4b enhancement once the stable-shell UI lands.
+  res.setHeader(
+    "content-security-policy",
+    "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'",
+  );
   res.end(html);
 });
 
@@ -2659,6 +2777,8 @@ function htmlEscape(s: string): string {
     .replaceAll("'", "&#39;");
 }
 ```
+
+The same HTTP-header set (Cache-Control + Referrer-Policy + X-Content-Type-Options) is applied to the **JSON** sub-routes in Task G2 (`/ui/sessions/:id`, `/ui/sessions/:id/approve`, `/ui/sessions/:id/deny`). Those routes don't need `Content-Security-Policy` (they return JSON, not HTML), but they DO need the other three because the URL still carries a token. See G2's `writeError` helper update below.
 
 - [ ] **Step 4: Verify the HTML serves**
 
@@ -2710,7 +2830,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // ... harness imports
 
-test("GET /ui/sessions/:id with valid token → 200 with session JSON", async () => {
+test("GET /ui/sessions/:id with valid token → 200 with session JSON + hardening headers", async () => {
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
     const sg = ctx.services.sessionStore.create({
@@ -2727,6 +2847,10 @@ test("GET /ui/sessions/:id with valid token → 200 with session JSON", async ()
     assert.equal(body.status, "pending");
     assert.deepEqual(body.actions, ["template-run"]);
     assert.equal(body.ref_glob, "ss://x/prod/*");
+    // Token-bearing JSON routes MUST set the hardening triplet.
+    assert.equal(r.headers.get("cache-control"), "no-store");
+    assert.equal(r.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(r.headers.get("x-content-type-options"), "nosniff");
   });
 });
 
@@ -2873,6 +2997,7 @@ export function registerSessionUiRoutes(server: DaemonServer, sessionStore: Sess
       writeError(res, 401, new ShuttleError("ui_token_mismatch", "Invalid UI token."));
       return;
     }
+    setHardeningHeaders(res);
     res.statusCode = 200;
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({
@@ -2923,10 +3048,23 @@ export function registerSessionUiRoutes(server: DaemonServer, sessionStore: Sess
       writeError(res, 400, e);
       return;
     }
+    setHardeningHeaders(res);
     res.statusCode = 200;
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ ok: true, status: verb === "approve" ? "granted" : "denied" }));
   });
+}
+
+/**
+ * Set Cache-Control, Referrer-Policy, and X-Content-Type-Options on every
+ * token-bearing UI response (HTML or JSON). Token-bearing means the request
+ * URL carries `?token=<ui_token>`; browser caches or referrers leaking that
+ * token would let a different process or page replay the action.
+ */
+function setHardeningHeaders(res: import("node:http").ServerResponse): void {
+  res.setHeader("cache-control", "no-store");
+  res.setHeader("referrer-policy", "no-referrer");
+  res.setHeader("x-content-type-options", "nosniff");
 }
 
 function tokensMatch(expected: string, actual: string): boolean {
@@ -2938,6 +3076,7 @@ function tokensMatch(expected: string, actual: string): boolean {
 
 function writeError(res: import("node:http").ServerResponse, status: number, err: unknown): void {
   if (res.writableEnded) return;
+  setHardeningHeaders(res);
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
   res.end(JSON.stringify(errorToJson(err)));
@@ -2981,10 +3120,13 @@ For each route below, add `session_id` body parsing, pass to `requireApproval`, 
 6. `src/daemon/api/routes/inject-render.ts` — action `inject_render` → null
 7. `src/daemon/api/routes/secrets-delete.ts` — action `secrets_delete` → null
 8. `src/daemon/api/routes/secrets-rotate.ts` — action `secrets_rotate` → null
+9. `src/daemon/api/routes/blind.ts` — action `blind_end` → null. Confirmed approval-gated at [blind.ts:71](../../../src/daemon/api/routes/blind.ts).
 
-`src/daemon/api/routes/blind.ts` is excluded from session wiring: confirm via `grep requireApproval src/daemon/api/routes/blind.ts` whether it has an approval gate at all. If it does, the action canonicalizes to null (`blind_end` is not a `SessionAction`); CLI flag pass-through behavior is identical to the four pass-through routes above. If it doesn't, no wiring needed.
+**Explicitly excluded from Plan 4a** (no `session_id` body parsing; daemon route unchanged; CLI command does NOT get `--session`):
+- `secrets.ts` V0 endpoints: `/v1/secrets/capture` (action `"capture"`), `/v1/secrets/inject` (action `"inject"`), `/v1/secrets/compare` (action `"compare"`). The CLI commands `secret-shuttle internal capture / inject / compare` are V0 / deprecated; they remain functionally unchanged in Plan 4a. (Their actions also aren't in `SessionAction`, so even if we wired them as pass-through they would only ever fall back. Not worth the touch surface.)
+- `browser.ts` — does not currently call `requireApproval`. No change.
 
-The unified plan also listed nonexistent `compare.ts` / `capture.ts` / `inject.ts` (V0) as standalone route files. Those V0 routes don't exist as separate files — the V0 compare/capture/inject CLI commands hit endpoints already covered by `secrets.ts` and `browser.ts`. Plan 4a explicitly does NOT wire `secrets.ts` (other than the generate endpoint covered by route 2 above) or `browser.ts` for session passthrough; their actions aren't in `SessionAction`.
+**The surface rule:** Plan 4a wires session-id body pass-through on **every approval-gated daemon route that isn't a V0 deprecation candidate** (9 routes). The CLI commands that target those 9 routes (also 9, listed in Task J2) gain `--session`. V0 internal commands (`internal compare`, `internal capture`, `internal inject`) do NOT get `--session`; their daemon endpoints stay unchanged. This keeps the rule "every modern approval-gated command supports sessions; V0 commands don't".
 
 **Per-route change pattern:**
 
@@ -3123,7 +3265,7 @@ export function internalSessionCommand(): Command {
     .requiredOption("--ref-glob <glob>", "Literal prefix + optional trailing * (e.g. ss://stripe/prod/*). Empty string = no ref check.")
     .option("--destination-domain <domain>", "Allowed destination domain (repeatable)", collectRepeated, [])
     .option("--template-id <id>", "Restrict to specific template_id (repeatable)", collectRepeated, [])
-    .option("--allowed-action <action>", "For secrets-set: required ⊇ for binding.allowed_actions (repeatable)", collectRepeated, [])
+    .option("--allowed-action <action>", "For secrets-set patterns: REQUIRED ⊇ for binding.allowed_actions. Repeatable. Valid: capture_from_page | inject_into_field | compare_fingerprint | use_as_stdin | inject_submit.", collectRepeated, [])
     .option("--ttl <ms>", "TTL in ms after approval; max 900000 (15min); default 300000 (5min)", (v) => Number.parseInt(v, 10), 5 * 60 * 1000)
     .option("--max-uses <n>", "Usage cap (1-1000)", (v) => Number.parseInt(v, 10))
     .option("--no-wait", "Return session_id immediately with status:pending")
@@ -3194,18 +3336,23 @@ One commit per command. For each command, add the flag and pass through to the b
 body.session_id = options.session;  // when present
 ```
 
-Commands (11 total):
-- `src/cli/commands/run.ts`
-- `src/cli/commands/inject.ts`
-- `src/cli/commands/secrets/set.ts`
-- `src/cli/commands/secrets/delete.ts`
-- `src/cli/commands/secrets/rotate.ts`
-- `src/cli/commands/template-run.ts` (or wherever template-run lives)
-- `src/cli/commands/inject-submit.ts`
-- `src/cli/commands/reveal-capture.ts`
-- `src/cli/commands/compare.ts` (under internal/)
-- `src/cli/commands/capture.ts` (under internal/)
-- `src/cli/commands/inject-internal.ts` (V0)
+Commands (9 total) — one per modern approval-gated daemon route from Part I:
+- `src/cli/commands/run.ts` (run → pass-through)
+- `src/cli/commands/inject.ts` (inject_render → pass-through)
+- `src/cli/commands/secrets/set.ts` (generate → secrets-set, session-capable)
+- `src/cli/commands/secrets/delete.ts` (secrets_delete → pass-through)
+- `src/cli/commands/secrets/rotate.ts` (secrets_rotate → pass-through)
+- `src/cli/commands/template.ts` (template_run via `template run` subcommand → session-capable). NOTE: the file is `template.ts`, not `template-run.ts` (earlier draft was wrong). The `--session` flag goes on the `run` subcommand specifically.
+- `src/cli/commands/inject-submit.ts` (inject_submit → session-capable)
+- `src/cli/commands/reveal-capture.ts` (reveal_capture → session-capable)
+- `src/cli/commands/blind.ts` — `--session` on the `end` subcommand only (blind_end → pass-through). Confirmed at [blind.ts:71](../../../src/daemon/api/routes/blind.ts).
+
+**Explicitly NOT added** (V0 / deprecated):
+- `src/cli/commands/compare.ts` (internal compare; V0)
+- `src/cli/commands/capture.ts` (internal capture; V0 — replaced by `reveal-capture`)
+- `src/cli/commands/inject-internal.ts` (internal inject; V0 — replaced by `inject-submit`)
+
+These three V0 commands stay unchanged. If a user invokes them with a session, they'd hit a daemon endpoint that doesn't parse the field. That's acceptable for v0.2.0 since V0 is slated for removal anyway. Documented in the CHANGELOG known-limitations.
 
 Add ONE structural test per command:
 
@@ -3216,7 +3363,7 @@ test("runCommand: --session flag accepted", () => {
 });
 ```
 
-After all 11 commands, run full suite + commit each. Single trailing aggregate verify commit:
+After all 9 commands, run full suite + commit each. Single trailing aggregate verify commit:
 
 ```bash
 git log --oneline | head -15  # ~11 small commits
@@ -3299,7 +3446,8 @@ secret-shuttle template run vercel-env-add --ref ss://local/prod/X --session <id
   - `inject-submit` → `binding.ref` + `destination_domain`
   - `reveal-capture` → `binding.planned_ref` (NOT binding.ref — that's null for reveal-capture) + `destination_domain`
   - `secrets-set` → `binding.planned_ref` + `binding.allowed_domains` ⊆ `pattern.destination_domains` (subset; agent can't widen) + `binding.allowed_actions` ⊆ `pattern.allowed_actions` (when set).
-- **Pattern validation** rejects empty `destination_domains` for inject-submit / reveal-capture / secrets-set and empty `template_ids` for template-run — the dangerous "match anything" shapes are refused at create time.
+- **Pattern validation** rejects empty `destination_domains` for inject-submit / reveal-capture / secrets-set, empty `template_ids` for template-run, AND empty `allowed_actions` for secrets-set — the dangerous "match anything" shapes are all refused at create time. `allowed_actions` entries are validated against the canonical `SecretAction` enum.
+- **UI security headers.** Token-bearing UI responses (HTML at `/ui/session?id=&token=` and JSON at `/ui/sessions/:id`, `/ui/sessions/:id/approve|deny`) set the full hardening set: `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`. The HTML response additionally sets a real `Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'` HTTP header (not just a `<meta>` tag — browsers ignore meta CSP for `frame-ancestors`). Nonce-based CSP that drops `'unsafe-inline'` is a Plan 4b enhancement.
 - **TTL anchored at approval, not creation.** `expires_at` starts at `created_at + 2min` (pending window for the human to click). On approve, `expires_at` resets to `now + pattern.ttl_ms`. So a human who takes 90 seconds to read the pattern still gets the full requested session window.
 - **Granted sessions expire.** `SessionStore.get()` and `.list()` both flip pending AND granted states to `expired` past `expires_at`. Without this, an approved session would live until revoke or process restart.
 - **Destructive actions cannot be put in a session.** `secrets-delete` and `secrets-rotate` are NOT `SessionAction` values; passing them in a session pattern throws `bad_request`. Their CLI commands accept `--session <id>` for surface uniformity, but the daemon rejects with `session_pattern_no_match` and falls back to a fresh per-op approval.
