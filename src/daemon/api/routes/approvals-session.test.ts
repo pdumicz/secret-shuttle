@@ -146,6 +146,43 @@ test("POST /v1/approvals/session: ttl > 15min → bad_request", async () => {
   });
 });
 
+test("POST /v1/approvals/session: wait flow — revoke mid-wait → returns session_revoked (no hang)", async () => {
+  // Regression for the P1: prior wait loop checked granted/denied/expired
+  // but not revoked. SessionStore.get() only flips pending/granted → expired
+  // past TTL — a revoked session is stable in the store, so the loop would
+  // sleep+repeat forever. Now we throw session_revoked + status 400.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const reqPromise = call(ctx, "POST", "/v1/approvals/session", {
+      pattern: {
+        actions: ["template-run"],
+        ref_glob: "ss://x/prod/*",
+        destination_domains: [],
+        template_ids: ["vercel-env-add"],
+        ttl_ms: 5000,
+      },
+    });
+    // Poll the store for the new pending session, then revoke via HTTP.
+    let pending: { id: string } | undefined;
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && pending === undefined) {
+      const list = ctx.services.sessionStore.list();
+      pending = list.find((s) => s.status === "pending");
+      if (pending === undefined) await new Promise((r) => setTimeout(r, 30));
+    }
+    assert.ok(pending, "expected a pending session");
+    // Revoke via HTTP (NOT by mutating the store directly — that's the contract being tested).
+    const revokeRes = await call(ctx, "POST", "/v1/approvals/sessions/revoke", {
+      session_id: pending.id,
+    });
+    assert.equal(revokeRes.status, 200);
+    // Original wait call should now resolve with session_revoked.
+    const r = await reqPromise;
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "session_revoked");
+  });
+});
+
 test("POST /v1/approvals/session: wait flow — approve via HTTP UI route → returns status:granted", async () => {
   // This test exercises the real HTTP approval path (NOT direct sessionStore.approve()).
   // The session-ui route from Part G2 accepts POST /ui/sessions/:id/approve?token=<ui_token>.

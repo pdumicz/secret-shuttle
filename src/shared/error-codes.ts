@@ -165,6 +165,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   session_expired: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   session_max_uses_exceeded: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   session_pattern_no_match: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  session_revoked: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   session_unauthorized: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
 
   // ── Conflict ───────────────────────────────────────────────────────────────

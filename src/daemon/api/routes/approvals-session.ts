@@ -39,6 +39,9 @@ export function registerApprovalsSessionRoutes(
         return { session_id: g.id, status: "granted", expires_at: g.expires_at };
       }
       if (g.status === "denied") throw new ShuttleError("approval_denied", "Session denied.");
+      if (g.status === "revoked") {
+        throw new ShuttleError("session_revoked", "Session was revoked.");
+      }
       if (g.status === "expired") {
         throw new ShuttleError("approval_timeout", "Timed out waiting for session approval.");
       }
