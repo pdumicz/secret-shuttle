@@ -3,6 +3,7 @@ import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
 import { ApprovalStore, type ApprovalBinding } from "./store.js";
 import { requireApproval } from "./require-approval.js";
+import { SessionStore } from "./session-store.js";
 
 const PROD_BINDING: ApprovalBinding = {
   action: "inject",
@@ -134,4 +135,192 @@ test("polling times out when no decision is made", async () => {
     }),
     (err) => err instanceof ShuttleError && err.code === "approval_timeout",
   );
+});
+
+test("requireApproval: matching session → returns session-minted grant; no openUrl call", async () => {
+  const store = new ApprovalStore();
+  const sessions = new SessionStore();
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://x/prod/*",
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
+    ttl_ms: 60_000,
+  });
+  sessions.approve(sg.id);
+  let opens = 0;
+  const grant = await requireApproval({
+    store,
+    sessionStore: sessions,
+    sessionId: sg.id,
+    binding: {
+      action: "template",
+      ref: "ss://x/prod/A",
+      environment: "production",
+      destination_domain: null, // current template-run binding shape (templates.ts:91)
+      target_id: null,
+      field_fingerprint: null,
+      template_id: "vercel-env-add",
+      template_params: null,
+      allowed_domains: [],
+    },
+    daemonPort: 0,
+    openUrlImpl: () => { opens += 1; },
+  });
+  assert.equal(grant.session_id, sg.id);
+  assert.equal(grant.status, "used");
+  assert.equal(opens, 0);
+});
+
+test("requireApproval: session_pattern_no_match falls back to single-use flow", async () => {
+  const store = new ApprovalStore();
+  const sessions = new SessionStore();
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://OTHER/prod/*",
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
+    ttl_ms: 60_000,
+  });
+  sessions.approve(sg.id);
+  let opens = 0;
+  await assert.rejects(
+    requireApproval({
+      store,
+      sessionStore: sessions,
+      sessionId: sg.id,
+      binding: {
+        action: "template",
+        ref: "ss://x/prod/A", // outside pattern.ref_glob
+        environment: "production",
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: "vercel-env-add",
+        template_params: null,
+        allowed_domains: [],
+      },
+      daemonPort: 0,
+      waitMs: 0,
+      openUrlImpl: () => { opens += 1; },
+    }),
+    (err: Error & { code?: string }) => err.code === "approval_required",
+  );
+  assert.equal(opens, 1, "single-use fallback should have opened a tab");
+});
+
+test("requireApproval: session_not_found re-thrown (no fallback)", async () => {
+  const store = new ApprovalStore();
+  const sessions = new SessionStore();
+  let opens = 0;
+  await assert.rejects(
+    requireApproval({
+      store,
+      sessionStore: sessions,
+      sessionId: "does-not-exist",
+      binding: {
+        action: "template",
+        ref: "ss://x/prod/A",
+        environment: "production",
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: "vercel-env-add",
+        template_params: null,
+        allowed_domains: [],
+      },
+      daemonPort: 0,
+      openUrlImpl: () => { opens += 1; },
+    }),
+    (err: Error & { code?: string }) => err.code === "session_not_found",
+  );
+  assert.equal(opens, 0);
+});
+
+test("requireApproval: session_expired re-thrown (no fallback)", async () => {
+  let nowVal = 1_000_000;
+  const sessions = new SessionStore({ now: () => nowVal });
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://x/prod/*",
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
+    ttl_ms: 1000,
+  });
+  sessions.approve(sg.id);
+  nowVal += 2000;
+  const store = new ApprovalStore();
+  let opens = 0;
+  await assert.rejects(
+    requireApproval({
+      store,
+      sessionStore: sessions,
+      sessionId: sg.id,
+      binding: {
+        action: "template",
+        ref: "ss://x/prod/A",
+        environment: "production",
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: "vercel-env-add",
+        template_params: null,
+        allowed_domains: [],
+      },
+      daemonPort: 0,
+      waitMs: 0,
+      openUrlImpl: () => { opens += 1; },
+    }),
+    (err: Error & { code?: string }) => err.code === "session_expired",
+  );
+  assert.equal(opens, 0);
+});
+
+test("requireApproval: secrets_delete binding with a session → pattern_no_match → falls back to single-use", async () => {
+  // The session can't include secrets-delete (it's not a SessionAction).
+  // Passing session_id with a secrets_delete binding canonicalizes to null,
+  // matcher returns false → pattern_no_match → falls through to single-use.
+  const store = new ApprovalStore();
+  const sessions = new SessionStore();
+  // Broadest legal pattern: all 4 SessionActions + non-empty destination_domains
+  // + template_ids + allowed_actions covering the full ALL_SECRET_ACTIONS set.
+  const sg = sessions.create({
+    actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
+    ref_glob: "",
+    destination_domains: ["any.com"],
+    template_ids: ["any"],
+    allowed_actions: [
+      "capture_from_page",
+      "inject_into_field",
+      "compare_fingerprint",
+      "use_as_stdin",
+      "inject_submit",
+    ],
+    ttl_ms: 60_000,
+  });
+  sessions.approve(sg.id);
+  let opens = 0;
+  await assert.rejects(
+    requireApproval({
+      store,
+      sessionStore: sessions,
+      sessionId: sg.id,
+      binding: {
+        action: "secrets_delete",
+        ref: "ss://x/prod/A",
+        environment: "production",
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: null,
+        template_params: null,
+        allowed_domains: [],
+      },
+      daemonPort: 0,
+      waitMs: 0,
+      openUrlImpl: () => { opens += 1; },
+    }),
+    (err: Error & { code?: string }) => err.code === "approval_required",
+  );
+  assert.equal(opens, 1);
 });

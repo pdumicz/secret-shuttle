@@ -2,6 +2,7 @@
 import { ShuttleError } from "../../shared/errors.js";
 import { openUrl } from "./open-url.js";
 import type { ApprovalBinding, ApprovalGrant, ApprovalStore } from "./store.js";
+import type { SessionStore } from "./session-store.js";
 
 export interface RequireApprovalOptions {
   store: ApprovalStore;
@@ -12,6 +13,8 @@ export interface RequireApprovalOptions {
   force?: boolean;
   /** Hook so tests can disable the system-browser open. */
   openUrlImpl?: (url: string) => void;
+  sessionId?: string;
+  sessionStore?: SessionStore;
   /**
    * URL+token are not exposed to callers; the daemon opens the UI itself via openUrl.
    */
@@ -23,6 +26,20 @@ export async function requireApproval(opts: RequireApprovalOptions): Promise<App
     return synthesizeGrant(opts.binding);
   }
 
+  // Session fast-path.
+  if (opts.sessionId !== undefined && opts.sessionStore !== undefined) {
+    try {
+      return opts.store.findOrMintFromSession(opts.sessionId, opts.binding, opts.sessionStore);
+    } catch (e) {
+      if (e instanceof ShuttleError && e.code === "session_pattern_no_match") {
+        // Fall through to single-use flow.
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  // (Existing single-use flow.)
   if (opts.approvalIdFromClient !== undefined) {
     return opts.store.consume(opts.approvalIdFromClient, opts.binding);
   }
