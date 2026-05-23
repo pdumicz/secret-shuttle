@@ -66,3 +66,81 @@ test("GET /ui/hub missing token → 400 bad_request", async () => {
     assert.equal(body.error.code, "bad_request");
   });
 });
+
+async function readOneSseEvent(res: Response): Promise<unknown> {
+  // Read body chunks until we hit a `\n\n` separator, then return the
+  // parsed JSON from the first `data: …` line.
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const idx = buf.indexOf("\n\n");
+    if (idx === -1) continue;
+    const frame = buf.slice(0, idx);
+    const dataLine = frame.split("\n").find((l) => l.startsWith("data: "));
+    if (dataLine === undefined) {
+      // Skip non-data frames (e.g. keepalive `: ping`); keep reading.
+      buf = buf.slice(idx + 2);
+      continue;
+    }
+    await reader.cancel();
+    return JSON.parse(dataLine.slice("data: ".length));
+  }
+  throw new Error("SSE stream ended before a data frame arrived");
+}
+
+test("GET /ui/hub/stream with valid token delivers a navigate event after surface()", async () => {
+  await withHubDaemon(async (ctx) => {
+    // Start the SSE request first so attach() fires before surface().
+    const res = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/stream?token=${encodeURIComponent(ctx.broker.hubToken())}`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+
+    // Give the route handler a microtask to wire up attach().
+    await new Promise((r) => setTimeout(r, 30));
+
+    ctx.broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+
+    const event = await readOneSseEvent(res);
+    assert.deepEqual(
+      { type: (event as { type: string }).type, seq: (event as { seq: number }).seq },
+      { type: "navigate", seq: 1 },
+    );
+    assert.match(
+      (event as { url: string }).url,
+      /id=a.*hub_seq=1|hub_seq=1.*id=a/,
+    );
+  });
+});
+
+test("GET /ui/hub/stream with wrong token → 401 ui_token_mismatch", async () => {
+  await withHubDaemon(async (ctx) => {
+    const res = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/stream?token=WRONG`);
+    assert.equal(res.status, 401);
+    const body = await res.json() as { error: { code: string } };
+    assert.equal(body.error.code, "ui_token_mismatch");
+  });
+});
+
+test("Second SSE connection displaces the first", async () => {
+  await withHubDaemon(async (ctx) => {
+    // First connection.
+    const r1 = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/stream?token=${encodeURIComponent(ctx.broker.hubToken())}`);
+    await new Promise((res) => setTimeout(res, 30));
+    // Second connection — should displace r1.
+    const r2 = await fetch(`http://127.0.0.1:${ctx.port}/ui/hub/stream?token=${encodeURIComponent(ctx.broker.hubToken())}`);
+    await new Promise((res) => setTimeout(res, 30));
+
+    const displaced = await readOneSseEvent(r1);
+    assert.equal((displaced as { type: string }).type, "displaced");
+
+    // r2 should be alive and ready for events.
+    ctx.broker.surface("http://127.0.0.1:5555/ui/approve?id=b&token=t", 5555);
+    const navigate = await readOneSseEvent(r2);
+    assert.equal((navigate as { type: string }).type, "navigate");
+  });
+});

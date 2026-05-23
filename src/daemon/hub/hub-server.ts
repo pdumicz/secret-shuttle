@@ -47,6 +47,59 @@ export function registerHubRoutes(server: DaemonServer, broker: HubBroker): void
     );
     res.end(html);
   });
+
+  server.addRouteRaw("GET", /^\/ui\/hub\/stream$/, async (req, _body, res) => {
+    const url = new URL(req.url ?? "", "http://127.0.0.1");
+    const token = url.searchParams.get("token");
+    if (token === null || token.length === 0) {
+      writeError(res, 400, new ShuttleError("bad_request", "Missing token."));
+      return;
+    }
+    if (!broker.tokenMatches(token)) {
+      writeError(res, 401, new ShuttleError("ui_token_mismatch", "Invalid UI token."));
+      return;
+    }
+
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/event-stream");
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("x-accel-buffering", "no");
+    setHardeningHeaders(res);
+    // Flush headers so the client knows the connection is open before
+    // any data frame arrives. (Node sends headers on first write/flush.)
+    res.flushHeaders?.();
+
+    const sub: import("./hub-broker.js").HubSubscriber = {
+      write: (e) => {
+        if (res.writableEnded || res.destroyed) return;
+        res.write(`data: ${JSON.stringify(e)}\n\n`);
+      },
+      // Reassigned below to also invoke cleanup().
+      close: () => undefined,
+    };
+
+    const detach = broker.attach(sub);
+    let cleanedUp = false;
+    const cleanup = (): void => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      clearInterval(keepalive);
+      detach();
+    };
+    sub.close = () => {
+      if (!res.writableEnded && !res.destroyed) res.end();
+      cleanup();
+    };
+
+    const keepalive = setInterval(() => {
+      if (res.writableEnded || res.destroyed) { cleanup(); return; }
+      res.write(": ping\n\n");
+    }, 25_000);
+    // Stop the keepalive from blocking node from exiting under test.
+    keepalive.unref?.();
+
+    req.on("close", cleanup);
+  });
 }
 
 function setHardeningHeaders(res: import("node:http").ServerResponse): void {
