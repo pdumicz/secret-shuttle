@@ -13,6 +13,7 @@ export function injectSubmitCommand(): Command {
     .option("--domain <domain>")
     .option("--success-timeout-ms <ms>", "Max wait for the success marker (default 15000, cap 60000).", (v) => parseInt(v, 10))
     .option("--approval-id <id>")
+    .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
     .option("--no-wait")
     .action(async (options) => {
       const bodyObj: Record<string, unknown> = {
@@ -25,6 +26,7 @@ export function injectSubmitCommand(): Command {
       if (options.domain !== undefined) bodyObj.domain = options.domain;
       if (options.successTimeoutMs !== undefined) bodyObj.success_timeout_ms = options.successTimeoutMs;
       if (options.approvalId !== undefined) bodyObj.approval_id = options.approvalId;
+      if (options.session !== undefined) bodyObj.session_id = options.session;
       const r = await daemonRequest("POST", "/v1/secrets/inject-submit", bodyObj);
       outputJson(ok(r as Record<string, unknown>));
     })
