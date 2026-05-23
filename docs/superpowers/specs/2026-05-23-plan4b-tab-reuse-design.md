@@ -201,7 +201,7 @@ The `cleanedUp` flag makes `cleanup()` idempotent: req.close and sub.close (brok
     for await (const chunk of req) {
       total += chunk.length;
       if (total > maxBytes) {
-        throw new ShuttleError("payload_too_large", `Body exceeds ${maxBytes} bytes.`);
+        throw new ShuttleError("request_too_large", `Body exceeds ${maxBytes} bytes.`);
       }
       chunks.push(chunk);
     }
@@ -276,17 +276,41 @@ function connect() {
   });
 }
 
-window.addEventListener("message", async (ev) => {
+async function postDone(seq) {
+  // Retry transient failures so a single network blip can't strand the
+  // daemon's activeUrl forever. Cap at MAX_ATTEMPTS; auth/400 errors
+  // are terminal (no retry). After all attempts fail, fall through to
+  // the terminal banner so the user knows to reload.
+  const MAX_ATTEMPTS = 5;
+  const BASE_DELAY_MS = 250;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const r = await fetch(`/ui/hub/done?token=${encodeURIComponent(hubToken)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ seq }),
+      });
+      if (r.ok) return;
+      // Auth + malformed body are terminal — retrying won't help.
+      if (r.status === 401 || r.status === 403 || r.status === 400) break;
+      // 5xx falls through to retry.
+    } catch {
+      // Network failure; retry.
+    }
+    await new Promise((resolve) => setTimeout(resolve, BASE_DELAY_MS * (attempt + 1)));
+  }
+  // All attempts exhausted (or terminal error) → surface to user.
+  terminal = true;
+  showBanner("Failed to advance Secret Shuttle. Reload to continue.", "disconnected");
+}
+
+window.addEventListener("message", (ev) => {
   if (ev.origin !== location.origin) return;
   if (ev.source !== iframe.contentWindow) return;
   const data = ev.data;
   if (data?.type !== "operation_done") return;
   if (!Number.isSafeInteger(data.seq) || data.seq <= 0) return;
-  await fetch(`/ui/hub/done?token=${encodeURIComponent(hubToken)}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ seq: data.seq }),
-  });
+  postDone(data.seq);
 });
 
 connect();
@@ -328,12 +352,12 @@ All three pages add `hub_seq` parsing + `notifyHubIfFramed()` + polling. Pattern
   window.addEventListener("beforeunload", stopPolling);
   ```
 - Call `startPolling()` after the initial JSON fetch sets up the page.
-- Inside the approve/deny success handler, after the existing UI update: `stopPolling(); notifyHubIfFramed();`.
+- Inside the approve/deny POST handler, after the existing UI update **only when the POST returned `r.ok === true`**: `stopPolling(); notifyHubIfFramed();`. **Do NOT notify on `r.ok === false`** — a failed POST means the daemon side may not have advanced, so the queue must NOT advance. Polling continues; if the server actually committed (race), the next poll catches it and notifies then.
 
 **`src/daemon/approvals/session-ui.html` (`/ui/session`).**
 - Same pattern; polls `/ui/sessions/${id}?token=${token}`.
 - Terminal statuses: `["granted", "denied", "expired", "revoked"]` (no `used` — sessions don't have that state per `src/daemon/approvals/session.ts`).
-- Inside the existing `done()` function: after `status.textContent = ...`, call `notifyHubIfFramed()` and `stopPolling()`.
+- Inside the existing `done(verb, ok)` function: only when `ok === true`, call `notifyHubIfFramed()` and `stopPolling()`. The current `session-ui.html` calls `done("approved", r.ok)` and `done("denied", r.ok)` for both success and failure paths — gating on the `ok` arg keeps the failure path from spuriously advancing the hub queue. The polling loop remains active on failure and will catch any server-side state change.
 
 **`src/daemon/approvals/unlock-ui.html` (`/ui/unlock`).**
 - Add only the `hub_seq` parsing + `notifyHubIfFramed()` (no polling).
@@ -451,7 +475,7 @@ V0 (3) — same file, three more handlers:
 
 ### SSE drop without close
 1. State: active set, subscriber=hub1.
-2. Network/proxy hiccup → `es.onerror` fires. `terminal=false`, `attemptedReconnect=false`. `es.close()`, `attemptedReconnect=true`, setTimeout(connect, 1000).
+2. Network/proxy hiccup → `es.onerror` fires. `terminal=false`. `es.close()`, `consecutiveFailures` increments to 1 (< 2), setTimeout(connect, 1000). On successful reopen, the `open` listener resets `consecutiveFailures = 0` so a later unrelated blip again gets one reconnect attempt before going terminal.
 3. Successful reconnect → new EventSource → SSE route attaches → broker displaces zombie (close() is no-op on torn-down res) → resend active.
 4. Second consecutive error → `terminal=true`, render "Disconnected — reload to reconnect."
 
@@ -524,7 +548,7 @@ Cases:
 - `POST /ui/hub/done?token=WRONG` → 401.
 - `POST /ui/hub/done` mismatched seq → 200 (idempotent).
 - `POST /ui/hub/done` missing body / malformed JSON → 400 `bad_request`.
-- `POST /ui/hub/done` body > 1024 bytes → 400 `payload_too_large` (whichever status `readBoundedJson` raises).
+- `POST /ui/hub/done` body > 1024 bytes → `request_too_large` (matches the existing `src/daemon/server.ts:183` body-cap code; HTTP status comes from the existing error-mapping path).
 - `POST /ui/hub/done` body `{seq:"abc"}` or `{seq:-1}` → 400 `bad_request`.
 
 ### Layer 3 — Operation-page CSP regression
@@ -548,7 +572,8 @@ Cases:
   - `notifyHubIfFramed()` function name + at least one call from the terminal path.
   - `Number.isSafeInteger` + `hubSeq > 0` (the null-trap guard).
   - `window.parent.postMessage` (the actual signal emission).
-- **`session-ui.html` drift-guard** (new test file `src/daemon/approvals/session-ui-html-drift.test.ts`): same assertions adapted for session terminal statuses: `"granted"`, `"denied"`, `"expired"`, `"revoked"` (no `"used"` — sessions don't have that state).
+  - **Success-only gate**: assert that the approve/deny POST handler calls `notifyHubIfFramed()` only under `r.ok === true` (or equivalent). The drift assertion: source must contain `if (r.ok)` (or `if (ok)`) preceding a `notifyHubIfFramed()` call; or alternatively, source must NOT contain `notifyHubIfFramed()` reachable from the `!r.ok` branch.
+- **`session-ui.html` drift-guard** (new test file `src/daemon/approvals/session-ui-html-drift.test.ts`): same assertions adapted for session terminal statuses: `"granted"`, `"denied"`, `"expired"`, `"revoked"` (no `"used"` — sessions don't have that state). Additionally pin the **success-only gate**: assert that `notifyHubIfFramed()` is reachable from the `r.ok === true` branch (or `done(verb, true)` branch) and that the `r.ok === false` / `done(verb, false)` branch does NOT call it. The crude form: assert the source contains `if (r.ok)` (or `if (ok)`) preceding the notify call, OR that `notifyHubIfFramed()` is NOT reachable from a `done("approved", false)` / `done("denied", false)` line.
 - **`unlock-ui.html` drift-guard** (extend existing or new `unlock-ui-html-drift.test.ts`): assert `notifyHubIfFramed()` called from the success branch ONLY. Assert no `pollForTerminal` (unlock skips polling — documented design choice).
 
 The assertions are crude text matches; they don't run the JS. They exist as a tripwire against accidental deletion. If the polling logic is ever refactored to a different shape, update the assertions to match — the refactor is the right time to revisit them.
@@ -569,6 +594,8 @@ Cases (named to mirror data flow):
   7. `attach(sub2)` → activeUrl=url1 → resend navigate(url1, seq=1). markDone(1) → promote url2 (seq=2). markDone(2) → promote url3 (seq=3). markDone(3) → empty.
   - **Assertions:** `openUrlSpy.calls.length === 3`. Subscriber received events: `[displaced (no — first attach), navigate(url1,1), navigate(url1,1), navigate(url2,2), navigate(url3,3)]` — the first attach has no prior to displace; the second attach gets a resend.
 - **"Tab-close mid-op stays within spawn window"** (2 opens variant): Steps 1–4 above, skip 5–6, attach sub2. Asserts `openUrlSpy.calls.length === 2` and resend-then-drain.
+- **"`/ui/hub/done` transient failure retries and recovers"**: trigger surface → attach sub1 → write navigate(url1, seq=1) → simulate iframe done by directly calling `POST /ui/hub/done` with one fake-failed attempt followed by a successful one (mock fetch at the daemon-end-to-end boundary, or use the daemon route's actual response and inject a one-shot 503 from a wrapping middleware). Asserts the broker eventually advances on the retry, NOT on the first failed attempt. Verifies `activeUrl === null` only after the successful POST.
+- **"`/ui/hub/done` permanent failure surfaces terminal banner"**: after MAX_ATTEMPTS failures (or a 401 returned immediately), the hub-side `postDone` exhausts retries and sets `terminal = true`. Verifies the broker's `activeUrl` remains set (so a future hub reattach would resend) and that the iframe-side code stops further postMessage handling.
 
 ### Layer 6 — `SECRET_SHUTTLE_NO_OPEN_URL` regression
 With env var set: `surface()` works (state mutates), `openUrl` no-ops. Test:
