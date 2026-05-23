@@ -52,6 +52,22 @@ export class TemplateRegistry {
     if (t === undefined) throw new ShuttleError("template_not_found", `Unknown template: ${id}`);
     return t;
   }
+  /**
+   * Register (or replace) a template definition.  Exposed for tests that need
+   * to drive /v1/templates/run with a stub binary (e.g. process.execPath) so
+   * the success and post-mint-failure audit paths can be exercised without
+   * relying on the host having vercel / gh / wrangler / supabase installed.
+   * Not used by production code paths.
+   */
+  register(spec: TemplateDefinition): void {
+    this.map.set(spec.id, spec);
+  }
+  /** Test-only: drop a template by id.  Used by tests that register a stub
+   * template and want to leave the process-shared registry pristine for
+   * subsequent tests. */
+  unregister(id: string): void {
+    this.map.delete(id);
+  }
 }
 
 /**

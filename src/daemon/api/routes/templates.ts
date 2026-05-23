@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { requireApproval } from "../../approvals/require-approval.js";
-import type { ApprovalBinding } from "../../approvals/store.js";
+import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { resolveBinary } from "../../templates/resolve-binary.js";
 import { runTemplate } from "../../templates/run.js";
 import { TemplateRegistry, assertNoPaddedParams } from "../../templates/registry.js";
@@ -12,7 +12,12 @@ import { ShuttleError } from "../../../shared/errors.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { asObject, optBool, optString, optStringRecord, reqString } from "../validate.js";
 
-const registry = new TemplateRegistry();
+/**
+ * Module-scoped registry instance.  Exported for tests that need to register
+ * a stub template (e.g. one whose binary is process.execPath so the binary
+ * resolves on the test machine).  All routes share this single instance.
+ */
+export const registry = new TemplateRegistry();
 
 export function registerTemplates(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/templates/list", () => ({
@@ -39,10 +44,18 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
     const params = optStringRecord(o, "params") ?? {};
     const approvalId = optString(o, "approval_id");
     const waitForApproval = optBool(o, "wait_for_approval");
+    const sessionId = optString(o, "session_id");
 
     // Hoisted so the catch block can include them in the failure audit record.
     let effectiveEnv: string | undefined;
     let destEnv: string | undefined;
+    // Hoisted OUTSIDE the try so a post-mint failure (e.g. resolveErr
+    // re-thrown after requireApproval consumed the session) still carries
+    // grant.session_id into the failure audit.  Optional-chained at use site
+    // because grant remains undefined if requireApproval itself threw
+    // (pre-mint failure), in which case no session was consumed and audit
+    // MUST NOT carry session_id.
+    let grant: ApprovalGrant | undefined;
     try {
       const tpl = registry.get(templateId);
       const secret = await services.vault.getSecret(ref);
@@ -102,11 +115,17 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
       };
 
       // Single requireApproval call — handles both the initial (no approval_id)
-      // and the retry (approval_id supplied) paths.
-      await requireApproval({
+      // and the retry (approval_id supplied) paths.  When sessionId is set and
+      // the binding matches the session pattern, the call mints a used grant
+      // from the session and the audit emitted below will carry
+      // grant.session_id; otherwise the call falls back to the single-use flow
+      // and grant.session_id is undefined.
+      grant = await requireApproval({
         store: services.approvals,
         binding,
         daemonPort: daemonPortRef(),
+        sessionStore: services.sessionStore,
+        ...(sessionId !== undefined ? { sessionId } : {}),
         ...(approvalId !== undefined ? { approvalIdFromClient: approvalId } : {}),
         ...(waitForApproval === false ? { waitMs: 0 } : {}),
       });
@@ -130,6 +149,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         environment: effectiveEnv,
         ...(destEnv !== undefined ? { destination_environment: destEnv } : {}),
         template_id: tpl.id,
+        ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       return {
         executed: result.exit_code === 0,
@@ -149,6 +169,11 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         ...(effectiveEnv !== undefined ? { environment: effectiveEnv } : {}),
         ...(destEnv !== undefined ? { destination_environment: destEnv } : {}),
         template_id: templateId,
+        // Optional-chain: grant is undefined if requireApproval itself threw
+        // (pre-mint failure — no session consumed → audit MUST NOT carry
+        // session_id).  Otherwise grant.session_id is the source session iff
+        // the binding matched the session pattern.
+        ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       throw err;
     }
