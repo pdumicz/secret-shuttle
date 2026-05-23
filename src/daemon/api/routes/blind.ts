@@ -4,6 +4,7 @@ import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { requireApproval } from "../../approvals/require-approval.js";
+import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 
 interface StartBody { domain?: string; reason?: string; }
@@ -82,6 +83,7 @@ export function registerBlind(server: DaemonServer, services: DaemonServices, da
         daemonPort: daemonPortRef(),
         force: true,
         sessionStore: services.sessionStore,
+        openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
         ...(session_id !== undefined ? { sessionId: session_id } : {}),
         ...(approval_id !== undefined ? { approvalIdFromClient: approval_id } : {}),
         ...(wait_for_approval === false ? { waitMs: 0 } : {}),
