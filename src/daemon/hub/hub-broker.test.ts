@@ -1,0 +1,260 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  HubBroker,
+  SPAWN_TIMEOUT_MS,
+  type HubEvent,
+  type HubSubscriber,
+  withHubSeq,
+} from "./hub-broker.js";
+
+function makeSubscriber(): { sub: HubSubscriber; events: HubEvent[]; closed: () => boolean } {
+  const events: HubEvent[] = [];
+  let isClosed = false;
+  return {
+    sub: {
+      write: (e) => events.push(e),
+      close: () => { isClosed = true; },
+    },
+    events,
+    closed: () => isClosed,
+  };
+}
+
+function newBroker(opts: { now?: () => number; openUrl?: (u: string) => void } = {}): {
+  broker: HubBroker;
+  opens: string[];
+} {
+  const opens: string[] = [];
+  const broker = new HubBroker({
+    // Test default: capture spawn calls in an array. Production
+    // HubBroker requires an explicit openUrlImpl (see DaemonServices
+    // in Task B4 where it passes the real openUrl).
+    openUrlImpl: opts.openUrl ?? ((u: string) => opens.push(u)),
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
+  });
+  return { broker, opens };
+}
+
+test("withHubSeq appends hub_seq, preserves other params", () => {
+  const out = withHubSeq("http://127.0.0.1:5555/ui/approve?id=abc&token=xyz", 7);
+  const u = new URL(out);
+  assert.equal(u.searchParams.get("hub_seq"), "7");
+  assert.equal(u.searchParams.get("id"), "abc");
+  assert.equal(u.searchParams.get("token"), "xyz");
+});
+
+test("withHubSeq replaces existing hub_seq", () => {
+  const out = withHubSeq("http://127.0.0.1:5555/ui/approve?id=abc&hub_seq=1", 9);
+  assert.equal(new URL(out).searchParams.get("hub_seq"), "9");
+});
+
+test("hubUrl(port) returns absolute URL with hubToken", () => {
+  const { broker } = newBroker();
+  const url = new URL(broker.hubUrl(8765));
+  assert.equal(url.protocol, "http:");
+  assert.equal(url.hostname, "127.0.0.1");
+  assert.equal(url.port, "8765");
+  assert.equal(url.pathname, "/ui/hub");
+  assert.equal(url.searchParams.get("token"), broker.hubToken());
+});
+
+test("tokenMatches is true for the broker's token and false otherwise", () => {
+  const { broker } = newBroker();
+  assert.equal(broker.tokenMatches(broker.hubToken()), true);
+  assert.equal(broker.tokenMatches("not-the-token"), false);
+  assert.equal(broker.tokenMatches(""), false);
+});
+
+test("tokenMatches rejects same-length wrong tokens (timing-safe path is exercised)", () => {
+  const { broker } = newBroker();
+  const sameLengthWrong = "x".repeat(broker.hubToken().length);
+  assert.equal(broker.tokenMatches(sameLengthWrong), false);
+});
+
+test("surface attached+idle → writes navigate, sets active", () => {
+  const { broker, opens } = newBroker();
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+  assert.equal(events.length, 1);
+  const ev = events[0] as Extract<HubEvent, { type: "navigate" }>;
+  assert.equal(ev.type, "navigate");
+  assert.equal(ev.seq, 1);
+  assert.equal(new URL(ev.url).searchParams.get("hub_seq"), "1");
+  assert.equal(opens.length, 0); // attached, no spawn
+});
+
+test("surface attached+busy → enqueue only, no write", () => {
+  const { broker } = newBroker();
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t1", 5555);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=b&token=t2", 5555);
+  assert.equal(events.length, 1); // only the first navigate
+});
+
+test("surface detached + no spawn → spawn once, no event yet", () => {
+  const { broker, opens } = newBroker();
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+  assert.equal(opens.length, 1);
+  assert.equal(opens[0], broker.hubUrl(5555));
+});
+
+test("surface detached + within timeout → no respawn", () => {
+  let t = 1_000_000;
+  const { broker, opens } = newBroker({ now: () => t });
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t1", 5555);
+  t += 100;
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=b&token=t2", 5555);
+  assert.equal(opens.length, 1);
+});
+
+test("surface detached + past timeout → respawn", () => {
+  let t = 1_000_000;
+  const { broker, opens } = newBroker({ now: () => t });
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t1", 5555);
+  t += SPAWN_TIMEOUT_MS + 1;
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=b&token=t2", 5555);
+  assert.equal(opens.length, 2);
+});
+
+test("attach + detach lifecycle: detach callback nulls currentSubscriber", () => {
+  const { broker } = newBroker();
+  const { sub } = makeSubscriber();
+  const detach = broker.attach(sub);
+  assert.equal(broker.peekState().isAttached, true);
+  detach();
+  assert.equal(broker.peekState().isAttached, false);
+});
+
+test("surface detached + activeUrl set after detach → enqueue + respawn", () => {
+  const { broker, opens } = newBroker();
+  const { sub } = makeSubscriber();
+  const detach = broker.attach(sub);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t1", 5555);
+  // activeUrl is now set; subscriber attached, but no spawn yet.
+  assert.equal(opens.length, 0);
+  detach(); // SSE close
+  // Now surface again while detached. activeUrl is still set; queue grows.
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=b&token=t2", 5555);
+  // !isSpawnInFlight (attach cleared it). Should respawn.
+  assert.equal(opens.length, 1);
+  assert.equal(broker.peekState().activeUrl, "http://127.0.0.1:5555/ui/approve?id=a&token=t1");
+  assert.equal(broker.peekState().queueLength, 1);
+});
+
+test("attach empty broker → no resend, no event", () => {
+  const { broker } = newBroker();
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  assert.equal(events.length, 0);
+});
+
+test("attach with active set → resend navigate(active, activeSeq)", () => {
+  const { broker } = newBroker();
+  const { sub: sub1 } = makeSubscriber();
+  const detach1 = broker.attach(sub1);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+  // sub1 saw navigate(a, seq=1). Detach.
+  detach1();
+  // New attach → resend.
+  const { sub: sub2, events: events2 } = makeSubscriber();
+  broker.attach(sub2);
+  assert.equal(events2.length, 1);
+  const ev = events2[0] as Extract<HubEvent, { type: "navigate" }>;
+  assert.equal(ev.type, "navigate");
+  assert.equal(ev.seq, 1);
+});
+
+test("attach displaces prior: prior gets {displaced} + close()", () => {
+  const { broker } = newBroker();
+  const a = makeSubscriber();
+  const b = makeSubscriber();
+  broker.attach(a.sub);
+  broker.attach(b.sub);
+  assert.equal(a.events.length, 1);
+  assert.equal(a.events[0]?.type, "displaced");
+  assert.equal(a.closed(), true);
+});
+
+test("attach drains queue front when no active", () => {
+  const { broker } = newBroker();
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t1", 5555);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=b&token=t2", 5555);
+  // queue grows while detached; activeUrl still null.
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  // Promotes front → navigate(a, seq=1). queue has [b] left.
+  assert.equal(events.length, 1);
+  const ev = events[0] as Extract<HubEvent, { type: "navigate" }>;
+  assert.equal(ev.seq, 1);
+  assert.equal(broker.peekState().queueLength, 1);
+});
+
+test("attach clears spawnInFlightSince", () => {
+  let t = 1_000_000;
+  const { broker, opens } = newBroker({ now: () => t });
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+  assert.equal(opens.length, 1);
+  const { sub } = makeSubscriber();
+  broker.attach(sub);
+  assert.equal(broker.peekState().spawnInFlight, false);
+  t += 100;
+  // Detach then surface within the would-be-debounce window.
+  // After attach the flag is cleared, so a new surface (after a re-detach) respawns.
+});
+
+test("markDone matching → clear + promote next", () => {
+  const { broker } = newBroker();
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t1", 5555);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=b&token=t2", 5555);
+  // events: [navigate(a,1)]; queue=[b]
+  assert.equal(events.length, 1);
+  broker.markDone(1);
+  // promotes b → navigate(b,2)
+  assert.equal(events.length, 2);
+  const ev = events[1] as Extract<HubEvent, { type: "navigate" }>;
+  assert.equal(ev.seq, 2);
+});
+
+test("markDone mismatched seq → no-op", () => {
+  const { broker } = newBroker();
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t1", 5555);
+  // active is seq=1
+  broker.markDone(99);
+  // still active, no further events
+  assert.equal(events.length, 1);
+  assert.equal(broker.peekState().activeUrl, "http://127.0.0.1:5555/ui/approve?id=a&token=t1");
+});
+
+test("markDone with empty queue → clear active only, no further writes", () => {
+  const { broker } = newBroker();
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+  broker.markDone(1);
+  assert.equal(events.length, 1); // only the original navigate
+  assert.equal(broker.peekState().activeUrl, null);
+  assert.equal(broker.peekState().queueLength, 0);
+});
+
+test("FIFO ordering across interleavings", () => {
+  const { broker } = newBroker();
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=a&token=t", 5555);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=b&token=t", 5555);
+  broker.surface("http://127.0.0.1:5555/ui/approve?id=c&token=t", 5555);
+  broker.markDone(1);
+  broker.markDone(2);
+  broker.markDone(3);
+  const ids = events
+    .filter((e) => e.type === "navigate")
+    .map((e) => new URL((e as Extract<HubEvent, { type: "navigate" }>).url).searchParams.get("id"));
+  assert.deepEqual(ids, ["a", "b", "c"]);
+});
