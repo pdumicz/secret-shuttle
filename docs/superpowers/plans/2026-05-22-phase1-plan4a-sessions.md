@@ -172,7 +172,7 @@ export interface SessionPattern {
   ref_glob: string;                 // "" = no ref check; otherwise literal prefix + optional single trailing *
   destination_domains: string[];    // REQUIRED non-empty when actions include inject-submit/reveal-capture/secrets-set
   template_ids?: string[];          // REQUIRED non-empty when actions includes template-run
-  allowed_actions?: string[];       // optional; only meaningful for secrets-set sessions (superset constraint)
+  allowed_actions?: string[];       // REQUIRED non-empty when actions includes secrets-set; entries validated against ALL_SECRET_ACTIONS
   ttl_ms: number;                   // 1_000 ≤ ttl_ms ≤ 900_000 (15 min)
   max_uses?: number;                // 1 ≤ max_uses ≤ 1000
 }
@@ -475,6 +475,7 @@ Create `src/daemon/approvals/session.ts`:
 
 ```typescript
 import { ShuttleError } from "../../shared/errors.js";
+import { ALL_SECRET_ACTIONS } from "../../vault/types.js";
 
 export type SessionAction =
   | "template-run"
@@ -522,17 +523,12 @@ const ALLOWED_ACTIONS_REQUIRED: ReadonlySet<SessionAction> = new Set<SessionActi
 ]);
 
 /**
- * Canonical SecretAction enum (mirrors src/vault/types.ts:ALL_SECRET_ACTIONS).
- * Pattern.allowed_actions entries are validated against this set at
- * create time.
+ * Canonical SecretAction set, derived from ALL_SECRET_ACTIONS so this file
+ * does not silently drift when a new SecretAction is added to the vault
+ * type system. ALL_SECRET_ACTIONS itself is the source of truth in
+ * src/vault/types.ts.
  */
-const VALID_SECRET_ACTIONS = new Set<string>([
-  "capture_from_page",
-  "inject_into_field",
-  "compare_fingerprint",
-  "use_as_stdin",
-  "inject_submit",
-]);
+const VALID_SECRET_ACTIONS = new Set<string>(ALL_SECRET_ACTIONS);
 
 export interface SessionPattern {
   actions: SessionAction[];
@@ -644,6 +640,25 @@ export function assertSessionPatternValid(pattern: SessionPattern): void {
       }
     }
   }
+  // Shape-check allowed_actions FIRST (array + string entries + enum membership)
+  // before the per-action requirement loop touches pattern.allowed_actions.length.
+  if (pattern.allowed_actions !== undefined) {
+    if (!Array.isArray(pattern.allowed_actions)) {
+      throw new ShuttleError("bad_request", "allowed_actions must be an array.");
+    }
+    for (const a of pattern.allowed_actions) {
+      if (typeof a !== "string") {
+        throw new ShuttleError("bad_request", "allowed_actions entries must be strings.");
+      }
+      if (!VALID_SECRET_ACTIONS.has(a)) {
+        throw new ShuttleError(
+          "bad_request",
+          `allowed_actions entry '${a}' is not a valid SecretAction. ` +
+            `Valid values: ${[...VALID_SECRET_ACTIONS].join(", ")}.`,
+        );
+      }
+    }
+  }
   // Per-action requirements (closes round-2 P1 'empty destination_domains for domain-bearing actions').
   for (const action of pattern.actions) {
     if (DOMAIN_REQUIRED.has(action) && pattern.destination_domains.length === 0) {
@@ -669,30 +684,6 @@ export function assertSessionPatternValid(pattern: SessionPattern): void {
           `Use --allowed-action to scope what the minted secret will permit. ` +
           `Valid values: ${[...VALID_SECRET_ACTIONS].join(", ")}.`,
       );
-    }
-  }
-  // When allowed_actions is provided, validate every entry against the
-  // canonical SecretAction enum. Catches typos and prevents the pattern
-  // from passing an action name the daemon would silently ignore.
-  if (pattern.allowed_actions !== undefined) {
-    for (const a of pattern.allowed_actions) {
-      if (!VALID_SECRET_ACTIONS.has(a)) {
-        throw new ShuttleError(
-          "bad_request",
-          `allowed_actions entry '${a}' is not a valid SecretAction. ` +
-            `Valid values: ${[...VALID_SECRET_ACTIONS].join(", ")}.`,
-        );
-      }
-    }
-  }
-  if (pattern.allowed_actions !== undefined) {
-    if (!Array.isArray(pattern.allowed_actions)) {
-      throw new ShuttleError("bad_request", "allowed_actions must be an array.");
-    }
-    for (const a of pattern.allowed_actions) {
-      if (typeof a !== "string") {
-        throw new ShuttleError("bad_request", "allowed_actions entries must be strings.");
-      }
     }
   }
   if (typeof pattern.ttl_ms !== "number" || !Number.isFinite(pattern.ttl_ms)) {
@@ -752,7 +743,7 @@ Dispatch by `canonicalAction(binding.action)`:
 - `template-run` — ref + template_ids only. `destination_domains` is IGNORED (binding sets `destination_domain: null` per templates.ts:91). Pattern MUST set non-empty `template_ids` (enforced at validate time).
 - `inject-submit` — ref + destination_domain. Pattern MUST set non-empty `destination_domains`.
 - `reveal-capture` — `binding.planned_ref` (not binding.ref — see reveal-capture.ts:148) + destination_domain. Pattern MUST set non-empty `destination_domains`.
-- `secrets-set` — planned_ref against ref_glob; binding.allowed_domains ⊆ pattern.destination_domains (subset, not equality); binding.allowed_actions ⊆ pattern.allowed_actions when set. Pattern MUST set non-empty `destination_domains`.
+- `secrets-set` — planned_ref against ref_glob; binding.allowed_domains ⊆ pattern.destination_domains (subset, not equality); binding.allowed_actions ⊆ pattern.allowed_actions. Pattern MUST set non-empty `destination_domains` AND non-empty `allowed_actions` (entries validated against `ALL_SECRET_ACTIONS`).
 - Anything else (including `run`, `inject_render`, `secrets_delete`, `secrets_rotate`) — `canonicalAction` returns null; matcher returns false outright; routes fall back to per-op approval.
 
 - [ ] **Step 1: Write failing tests**
@@ -3165,9 +3156,17 @@ git commit -m "feat(audit): DaemonAuditEvent.session_id field"
   - Adds `session_id` body param.
   - Passes through to `requireApproval` with `sessionStore: services.sessionStore`.
   - Records `grant.session_id` in audit entries when set.
-  - Adds ONE happy-path test that asserts:
-    (a) the audit line carries `session_id`, AND
-    (b) `sessionStore.get(id).uses` was incremented to 1.
+  - Adds TWO tests (both required):
+    (1) **Success path** — session matches; operation succeeds. Asserts:
+      (a) the audit line carries `session_id`,
+      (b) the audit line has `ok: true`,
+      (c) `sessionStore.get(id).uses` was incremented to 1.
+    (2) **Failure-after-mint path** — session matches (use IS consumed) but the underlying operation then fails (e.g. the route hits a vault error, the secret was soft-deleted between mint and use, a downstream template assertion throws). Asserts:
+      (a) the audit line STILL carries `session_id` (the human needs to be able to trace why no approval window appeared even though the op failed),
+      (b) the audit line has `ok: false`,
+      (c) `sessionStore.get(id).uses` was still incremented to 1 (the use was consumed at mint time, regardless of downstream outcome).
+
+The failure-after-mint test usually exploits a vault-level failure: seed a secret, create + approve a matching session, then `softDelete` the secret BEFORE invoking the route. The route resolves the ref → secret_not_found → audit failure. The session was consumed; the audit must reflect both facts.
 
 Example commit message for a session-capable route:
 
@@ -3176,11 +3175,20 @@ feat(routes/templates): accept session_id; audit records source session
 
 If session_id is supplied and the binding matches the session pattern,
 requireApproval mints a used grant from the session and skips the per-op
-approval window. The grant carries session_id which the route now writes
-into the template_run audit entry.
+approval window. The grant carries session_id which the route writes into
+the template_run audit entry on BOTH success and failure paths — so the
+audit log preserves the "why no approval window?" provenance even when
+the op fails after the session was consumed.
 ```
 
-- [ ] **Step 5-8: One commit per pass-through route.** Each of the four pass-through routes (`run-resolve.ts`, `inject-render.ts`, `secrets-delete.ts`, `secrets-rotate.ts`) gets its own commit. Each commit:
+- [ ] **Step 5-9: One commit per pass-through route.** Each of the five pass-through routes gets its own commit:
+  5. `run-resolve.ts` (action `run` → canonicalizes to null)
+  6. `inject-render.ts` (action `inject_render` → null)
+  7. `secrets-delete.ts` (action `secrets_delete` → null)
+  8. `secrets-rotate.ts` (action `secrets_rotate` → null)
+  9. `blind.ts` (action `blind_end` → null; approval gate at [blind.ts:71](../../../src/daemon/api/routes/blind.ts))
+
+  Each commit:
   - Adds `session_id` body param.
   - Passes through to `requireApproval` with `sessionStore: services.sessionStore`.
   - The route's `writeDaemonAudit` call STILL receives `grant.session_id` (which will be undefined on the fallback path) — preserves the single audit shape.
@@ -3188,7 +3196,7 @@ into the template_run audit entry.
     (a) the audit line does NOT carry `session_id` (the matcher refused → single-use was used or required), AND
     (b) `sessionStore.get(id).uses` stayed at 0.
 
-The two test shapes are structurally different. The pass-through test typically uses `wait_for_approval: false` so it gets `approval_required` back, then checks the audit + session state.
+The pass-through test typically uses `wait_for_approval: false` so it gets `approval_required` back, then checks the audit + session state.
 
 Example commit message for a pass-through route:
 
@@ -3202,10 +3210,12 @@ null and refuses; requireApproval falls back to the single-use flow. The
 audit entry does NOT receive session_id on this path.
 ```
 
-- [ ] **Step 9: After all 8 routes**, verify:
+For the `blind end` commit specifically, note that the CLI surface is `secret-shuttle internal blind end --session <id>`; the daemon route is `POST /v1/blind/end` (or whatever the existing path is — verify via grep). Same pass-through semantics as the other four.
+
+- [ ] **Step 10: After all 9 routes**, verify:
 
 ```bash
-git log --oneline | head -10  # ~8 per-route commits + 1 audit-type commit
+git log --oneline | head -10  # ~9 per-route commits + 1 audit-type commit
 npm test  # all pass
 ```
 
@@ -3445,7 +3455,7 @@ secret-shuttle template run vercel-env-add --ref ss://local/prod/X --session <id
   - `template-run` → `binding.ref` + `template_ids` (binding.destination_domain is null on templates; template_id is the security boundary)
   - `inject-submit` → `binding.ref` + `destination_domain`
   - `reveal-capture` → `binding.planned_ref` (NOT binding.ref — that's null for reveal-capture) + `destination_domain`
-  - `secrets-set` → `binding.planned_ref` + `binding.allowed_domains` ⊆ `pattern.destination_domains` (subset; agent can't widen) + `binding.allowed_actions` ⊆ `pattern.allowed_actions` (when set).
+  - `secrets-set` → `binding.planned_ref` + `binding.allowed_domains` ⊆ `pattern.destination_domains` (subset; agent can't widen) + `binding.allowed_actions` ⊆ `pattern.allowed_actions` (pattern's `allowed_actions` is REQUIRED non-empty for secrets-set; entries validated against `ALL_SECRET_ACTIONS`).
 - **Pattern validation** rejects empty `destination_domains` for inject-submit / reveal-capture / secrets-set, empty `template_ids` for template-run, AND empty `allowed_actions` for secrets-set — the dangerous "match anything" shapes are all refused at create time. `allowed_actions` entries are validated against the canonical `SecretAction` enum.
 - **UI security headers.** Token-bearing UI responses (HTML at `/ui/session?id=&token=` and JSON at `/ui/sessions/:id`, `/ui/sessions/:id/approve|deny`) set the full hardening set: `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`. The HTML response additionally sets a real `Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'` HTTP header (not just a `<meta>` tag — browsers ignore meta CSP for `frame-ancestors`). Nonce-based CSP that drops `'unsafe-inline'` is a Plan 4b enhancement.
 - **TTL anchored at approval, not creation.** `expires_at` starts at `created_at + 2min` (pending window for the human to click). On approve, `expires_at` resets to `now + pattern.ttl_ms`. So a human who takes 90 seconds to read the pattern still gets the full requested session window.
