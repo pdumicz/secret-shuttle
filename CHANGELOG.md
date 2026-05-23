@@ -47,6 +47,27 @@
 ### Changed
 - V0 CDP-inject command source file moved from `src/cli/commands/inject.ts` to `src/cli/commands/inject-internal.ts`. **The user-facing command `internal inject` is unchanged.** This is a source-only rename to make room for the new top-level `inject.ts`.
 
+### Added — Plan 4a (pre-approved sessions)
+- **Pre-approved sessions.** `POST /v1/approvals/session` mints a session pattern that the human approves once via a real HTML page at `/ui/session?id=&token=`. Subsequent operations carrying `session_id` (CLI: `--session <id>`) that match the pattern skip the per-op approval window. Mismatches fall back to the single-use flow transparently. Each minted grant is a discrete one-shot binding under the hood; the audit log shows N distinct operations with `session_id` set, not "1 session". CLI: `secret-shuttle internal session create | list | revoke`. Spec §5.7.
+- **SessionAction is scoped to four actions in v0.2.0:** `template-run`, `inject-submit`, `reveal-capture`, `secrets-set`. Destructive actions (`secrets-delete`, `secrets-rotate`) and deferred actions (`run`, `inject_render`) all canonicalize to null and refuse outright; their CLI flags pass through for surface uniformity but the daemon falls back to single-use approval.
+- **Action-specific matchers** that read the field where the binding actually stores its ref:
+  - `template-run` → `binding.ref` + `template_ids` (binding.destination_domain is null on templates; template_id is the security boundary)
+  - `inject-submit` → `binding.ref` + `destination_domain`
+  - `reveal-capture` → `binding.planned_ref` (NOT binding.ref — that's null for reveal-capture) + `destination_domain`
+  - `secrets-set` → `binding.planned_ref` + `binding.allowed_domains` ⊆ `pattern.destination_domains` (subset; agent can't widen) + `binding.allowed_actions` ⊆ `pattern.allowed_actions` (pattern's `allowed_actions` is REQUIRED non-empty for secrets-set; entries validated against `ALL_SECRET_ACTIONS`).
+- **Pattern validation** rejects empty `destination_domains` for inject-submit / reveal-capture / secrets-set, empty `template_ids` for template-run, AND empty `allowed_actions` for secrets-set — the dangerous "match anything" shapes are all refused at create time. `allowed_actions` entries are validated against the canonical `SecretAction` enum.
+- **UI security headers.** Token-bearing UI responses (HTML at `/ui/session?id=&token=` and JSON at `/ui/sessions/:id`, `/ui/sessions/:id/approve|deny`) set the full hardening set: `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`. The HTML response additionally sets a real `Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'` HTTP header (not just a `<meta>` tag — browsers ignore meta CSP for `frame-ancestors`). Nonce-based CSP that drops `'unsafe-inline'` is a Plan 4b enhancement.
+- **TTL anchored at approval, not creation.** `expires_at` starts at `created_at + 2min` (pending window for the human to click). On approve, `expires_at` resets to `now + pattern.ttl_ms`. So a human who takes 90 seconds to read the pattern still gets the full requested session window.
+- **Granted sessions expire.** `SessionStore.get()` and `.list()` both flip pending AND granted states to `expired` past `expires_at`. Without this, an approved session would live until revoke or process restart.
+- **Destructive actions cannot be put in a session.** `secrets-delete` and `secrets-rotate` are NOT `SessionAction` values; passing them in a session pattern throws `bad_request`. Their CLI commands accept `--session <id>` for surface uniformity, but the daemon rejects with `session_pattern_no_match` and falls back to a fresh per-op approval.
+- **Session UI HTTP routes.** New `GET /ui/sessions/:id?token=<ui_token>` and `POST /ui/sessions/:id/approve|deny?token=<ui_token>` mirror the per-URL-token approval-UI pattern. Tests approve via these HTTP routes — never by mutating the store directly.
+
+### Security
+- The matcher for `secrets-set` checks `binding.allowed_domains ⊆ pattern.destination_domains` (subset, not equality). An agent can't widen the domain set the human approved.
+- The matcher for `secrets-set` similarly checks `binding.allowed_actions ⊆ pattern.allowed_actions`. `pattern.allowed_actions` is REQUIRED non-empty for any pattern listing `secrets-set` (entries validated against `ALL_SECRET_ACTIONS`). The matcher also refuses if `binding.allowed_actions` is undefined — defense in depth: a binding without an explicit action scope is not session-approvable.
+- Patterns cannot use full globs — only literal prefix + optional single trailing `*`. Reduces matcher complexity and "I didn't think it would match THAT" surprises.
+- TTL is hard-capped at 15 minutes. Beyond that the human re-approves.
+
 ### Known limitations
 - `run` does NOT pass stdin through to the child in v0.2.0 — the child sees EOF on read (`stdio: ["ignore", "pipe", "pipe"]`). Spec §5.3 calls for stdin inheritance; Plan 4 ships the bidirectional chunked-HTTP-body wiring needed to make this work. The majority of `run` use cases (`npm start`, `vercel deploy`, `npx <tool>`) don't read interactive stdin.
 - `run` children inherit a hardened-PATH baseline (from `buildChildEnv`), not the user's shell PATH. Users who need a custom PATH can put it in the env file: `PATH=/custom/path/here`. Variable expansion (`$PATH`) is not supported.

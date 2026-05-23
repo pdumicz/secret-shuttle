@@ -25,8 +25,14 @@ test("renderTopLevelHelp output groups commands and stays under 30 lines", () =>
   assert.match(output, /^\s*unlock\b/m);
   assert.match(output, /\bmigrate secure-vault\b/);
   assert.match(output, /\bdaemon start\|stop\|status\b/);
-  // Internal namespace should NOT appear in curated help:
-  assert.doesNotMatch(output, /\binternal\b/);
+  // Internal namespace is hidden by default — only `internal session` is
+  // surfaced as the user-facing entry for Plan 4a pre-approved sessions.
+  // The other internal subcommands (compare, blind, capture, inject) stay hidden.
+  assert.match(output, /\binternal session\b/);
+  assert.doesNotMatch(output, /\binternal compare\b/);
+  assert.doesNotMatch(output, /\binternal blind\b/);
+  assert.doesNotMatch(output, /\binternal capture\b/);
+  assert.doesNotMatch(output, /\binternal inject\b/);
   // Deprecated names should NOT appear (they're shims, not the curated path):
   assert.doesNotMatch(output, /^\s{2}list\b/m);    // old name; curated says "secrets list"
   assert.doesNotMatch(output, /^\s{2}inspect\b/m); // old name; curated says "secrets get-ref"
