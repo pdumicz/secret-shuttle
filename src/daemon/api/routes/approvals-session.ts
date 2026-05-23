@@ -1,6 +1,5 @@
 import { normalizeDomain } from "../../../policy/domain-policy.js";
 import { ShuttleError } from "../../../shared/errors.js";
-import { openUrl } from "../../approvals/open-url.js";
 import {
   assertSessionPatternValid,
   type SessionAction,
@@ -25,9 +24,13 @@ export function registerApprovalsSessionRoutes(
     assertSessionPatternValid(pattern); // belt-and-braces; store.create does it too
     const grant = services.sessionStore.create(pattern);
     // Open the HTML approval page (not the JSON sub-route). The HTML page
-    // POSTs to /ui/sessions/:id/approve|deny on button click.
-    openUrl(
-      `http://127.0.0.1:${daemonPortRef()}/ui/session?id=${grant.id}&token=${grant.ui_token}`,
+    // POSTs to /ui/sessions/:id/approve|deny on button click. Capture port
+    // once so the URL and the broker's port arg can't diverge under a
+    // port-shift race.
+    const port = daemonPortRef();
+    services.hubBroker.surface(
+      `http://127.0.0.1:${port}/ui/session?id=${grant.id}&token=${grant.ui_token}`,
+      port,
     );
     if (waitForApproval === false) {
       return { session_id: grant.id, status: "pending", expires_at: grant.expires_at };
