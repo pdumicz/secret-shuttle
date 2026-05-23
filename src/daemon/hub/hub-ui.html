@@ -1,4 +1,234 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>Secret Shuttle Hub</title></head>
-<body><p>Hub placeholder. Replaced in Task C1.</p></body>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Secret Shuttle Hub</title>
+  <meta name="referrer" content="no-referrer">
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, system-ui, sans-serif; }
+    #status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      height: 32px;
+      padding: 0 0.75rem;
+      background: #f0f0f3;
+      border-bottom: 1px solid #d1d1d6;
+      font-size: 0.85rem;
+      color: #444;
+    }
+    #status .dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #999;
+    }
+    #status.connected .dot { background: #0a7a3b; }
+    #status.reconnecting .dot { background: #c99a00; }
+    #status.disconnected .dot, #status.displaced .dot { background: #c2331a; }
+    #op {
+      width: 100%;
+      height: calc(100% - 32px);
+      border: 0;
+    }
+    /* Terminal states hide the iframe AND show the banner. Without
+       this, a displaced tab's still-loaded /ui/approve iframe stays
+       clickable — the user could approve operations the new tab is
+       supposed to be driving. */
+    #status.disconnected ~ #op, #status.displaced ~ #op { display: none; }
+    #banner {
+      display: none;
+      padding: 1rem;
+      color: #444;
+      font-size: 1rem;
+      line-height: 1.4;
+    }
+    #status.disconnected ~ #banner, #status.displaced ~ #banner { display: block; }
+    #banner button {
+      font-size: 1rem;
+      padding: 0.5rem 1rem;
+      margin-top: 0.75rem;
+      background: #0a7a3b;
+      color: #fff;
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    #banner button:hover { background: #086030; }
+  </style>
+</head>
+<body>
+  <div id="status" class="connected">
+    <span class="dot" aria-hidden="true"></span>
+    <span id="status-text">Connected</span>
+    <span style="margin-left:auto;color:#888" id="status-port"></span>
+  </div>
+  <iframe id="op" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+  <!-- Banner is populated by showBanner() with text + a recovery button.
+       Reload is intentionally NOT the recovery path: history.replaceState
+       strips the hub_token from the URL after bootstrap, so a bare reload
+       hits /ui/hub with no token and 400s. The Take over / Reconnect
+       button re-enters the active state using the closure-local token. -->
+  <div id="banner"></div>
+  <script>
+    (() => {
+      const params = new URLSearchParams(location.search);
+      const hubToken = params.get("token") ?? "";
+      // Strip the hub_token from the address bar after bootstrap so it
+      // no longer appears in screenshots, screen-sharing, Referer
+      // headers, or window.parent.location.search reads from any
+      // iframe content. The token survives only as a closure-local
+      // JS variable, which (because it's not assigned to `window` or
+      // any reachable global) is not accessible via
+      // window.parent.hubToken from inside the iframe.
+      try {
+        history.replaceState({}, "", "/ui/hub");
+      } catch { /* environments without history API (test stubs) — fine */ }
+      const iframe = document.getElementById("op");
+      const statusEl = document.getElementById("status");
+      const statusText = document.getElementById("status-text");
+      const statusPort = document.getElementById("status-port");
+      const banner = document.getElementById("banner");
+
+      statusPort.textContent = `port ${location.port}`;
+
+      let terminal = false;
+      let consecutiveFailures = 0;
+      let es = null;
+
+      function showBanner(text, kind) {
+        statusEl.className = kind || "";
+        statusText.textContent = text;
+        if (kind === "disconnected" || kind === "displaced") {
+          // Drop the operation page so a displaced/terminal tab cannot
+          // continue approving operations the user thought were handed
+          // off. The CSS rule above also hides the iframe element so
+          // there's no clickable surface even if about:blank is slow.
+          if (iframe.src !== "about:blank") {
+            iframe.src = "about:blank";
+          }
+          // Populate the banner with text + a recovery button. Reload
+          // is NOT the recovery path: history.replaceState stripped the
+          // hub_token from the URL, so a reload hits /ui/hub with no
+          // token and 400s. The button uses the closure-local hubToken
+          // to re-issue an EventSource without leaving this page.
+          banner.innerHTML = "";
+          const p = document.createElement("p");
+          p.textContent = text;
+          banner.appendChild(p);
+          const btn = document.createElement("button");
+          btn.textContent = kind === "displaced" ? "Take over here" : "Reconnect";
+          btn.addEventListener("click", takeOver);
+          banner.appendChild(btn);
+        } else {
+          banner.innerHTML = "";
+        }
+      }
+
+      function takeOver() {
+        // Re-enter the active state without reloading the page.
+        // - terminal=false re-enables iframe→hub postMessage handling.
+        // - consecutiveFailures=0 resets the strikes-out counter.
+        // - statusEl class flips to "reconnecting", which removes the
+        //   CSS rule hiding #op, so the iframe area is interactive
+        //   again as soon as the next navigate arrives.
+        // connect() opens a fresh EventSource; if another tab was
+        // attached, the broker's attach() will displace it. The
+        // resend of activeUrl reloads whatever operation was pending.
+        terminal = false;
+        consecutiveFailures = 0;
+        banner.innerHTML = "";
+        statusEl.className = "reconnecting";
+        statusText.textContent = "Reconnecting…";
+        connect();
+      }
+
+      function handleNavigate(url) {
+        iframe.src = url;
+      }
+
+      function onMessage(ev) {
+        const data = JSON.parse(ev.data);
+        if (data.type === "displaced") {
+          terminal = true;
+          if (es) es.close();
+          showBanner("Another tab is now driving Secret Shuttle. Click below to take over here.", "displaced");
+          return;
+        }
+        if (data.type === "navigate") {
+          handleNavigate(data.url);
+        }
+      }
+
+      function connect() {
+        es = new EventSource(`/ui/hub/stream?token=${encodeURIComponent(hubToken)}`);
+        es.addEventListener("open", () => {
+          consecutiveFailures = 0;
+          showBanner("Connected", "connected");
+        });
+        es.addEventListener("message", onMessage);
+        es.addEventListener("error", () => {
+          if (terminal) return;
+          es.close();
+          consecutiveFailures += 1;
+          if (consecutiveFailures < 2) {
+            showBanner("Reconnecting…", "reconnecting");
+            setTimeout(connect, 1000);
+          } else {
+            terminal = true;
+            showBanner("Disconnected from Secret Shuttle. Click below to reconnect.", "disconnected");
+          }
+        });
+      }
+
+      const doneInFlight = new Set();
+      let lastCompletedSeq = 0;
+
+      function shouldPostDone(seq) {
+        if (seq <= lastCompletedSeq) return false;
+        if (doneInFlight.has(seq)) return false;
+        doneInFlight.add(seq);
+        return true;
+      }
+
+      async function postDone(seq) {
+        const MAX_ATTEMPTS = 5;
+        const BASE_DELAY_MS = 250;
+        let succeeded = false;
+        try {
+          for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+            try {
+              const r = await fetch(`/ui/hub/done?token=${encodeURIComponent(hubToken)}`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ seq }),
+              });
+              if (r.ok) { succeeded = true; return; }
+              if (r.status === 401 || r.status === 403 || r.status === 400) break;
+            } catch {
+              // Network failure; retry.
+            }
+            await new Promise((resolve) => setTimeout(resolve, BASE_DELAY_MS * (attempt + 1)));
+          }
+          terminal = true;
+          if (es) es.close();
+          showBanner("Failed to advance Secret Shuttle. Click below to reconnect.", "disconnected");
+        } finally {
+          doneInFlight.delete(seq);
+          if (succeeded) lastCompletedSeq = Math.max(lastCompletedSeq, seq);
+        }
+      }
+
+      window.addEventListener("message", (ev) => {
+        if (terminal) return;
+        if (ev.origin !== location.origin) return;
+        if (ev.source !== iframe.contentWindow) return;
+        const data = ev.data;
+        if (!data || data.type !== "operation_done") return;
+        if (!Number.isSafeInteger(data.seq) || data.seq <= 0) return;
+        if (!shouldPostDone(data.seq)) return;
+        postDone(data.seq);
+      });
+
+      connect();
+    })();
+  </script>
+</body>
 </html>
