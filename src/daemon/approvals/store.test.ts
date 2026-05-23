@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
-import { ApprovalStore } from "./store.js";
+import { ApprovalStore, type ApprovalBinding } from "./store.js";
+import { SessionStore } from "./session-store.js";
 
 const sample = {
   action: "inject" as const,
@@ -118,5 +119,196 @@ test("display-only fields (page_title/page_url_host) do not affect binding match
   s.approve(g.id);
   assert.doesNotThrow(() =>
     s.consume(g.id, { ...sample, page_title: "DIFFERENT", page_url_host: "other" }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// findOrMintFromSession
+// ---------------------------------------------------------------------------
+
+function makeBindingFor(action: ApprovalBinding["action"], extra: Partial<ApprovalBinding> = {}): ApprovalBinding {
+  return {
+    action,
+    ref: "ss://x/prod/A",
+    environment: "production",
+    destination_domain: "vercel.com",
+    target_id: null,
+    field_fingerprint: null,
+    template_id: null,
+    template_params: null,
+    allowed_domains: [],
+    ...extra,
+  };
+}
+
+test("findOrMintFromSession: unknown id → session_not_found", () => {
+  const store = new ApprovalStore();
+  const sessions = new SessionStore();
+  assert.throws(
+    () => store.findOrMintFromSession("nope", makeBindingFor("template"), sessions),
+    (err: Error & { code?: string }) => err.code === "session_not_found",
+  );
+});
+
+test("findOrMintFromSession: matched + granted → synthesizes used grant with session_id", () => {
+  const store = new ApprovalStore();
+  const sessions = new SessionStore();
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://x/prod/*",
+    destination_domains: [], // ignored for template-run
+    template_ids: ["vercel-env-add"], // required for template-run
+    ttl_ms: 60_000,
+  });
+  sessions.approve(sg.id);
+  const binding = makeBindingFor("template", {
+    destination_domain: null, // current template binding shape (see templates.ts:91)
+    template_id: "vercel-env-add",
+  });
+  const grant = store.findOrMintFromSession(sg.id, binding, sessions);
+  assert.equal(grant.status, "used");
+  assert.equal(grant.session_id, sg.id);
+  assert.equal(grant.id.startsWith(`session:${sg.id}:`), true);
+  assert.equal(sessions.get(sg.id)!.uses, 1);
+});
+
+test("findOrMintFromSession: expired (granted past TTL) → session_expired", () => {
+  let nowVal = 1_000_000;
+  const sessions = new SessionStore({ now: () => nowVal });
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://x/prod/*",
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
+    ttl_ms: 1000,
+  });
+  sessions.approve(sg.id);
+  nowVal += 2000;
+  const store = new ApprovalStore();
+  assert.throws(
+    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { template_id: "vercel-env-add" }), sessions),
+    (err: Error & { code?: string }) => err.code === "session_expired",
+  );
+});
+
+test("findOrMintFromSession: revoked → session_not_found", () => {
+  const sessions = new SessionStore();
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://x/prod/*",
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
+    ttl_ms: 60_000,
+  });
+  sessions.approve(sg.id);
+  sessions.revoke(sg.id);
+  const store = new ApprovalStore();
+  assert.throws(
+    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { template_id: "vercel-env-add" }), sessions),
+    (err: Error & { code?: string }) => err.code === "session_not_found",
+  );
+});
+
+test("findOrMintFromSession: pending (not approved) → session_unauthorized", () => {
+  const sessions = new SessionStore();
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://x/prod/*",
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
+    ttl_ms: 60_000,
+  });
+  const store = new ApprovalStore();
+  assert.throws(
+    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { template_id: "vercel-env-add" }), sessions),
+    (err: Error & { code?: string }) => err.code === "session_unauthorized",
+  );
+});
+
+test("findOrMintFromSession: denied → session_unauthorized", () => {
+  const sessions = new SessionStore();
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://x/prod/*",
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
+    ttl_ms: 60_000,
+  });
+  sessions.deny(sg.id);
+  const store = new ApprovalStore();
+  assert.throws(
+    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { template_id: "vercel-env-add" }), sessions),
+    (err: Error & { code?: string }) => err.code === "session_unauthorized",
+  );
+});
+
+test("findOrMintFromSession: pattern mismatch → session_pattern_no_match", () => {
+  const sessions = new SessionStore();
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://stripe/prod/*",
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
+    ttl_ms: 60_000,
+  });
+  sessions.approve(sg.id);
+  const binding = makeBindingFor("template", {
+    ref: "ss://other/prod/A", // outside the glob
+    template_id: "vercel-env-add",
+  });
+  const store = new ApprovalStore();
+  assert.throws(
+    () => store.findOrMintFromSession(sg.id, binding, sessions),
+    (err: Error & { code?: string }) => err.code === "session_pattern_no_match",
+  );
+});
+
+test("findOrMintFromSession: max_uses overflow → session_max_uses_exceeded", () => {
+  const sessions = new SessionStore();
+  const sg = sessions.create({
+    actions: ["template-run"],
+    ref_glob: "ss://x/prod/*",
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
+    ttl_ms: 60_000,
+    max_uses: 2,
+  });
+  sessions.approve(sg.id);
+  const store = new ApprovalStore();
+  const binding = makeBindingFor("template", { template_id: "vercel-env-add" });
+  store.findOrMintFromSession(sg.id, binding, sessions);
+  store.findOrMintFromSession(sg.id, binding, sessions);
+  assert.throws(
+    () => store.findOrMintFromSession(sg.id, binding, sessions),
+    (err: Error & { code?: string }) => err.code === "session_max_uses_exceeded",
+  );
+});
+
+test("findOrMintFromSession: secrets_delete binding → session_pattern_no_match (action not allowed in sessions)", () => {
+  const sessions = new SessionStore();
+  // The broadest legal pattern (all 4 SessionActions + non-empty
+  // destination_domains + template_ids + allowed_actions covering the full
+  // ALL_SECRET_ACTIONS surface) satisfies assertSessionPatternValid.
+  // secrets_delete is NOT a SessionAction; canonicalAction returns null;
+  // the matcher refuses outright.
+  const sg = sessions.create({
+    actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
+    ref_glob: "",
+    destination_domains: ["any.com"],
+    template_ids: ["any"],
+    allowed_actions: [
+      "capture_from_page",
+      "inject_into_field",
+      "compare_fingerprint",
+      "use_as_stdin",
+      "inject_submit",
+    ],
+    ttl_ms: 60_000,
+  });
+  sessions.approve(sg.id);
+  const store = new ApprovalStore();
+  assert.throws(
+    () => store.findOrMintFromSession(sg.id, makeBindingFor("secrets_delete"), sessions),
+    (err: Error & { code?: string }) => err.code === "session_pattern_no_match",
   );
 });

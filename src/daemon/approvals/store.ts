@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { ShuttleError } from "../../shared/errors.js";
+import { matchesSessionPattern } from "./session-matchers.js";
+import type { SessionStore } from "./session-store.js";
 
 export type ApprovalLifecycleEvent =
   | { kind: "created"; grant: ApprovalGrant }
@@ -50,6 +52,8 @@ export interface ApprovalGrant extends ApprovalBinding {
   created_at: number;
   expires_at: number;
   ui_token: string;
+  /** Set when this grant was minted from a pre-approved session. */
+  session_id?: string;
 }
 
 const DEFAULT_TTL_MS = 2 * 60 * 1000;
@@ -59,6 +63,7 @@ export class ApprovalStore {
   private readonly ttlMs: number;
   private now: () => number;
   private readonly onEvent: ((event: ApprovalLifecycleEvent) => void) | undefined;
+  private sessionMintCounter = 0;
 
   constructor(opts: { ttlMs?: number; now?: () => number; onEvent?: (event: ApprovalLifecycleEvent) => void } = {}) {
     this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
@@ -120,6 +125,49 @@ export class ApprovalStore {
     g.status = "used";
     this.onEvent?.({ kind: "used", grant: g });
     return g;
+  }
+
+  findOrMintFromSession(
+    sessionId: string,
+    binding: ApprovalBinding,
+    sessionStore: SessionStore,
+  ): ApprovalGrant {
+    const session = sessionStore.get(sessionId);
+    if (session === undefined || session.status === "revoked") {
+      throw new ShuttleError("session_not_found", "Unknown session id.");
+    }
+    if (session.status === "expired") {
+      throw new ShuttleError("session_expired", "Session has expired.");
+    }
+    if (session.status === "denied") {
+      throw new ShuttleError("session_unauthorized", "Session was denied.");
+    }
+    if (session.status !== "granted") {
+      throw new ShuttleError(
+        "session_unauthorized",
+        `Session is not granted (status: ${session.status}).`,
+      );
+    }
+    if (!matchesSessionPattern(binding, session)) {
+      throw new ShuttleError(
+        "session_pattern_no_match",
+        "Operation does not match the session pattern.",
+      );
+    }
+    sessionStore.incrementUses(sessionId); // can throw session_max_uses_exceeded or session_expired
+    this.sessionMintCounter += 1;
+    const now = this.now();
+    const grant: ApprovalGrant = {
+      ...binding,
+      id: `session:${sessionId}:${this.sessionMintCounter}`,
+      status: "used",
+      created_at: now,
+      expires_at: now,
+      ui_token: "",
+      session_id: sessionId,
+    };
+    this.onEvent?.({ kind: "used", grant });
+    return grant;
   }
 
   private requirePending(id: string): ApprovalGrant {
