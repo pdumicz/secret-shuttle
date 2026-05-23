@@ -2327,8 +2327,9 @@ Open `src/daemon/approvals/ui.html`. Inside the existing `<script type="module">
 
       function notifyHubIfFramed() {
         if (!hasHubSeq) return;
-        if (window.parent === window) return;
-        window.parent.postMessage({ type: "operation_done", seq: parsedHubSeq }, location.origin);
+        if (window.parent !== window) {
+          window.parent.postMessage({ type: "operation_done", seq: parsedHubSeq }, location.origin);
+        }
       }
 
       const terminalStatuses = new Set(["granted", "denied", "expired", "used"]);
@@ -2544,8 +2545,9 @@ Replace with:
 
       function notifyHubIfFramed() {
         if (!hasHubSeq) return;
-        if (window.parent === window) return;
-        window.parent.postMessage({ type: "operation_done", seq: parsedHubSeq }, location.origin);
+        if (window.parent !== window) {
+          window.parent.postMessage({ type: "operation_done", seq: parsedHubSeq }, location.origin);
+        }
       }
 
       const terminalStatuses = new Set(["granted", "denied", "expired", "revoked"]);
@@ -2715,8 +2717,9 @@ const hasHubSeq = parsedHubSeq !== null && Number.isSafeInteger(parsedHubSeq) &&
 
 function notifyHubIfFramed() {
   if (!hasHubSeq) return;
-  if (window.parent === window) return;
-  window.parent.postMessage({ type: "operation_done", seq: parsedHubSeq }, location.origin);
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: "operation_done", seq: parsedHubSeq }, location.origin);
+  }
 }
 // ────────────────────────────────────────────────────────────
 
