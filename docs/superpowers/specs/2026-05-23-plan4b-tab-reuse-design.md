@@ -164,13 +164,54 @@ Three routes registered via the existing `DaemonServer` primitives. All use `add
 **`GET /ui/hub/stream?token=H`.**
 - Token validation identical to `/ui/hub`.
 - `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no` (defense-in-depth against reverse-proxy buffering even though daemon binds 127.0.0.1).
-- Builds a `HubSubscriber { write, close }` from the `ServerResponse`. `write(e)` does `res.write(\`data: ${JSON.stringify(e)}\n\n\`)` guarded by `res.writableEnded || res.destroyed`. `close()` does `res.end()` guarded the same way.
-- Calls `hubBroker.attach(sub)`. Wires `req.on("close", detach)` where `detach` is the callback returned by `attach`.
-- Sends `: ping\n\n` every 25s as keep-alive (defense-in-depth against intermediary idle-close).
+- Builds a `HubSubscriber { write, close }` from the `ServerResponse`. `write(e)` does `res.write(\`data: ${JSON.stringify(e)}\n\n\`)` guarded by `res.writableEnded || res.destroyed`. `close()` does `res.end()` guarded the same way AND invokes the shared `cleanup()` defined below.
+- Calls `hubBroker.attach(sub)`. Wires `req.on("close", cleanup)`.
+- Sends `: ping\n\n` every 25s as keep-alive (defense-in-depth against intermediary idle-close). Cleanup must clear this interval.
+
+**Single `cleanup()` function** to prevent timer leaks across disconnects/displacements:
+```ts
+const detach = hubBroker.attach(sub);
+const keepalive = setInterval(() => {
+  if (res.writableEnded || res.destroyed) { cleanup(); return; }
+  res.write(": ping\n\n");
+}, 25_000);
+let cleanedUp = false;
+const cleanup = () => {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  clearInterval(keepalive);
+  detach();
+};
+// Wired into both paths:
+req.on("close", cleanup);
+sub.close = () => {
+  if (!res.writableEnded && !res.destroyed) res.end();
+  cleanup();
+};
+```
+The `cleanedUp` flag makes `cleanup()` idempotent: req.close and sub.close (broker-driven displacement) can both fire; the second is a no-op.
 
 **`POST /ui/hub/done?token=H`.**
 - Token validation identical.
-- Body: `{ seq: number }`. Strict: missing → 400 `missing_param`. Non-integer or negative → 400 `bad_request`.
+- `addRouteRaw` bypasses the daemon's standard JSON parser and 1 MB body cap. Use a small `readBoundedJson(req, 1024)` helper:
+  ```ts
+  async function readBoundedJson(req: IncomingMessage, maxBytes: number): Promise<unknown> {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of req) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        throw new ShuttleError("payload_too_large", `Body exceeds ${maxBytes} bytes.`);
+      }
+      chunks.push(chunk);
+    }
+    const text = Buffer.concat(chunks).toString("utf8");
+    try { return JSON.parse(text); } catch {
+      throw new ShuttleError("bad_request", "Malformed JSON body.");
+    }
+  }
+  ```
+- Body: `{ seq: number }`. Strict: missing → 400 `missing_param`. Non-integer or negative → 400 `bad_request`. Body parse exceptions surface as the route's standard error envelope.
 - Calls `hubBroker.markDone(seq)`. Returns `{ ok: true }` always (idempotent).
 
 ### 3. `src/daemon/hub/hub-ui.html`
@@ -178,7 +219,7 @@ Three routes registered via the existing `DaemonServer` primitives. All use `add
 Inline HTML, CSS, and JS. No external assets.
 
 **Structure:**
-- Top status bar (~32px): shows connection state (`connected` / `reconnecting…` / `disconnected` / `displaced`), daemon port, vault state (`unlocked` / `locked`). No token preview. No version info.
+- Top status bar (~32px): shows connection state (`connected` / `reconnecting…` / `disconnected` / `displaced`) and daemon port. No vault state (hub only has hub_token, no bearer; adding a `/ui/hub/status` route just for this is out of scope for v0.2.0). No token preview. No version info.
 - Below status bar: `<iframe id="op" sandbox="allow-scripts allow-same-origin allow-forms">` — full remaining viewport. Initially empty/hidden until first navigate.
 
 **JS contract.**
@@ -189,7 +230,7 @@ const iframe = document.getElementById("op");
 const statusEl = document.getElementById("status");
 
 let terminal = false;
-let attemptedReconnect = false;
+let consecutiveFailures = 0;
 let es = null;
 
 function showBanner(text, kind) { /* updates statusEl + iframe area as needed */ }
@@ -214,12 +255,18 @@ function onMessage(ev) {
 
 function connect() {
   es = new EventSource(`/ui/hub/stream?token=${encodeURIComponent(hubToken)}`);
+  es.addEventListener("open", () => {
+    // Reset failure tracking on every successful (re)open so a later
+    // transient blip doesn't go terminal on the first error.
+    consecutiveFailures = 0;
+    showBanner("Connected", "connected");
+  });
   es.addEventListener("message", onMessage);
   es.addEventListener("error", () => {
     if (terminal) return;
     es.close();
-    if (!attemptedReconnect) {
-      attemptedReconnect = true;
+    consecutiveFailures += 1;
+    if (consecutiveFailures < 2) {
       showBanner("Reconnecting…", "reconnecting");
       setTimeout(connect, 1000);
     } else {
@@ -329,7 +376,9 @@ export function makeHubOpenUrlImpl(
 }
 ```
 
-**9 approval-gated routes** (from Plan 4a I1) pass `openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef)` to `requireApproval`. Routes:
+**12 approval-gated routes** pass `openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef)` to `requireApproval`. Plan 4a's I1 wired 9 (the modern surface); Plan 4b adds the 3 V0 routes that still ship in v0.2.0. V0 routes don't get session wiring (their actions aren't `SessionAction` values), but they DO get tab reuse — the goal "every approval URL uses one hub tab" includes them.
+
+Modern (9):
 1. `src/daemon/api/routes/templates.ts`
 2. `src/daemon/api/routes/secrets.ts` (`/v1/secrets/generate`)
 3. `src/daemon/api/routes/inject-submit.ts`
@@ -339,6 +388,11 @@ export function makeHubOpenUrlImpl(
 7. `src/daemon/api/routes/secrets-delete.ts`
 8. `src/daemon/api/routes/secrets-rotate.ts`
 9. `src/daemon/api/routes/blind.ts` (only the `/v1/blind/end` handler)
+
+V0 (3) — same file, three more handlers:
+10. `src/daemon/api/routes/secrets.ts` — `/v1/secrets/capture` (line 223 region)
+11. `src/daemon/api/routes/secrets.ts` — `/v1/secrets/inject` (line 308 region)
+12. `src/daemon/api/routes/secrets.ts` — `/v1/secrets/compare` (line 388 region)
 
 **2 direct call sites** replace `openUrl(url)` with `services.hubBroker.surface(url, daemonPortRef())`:
 - `src/daemon/api/routes/approvals-session.ts:29`
@@ -469,7 +523,9 @@ Cases:
 - `POST /ui/hub/done?token=H {seq:N}` valid + matching → 200 `{ok:true}`; broker advances.
 - `POST /ui/hub/done?token=WRONG` → 401.
 - `POST /ui/hub/done` mismatched seq → 200 (idempotent).
-- `POST /ui/hub/done` missing body / malformed body → 400 `missing_param` or `bad_request`.
+- `POST /ui/hub/done` missing body / malformed JSON → 400 `bad_request`.
+- `POST /ui/hub/done` body > 1024 bytes → 400 `payload_too_large` (whichever status `readBoundedJson` raises).
+- `POST /ui/hub/done` body `{seq:"abc"}` or `{seq:-1}` → 400 `bad_request`.
 
 ### Layer 3 — Operation-page CSP regression
 Targeted assertions on the three operation routes. Files: existing `ui-server.test.ts` (extend), existing `session-ui-server.test.ts` (extend), new test for unlock UI if not yet covered.
@@ -479,10 +535,23 @@ Cases:
 - `/ui/session` CSP changed from `'none'` to `'self'` for frame-ancestors only.
 - Unlock UI route CSP includes `frame-ancestors 'self'`.
 
-### Layer 4 — Operation-page polling regression
-Extend existing route tests for `/ui/approve` and `/ui/session`. Cases:
-- Page-load JSON fetch contract unchanged (test reads `/ui/approvals/:id?token=`, asserts response shape).
-- Note (for review only — not a daemon test): the inline JS in `ui.html` / `session-ui.html` polls every 2s. Cover via JS unit test if a test runner is set up; otherwise document the polling contract in a `// PLAN 4B:` comment block.
+### Layer 4 — Operation-page polling drift-guard
+Extend existing route tests for `/ui/approve` and `/ui/session`. Plus a new drift-guard that reads the HTML files and asserts the polling contract literally, so an accidental deletion of the polling logic fails a test rather than silently regressing queue liveness.
+
+Cases:
+- Page-load JSON fetch contract unchanged (test reads `/ui/approvals/:id?token=`, asserts response shape — pre-Plan-4b coverage carries through).
+- **`ui.html` drift-guard** (new test file `src/daemon/approvals/ui-html-drift.test.ts`): `readFile("src/daemon/approvals/ui.html", "utf8")` then assert presence of:
+  - `pollForTerminal` function name (the actual poller).
+  - `terminalStatuses` Set or equivalent name.
+  - Each required terminal status string: `"granted"`, `"denied"`, `"expired"`, `"used"`.
+  - `stopPolling()` call sites (≥ 2: terminal-detection path AND beforeunload).
+  - `notifyHubIfFramed()` function name + at least one call from the terminal path.
+  - `Number.isSafeInteger` + `hubSeq > 0` (the null-trap guard).
+  - `window.parent.postMessage` (the actual signal emission).
+- **`session-ui.html` drift-guard** (new test file `src/daemon/approvals/session-ui-html-drift.test.ts`): same assertions adapted for session terminal statuses: `"granted"`, `"denied"`, `"expired"`, `"revoked"` (no `"used"` — sessions don't have that state).
+- **`unlock-ui.html` drift-guard** (extend existing or new `unlock-ui-html-drift.test.ts`): assert `notifyHubIfFramed()` called from the success branch ONLY. Assert no `pollForTerminal` (unlock skips polling — documented design choice).
+
+The assertions are crude text matches; they don't run the JS. They exist as a tripwire against accidental deletion. If the polling logic is ever refactored to a different shape, update the assertions to match — the refactor is the right time to revisit them.
 
 ### Layer 5 — End-to-end via real broker
 Real `HubBroker` + real route harness + fake `openUrlImpl` spy. New file: `src/daemon/hub/hub-e2e.test.ts`.
@@ -544,7 +613,7 @@ With env var set: `surface()` works (state mutates), `openUrl` no-ops. Test:
 - `src/daemon/approvals/ui.html` — hub_seq parse + polling + notifyHubIfFramed.
 - `src/daemon/approvals/session-ui.html` — same shape adapted for session terminal statuses.
 - `src/daemon/approvals/unlock-ui.html` — hub_seq parse + notifyHubIfFramed on success only.
-- Nine approval-gated route files (Plan 4a I1 list) — pass `openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef)` to `requireApproval`.
+- Twelve approval-gated route handlers — pass `openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef)` to `requireApproval`. Nine modern (Plan 4a I1 list) + three V0 (`/v1/secrets/capture`, `/v1/secrets/inject`, `/v1/secrets/compare` — all in `src/daemon/api/routes/secrets.ts`).
 - `src/daemon/api/routes/approvals-session.ts:29` — replace `openUrl(...)` with `services.hubBroker.surface(...)`.
 - `src/daemon/api/routes/unlock-session.ts:24` — same.
 - `package.json` build script — copy `src/daemon/hub/hub-ui.html` to `dist/daemon/hub/hub-ui.html` alongside the existing `ui.html` / `unlock-ui.html` / `session-ui.html` copies.
