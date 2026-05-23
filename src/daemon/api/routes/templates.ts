@@ -11,6 +11,7 @@ import { writeDaemonAudit } from "../../audit.js";
 import { ShuttleError } from "../../../shared/errors.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { asObject, optBool, optString, optStringRecord, reqString } from "../validate.js";
+import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 
 /**
  * Module-scoped registry instance.  Exported for tests that need to register
@@ -125,6 +126,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         binding,
         daemonPort: daemonPortRef(),
         sessionStore: services.sessionStore,
+        openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
         ...(sessionId !== undefined ? { sessionId } : {}),
         ...(approvalId !== undefined ? { approvalIdFromClient: approvalId } : {}),
         ...(waitForApproval === false ? { waitMs: 0 } : {}),
