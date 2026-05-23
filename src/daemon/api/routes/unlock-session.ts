@@ -40,6 +40,13 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
   server.addRouteRaw("GET", /^\/ui\/unlock$/, async (_req, _body, res) => {
     res.statusCode = 200;
     res.setHeader("content-type", "text/html; charset=utf-8");
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("referrer-policy", "no-referrer");
+    res.setHeader("x-content-type-options", "nosniff");
+    res.setHeader(
+      "content-security-policy",
+      "default-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+    );
     res.end(await readFile(HTML_PATH, "utf8"));
   });
 
