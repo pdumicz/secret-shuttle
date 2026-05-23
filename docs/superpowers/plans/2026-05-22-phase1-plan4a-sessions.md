@@ -1063,25 +1063,38 @@ test("matchesSessionPattern: canonicalized action not in pattern.actions → fal
   assert.equal(matchesSessionPattern(b, p), false);
 });
 
-test("matchesSessionPattern: secrets_delete binding → false (not a SessionAction)", () => {
-  // secrets-delete is NOT in SessionAction; canonicalAction returns null.
-  // Even a maximally permissive pattern refuses.
-  const p = makePattern({
+// Helper: build the broadest pattern that assertSessionPatternValid accepts —
+// all four SessionAction values + non-empty destination_domains + template_ids
+// + non-empty allowed_actions (covers the entire ALL_SECRET_ACTIONS surface).
+// Used by the pass-through refusal tests below to prove that even a maximally
+// wide LEGAL pattern still refuses non-SessionAction bindings.
+function broadestLegalPattern(): SessionPattern {
+  return {
     actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
     ref_glob: "",
     destination_domains: ["any.com"],
     template_ids: ["any"],
-  });
+    allowed_actions: [
+      "capture_from_page",
+      "inject_into_field",
+      "compare_fingerprint",
+      "use_as_stdin",
+      "inject_submit",
+    ],
+    ttl_ms: 60_000,
+  };
+}
+
+test("matchesSessionPattern: secrets_delete binding → false (not a SessionAction)", () => {
+  // secrets-delete is NOT in SessionAction; canonicalAction returns null.
+  // Even the broadest legal pattern refuses.
+  const p = broadestLegalPattern();
   const b = makeBinding({ action: "secrets_delete" });
   assert.equal(matchesSessionPattern(b, p), false);
 });
 
 test("matchesSessionPattern: secrets_rotate binding → false", () => {
-  const p = makePattern({
-    actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
-    destination_domains: ["any.com"],
-    template_ids: ["any"],
-  });
+  const p = broadestLegalPattern();
   const b = makeBinding({ action: "secrets_rotate" });
   assert.equal(matchesSessionPattern(b, p), false);
 });
@@ -1089,37 +1102,15 @@ test("matchesSessionPattern: secrets_rotate binding → false", () => {
 test("matchesSessionPattern: run binding → false (not a SessionAction in Plan 4a)", () => {
   // run is deferred from Plan 4a (needs command_prefix). Same pass-through-
   // refusal as destructive actions.
-  const p = makePattern({
-    actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
-    destination_domains: ["any.com"],
-    template_ids: ["any"],
-  });
+  const p = broadestLegalPattern();
   const b = makeBinding({ action: "run" });
   assert.equal(matchesSessionPattern(b, p), false);
 });
 
 test("matchesSessionPattern: inject_render binding → false (not a SessionAction in Plan 4a)", () => {
   // inject_render is deferred from Plan 4a (needs output_mode constraint).
-  const p = makePattern({
-    actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
-    destination_domains: ["any.com"],
-    template_ids: ["any"],
-  });
+  const p = broadestLegalPattern();
   const b = makeBinding({ action: "inject_render" });
-  assert.equal(matchesSessionPattern(b, p), false);
-});
-
-test("matchesSessionPattern: secrets_rotate binding → false even with the broadest legal pattern", () => {
-  // The pattern below uses ALL four SessionAction values + non-empty destination_domains + template_ids (the most permissive shape assertSessionPatternValid will accept).
-  // run, inject_render, secrets_delete, secrets_rotate are NOT in SessionAction;
-  // canonicalAction returns null for them; matcher refuses outright.
-  const p = makePattern({
-    actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
-    ref_glob: "",
-    destination_domains: ["any.com"],
-    template_ids: ["any"],
-  });
-  const b = makeBinding({ action: "secrets_rotate" });
   assert.equal(matchesSessionPattern(b, p), false);
 });
 ```
@@ -1906,8 +1897,9 @@ test("findOrMintFromSession: max_uses overflow → session_max_uses_exceeded", (
 
 test("findOrMintFromSession: secrets_delete binding → session_pattern_no_match (action not allowed in sessions)", () => {
   const sessions = new SessionStore();
-  // The broadest legal pattern (covers all 4 SessionActions) with non-empty
-  // destination_domains and template_ids satisfies assertSessionPatternValid.
+  // The broadest legal pattern (all 4 SessionActions + non-empty
+  // destination_domains + template_ids + allowed_actions covering the full
+  // ALL_SECRET_ACTIONS surface) satisfies assertSessionPatternValid.
   // secrets_delete is NOT a SessionAction; canonicalAction returns null;
   // the matcher refuses outright.
   const sg = sessions.create({
@@ -1915,6 +1907,13 @@ test("findOrMintFromSession: secrets_delete binding → session_pattern_no_match
     ref_glob: "",
     destination_domains: ["any.com"],
     template_ids: ["any"],
+    allowed_actions: [
+      "capture_from_page",
+      "inject_into_field",
+      "compare_fingerprint",
+      "use_as_stdin",
+      "inject_submit",
+    ],
     ttl_ms: 60_000,
   });
   sessions.approve(sg.id);
@@ -2172,12 +2171,20 @@ test("requireApproval: secrets_delete binding with a session → pattern_no_matc
   // matcher returns false → pattern_no_match → falls through to single-use.
   const store = new ApprovalStore();
   const sessions = new SessionStore();
-  // Broadest legal pattern: all 4 SessionActions + non-empty destination_domains + template_ids.
+  // Broadest legal pattern: all 4 SessionActions + non-empty destination_domains
+  // + template_ids + allowed_actions covering the full ALL_SECRET_ACTIONS set.
   const sg = sessions.create({
     actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
     ref_glob: "",
     destination_domains: ["any.com"],
     template_ids: ["any"],
+    allowed_actions: [
+      "capture_from_page",
+      "inject_into_field",
+      "compare_fingerprint",
+      "use_as_stdin",
+      "inject_submit",
+    ],
     ttl_ms: 60_000,
   });
   sessions.approve(sg.id);
@@ -3211,8 +3218,8 @@ git commit -m "feat(audit): DaemonAuditEvent.session_id field"
 
   - **`templates.ts`** — exploit the `resolveErr` path: register a template whose `binary` resolves to a path that doesn't exist on disk. The route captures `resolveErr` BEFORE `requireApproval` (line 80-85) but RE-THROWS it AFTER (line 116: `if (resolveErr !== null) throw resolveErr;`). Session is consumed at the requireApproval call; the throw happens after.
   - **`secrets.ts` generate endpoint** — call generate with a planned_ref that already exists in the vault and `force: false`. `services.vault.upsertSecret` throws `secret_exists` AFTER the approval call. (Verify the call order: validation + planned_ref construction happens before requireApproval; the actual upsert call is after.)
-  - **`inject-submit.ts`** — force a post-approval failure via a vault state change between mint and submit (e.g. the test fixture's vault swaps the secret value for one that fails `assertSecretActionAllowed("inject_submit")` between requireApproval returning and the submit call). Alternative: mock the browser submit dispatcher to throw. The test should clearly show the failure point is AFTER `requireApproval`.
-  - **`reveal-capture.ts`** — same shape as inject-submit: the actual capture step happens after requireApproval; a mocked browser failure or a vault-state-flip between approve and capture triggers the post-mint failure.
+  - **`inject-submit.ts`** — mock the browser submit dispatcher to throw on the post-approval submit call. (Don't try to flip `assertSecretActionAllowed("inject_submit")` state between mint and submit — that check currently runs BEFORE `requireApproval` at [inject-submit.ts:44](../../../src/daemon/api/routes/inject-submit.ts), so it's a pre-mint failure.) The test should show the failure point is AFTER `requireApproval` returns — a mocked browser RPC rejection is the cleanest hook.
+  - **`reveal-capture.ts`** — same shape as inject-submit: the actual capture step happens after `requireApproval`; mock the browser capture dispatcher to throw after the mint completes.
 
   When in doubt, the implementer can grep the route file for `requireApproval` and verify every operation BELOW that line is a candidate for post-mint failure; everything ABOVE happens before mint and is irrelevant to this test.
 
