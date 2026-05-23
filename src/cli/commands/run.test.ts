@@ -21,3 +21,8 @@ test("runCommand: argument is variadic (trailing argv after --)", () => {
   assert.equal(args.length, 1);
   assert.equal(args[0]!.variadic, true);
 });
+
+test("runCommand: --session flag accepted", () => {
+  const cmd = runCommand();
+  assert.ok(cmd.options.map((o) => o.long).includes("--session"));
+});

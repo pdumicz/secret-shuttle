@@ -16,6 +16,7 @@ export function runCommand(): Command {
       "Path to env file. Entries: KEY=VALUE; ss:// values are resolved by the daemon.",
     )
     .option("--approval-id <id>", "Pre-issued approval id.")
+    .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
     .option("--no-wait", "Return approval_required without waiting.")
     .option(
       "--json",
@@ -51,6 +52,7 @@ export function runCommand(): Command {
         cwd: process.cwd(),
       };
       if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      if (options.session !== undefined) body.session_id = options.session;
       if (options.wait === false) body.wait_for_approval = false;
 
       // Wire SIGINT/SIGTERM → AbortController → fetch cancel → daemon
