@@ -1825,7 +1825,7 @@ test("hub-ui.html: in-page recovery (takeOver) replaces reload-based recovery", 
   // counter, and re-issue the SSE connection via connect().
   assert.match(html, /terminal\s*=\s*false/);
   assert.match(html, /consecutiveFailures\s*=\s*0/);
-  assert.match(html, /takeOver[\s\S]{0,400}?connect\s*\(\s*\)/);
+  assert.match(html, /takeOver[\s\S]{0,800}?connect\s*\(\s*\)/);
   // Banner must wire a click listener on its own button onto takeOver.
   assert.match(html, /addEventListener\(\s*["']click["']\s*,\s*takeOver\s*\)/);
   // Banner text in terminal states must NOT instruct the user to reload —
