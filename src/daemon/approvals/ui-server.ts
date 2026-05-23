@@ -15,6 +15,15 @@ export function registerUiRoutes(server: DaemonServer, store: ApprovalStore): vo
   server.addRouteRaw("GET", /^\/ui\/approve$/, async (_req, _body, res) => {
     res.statusCode = 200;
     res.setHeader("content-type", "text/html; charset=utf-8");
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("referrer-policy", "no-referrer");
+    res.setHeader("x-content-type-options", "nosniff");
+    // frame-ancestors 'self' lets the hub iframe embed this page.
+    // The per-URL ui_token remains the operational security boundary.
+    res.setHeader(
+      "content-security-policy",
+      "default-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+    );
     res.end(await readFile(HTML_PATH, "utf8"));
   });
 

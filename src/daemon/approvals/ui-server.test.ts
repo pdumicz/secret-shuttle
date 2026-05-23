@@ -101,3 +101,15 @@ test("GET /ui/approvals/:id includes template_params in JSON", async () => {
     assert.equal(body.template_id, "vercel-env-add");
   });
 });
+
+test("GET /ui/approve sets CSP with frame-ancestors 'self'", async () => {
+  await withServer(async ({ port }) => {
+    const res = await fetch(`http://127.0.0.1:${port}/ui/approve`);
+    assert.equal(res.status, 200);
+    const csp = res.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /frame-ancestors 'self'/);
+    assert.doesNotMatch(csp, /frame-ancestors 'none'/);
+    assert.match(csp, /default-src 'self'/);
+    assert.match(csp, /object-src 'none'/);
+  });
+});
