@@ -21,6 +21,7 @@ export function revealCaptureCommand(): Command {
     .option("--description <description>")
     .option("--force", "Overwrite an existing secret with the same ref.", false)
     .option("--approval-id <id>")
+    .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
     .option("--no-wait")
     .action(async (options) => {
       const domains = options.allowDomain as string[];
@@ -46,6 +47,7 @@ export function revealCaptureCommand(): Command {
       if (domains.length > 0) bodyObj.allowed_domains = domains;
       if (options.description !== undefined) bodyObj.description = options.description;
       if (options.approvalId !== undefined) bodyObj.approval_id = options.approvalId;
+      if (options.session !== undefined) bodyObj.session_id = options.session;
       const r = await daemonRequest("POST", "/v1/secrets/reveal-capture", bodyObj);
       outputJson(ok(r as Record<string, unknown>));
     })
