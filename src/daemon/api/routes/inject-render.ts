@@ -4,6 +4,7 @@ import os from "node:os";
 import { randomBytes } from "node:crypto";
 import { ShuttleError } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
+import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
@@ -81,6 +82,7 @@ export function registerInjectRenderRoute(
           binding,
           daemonPort: daemonPortRef(),
           sessionStore: services.sessionStore,
+          openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
           ...(sessionId !== undefined ? { sessionId } : {}),
           ...(approvalId !== undefined ? { approvalIdFromClient: approvalId } : {}),
           ...(waitForApproval === false ? { waitMs: 0 } : {}),
