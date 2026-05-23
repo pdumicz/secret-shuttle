@@ -11,6 +11,7 @@ export function injectCommand(): Command {
     .requiredOption("-i, --input <path>", "Template file containing ss:// refs.")
     .requiredOption("-o, --output <path>", "Output file path (must resolve inside $HOME), or '-' for stdout.")
     .option("--approval-id <id>", "Pre-issued approval id.")
+    .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
     .option("--no-wait", "Return approval_required without waiting.")
     .option("--json", "Forward-compat no-op (always emits JSON).", false)
     .action(async (options) => {
@@ -34,6 +35,7 @@ export function injectCommand(): Command {
         output_path: outputPathForDaemon,
       };
       if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      if (options.session !== undefined) body.session_id = options.session;
       if (options.wait === false) body.wait_for_approval = false;
       const r = await daemonRequest("POST", "/v1/inject/render", body);
       const result = r as unknown as { rendered: boolean; refs_count: number; output_path?: string; content?: string };

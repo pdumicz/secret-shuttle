@@ -19,3 +19,8 @@ test("injectCommand: --json no-op accepted", () => {
   const optionNames = cmd.options.map((o) => o.long);
   assert.ok(optionNames.includes("--json"));
 });
+
+test("injectCommand: --session flag accepted", () => {
+  const cmd = injectCommand();
+  assert.ok(cmd.options.map((o) => o.long).includes("--session"));
+});
