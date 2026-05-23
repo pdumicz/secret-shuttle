@@ -1,6 +1,6 @@
 import { ShuttleError } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
-import type { ApprovalBinding } from "../../approvals/store.js";
+import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { generateSecretValue } from "../../helpers/generate-value.js";
 import { fingerprintMatches } from "../../../vault/fingerprints.js";
 import { canonicalEnvironment, buildSecretRef } from "../../../shared/refs.js";
@@ -27,6 +27,7 @@ interface GenerateBody {
   force?: boolean;
   approval_id?: string;
   wait_for_approval?: boolean;
+  session_id?: string;
 }
 interface CaptureBody {
   name: string;
@@ -86,6 +87,13 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
   server.addRoute("POST", "/v1/secrets/generate", async (_req, raw) => {
     services.lock.requireKey();
     const b = raw as GenerateBody;
+    // Hoisted OUTSIDE the try so a post-mint failure (e.g. vault.upsertSecret
+    // throws secret_exists AFTER requireApproval consumed the session) still
+    // carries grant.session_id into the failure audit.  Optional-chained at
+    // use site because grant remains undefined if requireApproval itself threw
+    // (pre-mint failure), in which case no session was consumed and audit
+    // MUST NOT carry session_id.
+    let grant: ApprovalGrant | undefined;
     try {
       const env = canonicalEnvironment(b.environment);
       const plannedRef = buildSecretRef(b.source ?? "local", env, b.name);
@@ -122,10 +130,18 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         allowed_domains: effectiveAllowed,
         allowed_actions: effectiveActions,
       };
-      await requireApproval({
+      // Single requireApproval call — handles both the initial (no approval_id)
+      // and the retry (approval_id supplied) paths.  When session_id is set and
+      // the binding matches the session pattern, the call mints a used grant
+      // from the session and the audit emitted below will carry
+      // grant.session_id; otherwise the call falls back to the single-use flow
+      // and grant.session_id is undefined.
+      grant = await requireApproval({
         store: services.approvals,
         binding,
         daemonPort: daemonPortRef(),
+        sessionStore: services.sessionStore,
+        ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
         ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
@@ -141,7 +157,13 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         allowedActions: effectiveActions,
         ...(b.force !== undefined ? { force: b.force } : {}),
       });
-      await writeDaemonAudit({ action: "generate", ok: true, ref: meta.ref, environment: meta.environment });
+      await writeDaemonAudit({
+        action: "generate",
+        ok: true,
+        ref: meta.ref,
+        environment: meta.environment,
+        ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
+      });
       return {
         generated: true,
         secret_ref: meta.ref,
@@ -156,6 +178,11 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         ok: false,
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
         ...(b.name !== undefined && b.environment !== undefined ? { ref: buildSecretRef(b.source ?? "local", b.environment, b.name) } : {}),
+        // Optional-chain: grant is undefined if requireApproval itself threw
+        // (pre-mint failure — no session consumed → audit MUST NOT carry
+        // session_id).  Otherwise grant.session_id is the source session iff
+        // the binding matched the session pattern.
+        ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       throw err;
     }
