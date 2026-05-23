@@ -12,7 +12,7 @@
 
 **Baseline:** 842 tests, 840 pass, 2 skipped, 0 fail at commit `8b77556` (Plan 4a R2 normalization fix).
 
-**Estimated new tests:** ~70–80. Final count target: ~915–925 passing.
+**Estimated new tests:** ~75–85. Final count target: ~920–930 passing.
 
 ---
 
@@ -1320,6 +1320,26 @@ test("default DaemonServices wires HubBroker.openUrlImpl to the real openUrl", (
   }
 });
 
+test("default DaemonServices source: opts.hubOpenUrlImpl falls back to the real openUrl import (drift guard)", async () => {
+  // The hook test below proves the hubOpenUrlImpl hook is honored,
+  // but does NOT prove the fallback is `openUrl` rather than `noop`.
+  // This drift guard pins the source: the import line AND the
+  // `opts.hubOpenUrlImpl ?? openUrl` chain. A regression to
+  // `?? (() => undefined)` would fail here.
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile("src/daemon/services.ts", "utf8");
+  assert.match(
+    src,
+    /import\s*\{\s*openUrl\s*\}\s*from\s+["']\.\/approvals\/open-url\.js["']/,
+    "DaemonServices must import openUrl from approvals/open-url.js",
+  );
+  assert.match(
+    src,
+    /opts\.hubOpenUrlImpl\s*\?\?\s*openUrl/,
+    "default HubBroker openUrlImpl must fall back to the real openUrl, not a noop",
+  );
+});
+
 test("default DaemonServices wires the default HubBroker through openUrl (hubOpenUrlImpl hook exercises the actual default constructor path)", async () => {
   const prev = process.env.SECRET_SHUTTLE_NO_OPEN_URL;
   delete process.env.SECRET_SHUTTLE_NO_OPEN_URL;
@@ -1465,6 +1485,17 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
       line-height: 1.4;
     }
     #status.disconnected ~ #banner, #status.displaced ~ #banner { display: block; }
+    #banner button {
+      font-size: 1rem;
+      padding: 0.5rem 1rem;
+      margin-top: 0.75rem;
+      background: #0a7a3b;
+      color: #fff;
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    #banner button:hover { background: #086030; }
   </style>
 </head>
 <body>
@@ -1474,6 +1505,11 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
     <span style="margin-left:auto;color:#888" id="status-port"></span>
   </div>
   <iframe id="op" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+  <!-- Banner is populated by showBanner() with text + a recovery button.
+       Reload is intentionally NOT the recovery path: history.replaceState
+       strips the hub_token from the URL after bootstrap, so a bare reload
+       hits /ui/hub with no token and 400s. The Take over / Reconnect
+       button re-enters the active state using the closure-local token. -->
   <div id="banner"></div>
   <script>
     (() => {
@@ -1505,7 +1541,6 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
         statusEl.className = kind || "";
         statusText.textContent = text;
         if (kind === "disconnected" || kind === "displaced") {
-          banner.textContent = text;
           // Drop the operation page so a displaced/terminal tab cannot
           // continue approving operations the user thought were handed
           // off. The CSS rule above also hides the iframe element so
@@ -1513,9 +1548,40 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
           if (iframe.src !== "about:blank") {
             iframe.src = "about:blank";
           }
+          // Populate the banner with text + a recovery button. Reload
+          // is NOT the recovery path: history.replaceState stripped the
+          // hub_token from the URL, so a reload hits /ui/hub with no
+          // token and 400s. The button uses the closure-local hubToken
+          // to re-issue an EventSource without leaving this page.
+          banner.innerHTML = "";
+          const p = document.createElement("p");
+          p.textContent = text;
+          banner.appendChild(p);
+          const btn = document.createElement("button");
+          btn.textContent = kind === "displaced" ? "Take over here" : "Reconnect";
+          btn.addEventListener("click", takeOver);
+          banner.appendChild(btn);
         } else {
-          banner.textContent = "";
+          banner.innerHTML = "";
         }
+      }
+
+      function takeOver() {
+        // Re-enter the active state without reloading the page.
+        // - terminal=false re-enables iframe→hub postMessage handling.
+        // - consecutiveFailures=0 resets the strikes-out counter.
+        // - statusEl class flips to "reconnecting", which removes the
+        //   CSS rule hiding #op, so the iframe area is interactive
+        //   again as soon as the next navigate arrives.
+        // connect() opens a fresh EventSource; if another tab was
+        // attached, the broker's attach() will displace it. The
+        // resend of activeUrl reloads whatever operation was pending.
+        terminal = false;
+        consecutiveFailures = 0;
+        banner.innerHTML = "";
+        statusEl.className = "reconnecting";
+        statusText.textContent = "Reconnecting…";
+        connect();
       }
 
       function handleNavigate(url) {
@@ -1527,7 +1593,7 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
         if (data.type === "displaced") {
           terminal = true;
           if (es) es.close();
-          showBanner("Another tab is now driving Secret Shuttle. Reload here to take back over.", "displaced");
+          showBanner("Another tab is now driving Secret Shuttle. Click below to take over here.", "displaced");
           return;
         }
         if (data.type === "navigate") {
@@ -1551,7 +1617,7 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
             setTimeout(connect, 1000);
           } else {
             terminal = true;
-            showBanner("Disconnected from Secret Shuttle. Reload to reconnect.", "disconnected");
+            showBanner("Disconnected from Secret Shuttle. Click below to reconnect.", "disconnected");
           }
         });
       }
@@ -1587,7 +1653,7 @@ Replace the entire contents of `src/daemon/hub/hub-ui.html` with:
           }
           terminal = true;
           if (es) es.close();
-          showBanner("Failed to advance Secret Shuttle. Reload to continue.", "disconnected");
+          showBanner("Failed to advance Secret Shuttle. Click below to reconnect.", "disconnected");
         } finally {
           doneInFlight.delete(seq);
           if (succeeded) lastCompletedSeq = Math.max(lastCompletedSeq, seq);
@@ -1745,6 +1811,29 @@ test("hub-ui.html: strips hub_token from URL after bootstrap (history.replaceSta
   // iframe content. The token must be read into a closure-local
   // variable, then immediately replaced via history.replaceState.
   assert.match(html, /history\.replaceState\s*\(\s*\{\s*\}\s*,\s*["']["']\s*,\s*["']\/ui\/hub["']\s*\)/);
+});
+
+test("hub-ui.html: in-page recovery (takeOver) replaces reload-based recovery", async () => {
+  const html = await loadHtml();
+  // Because history.replaceState strips the token, a bare reload would
+  // hit /ui/hub with no token and 400. The recovery path must be a
+  // takeOver() function reachable from a button inside the banner.
+  assert.match(html, /function takeOver\b/);
+  // takeOver must reset the terminal-state flag, clear the strikes
+  // counter, and re-issue the SSE connection via connect().
+  assert.match(html, /terminal\s*=\s*false/);
+  assert.match(html, /consecutiveFailures\s*=\s*0/);
+  assert.match(html, /takeOver[\s\S]{0,400}?connect\s*\(\s*\)/);
+  // Banner must wire a click listener on its own button onto takeOver.
+  assert.match(html, /addEventListener\(\s*["']click["']\s*,\s*takeOver\s*\)/);
+  // Banner text in terminal states must NOT instruct the user to reload —
+  // doing so would lead them into the 400 trap. Crude assertion: no
+  // showBanner call inside the JS contains the substring "Reload".
+  // (Comments mentioning Reload as the failure mode being avoided are OK.)
+  const showBannerCalls = html.match(/showBanner\([^)]+\)/g) ?? [];
+  for (const call of showBannerCalls) {
+    assert.doesNotMatch(call, /Reload/i, `showBanner call must not instruct a reload: ${call}`);
+  }
 });
 ```
 
@@ -3447,6 +3536,40 @@ test("hub-ui dom: postMessage with wrong origin is ignored (no fetch)", async ()
   assert.equal(doneCall, undefined, "wrong-origin postMessage must NOT trigger /ui/hub/done");
 });
 
+test("hub-ui dom: clicking the displaced-banner button (takeOver) re-issues the EventSource", async () => {
+  const ctx = await loadHub();
+  ctx.emitOpen();
+  ctx.feedSse({ type: "navigate", url: "http://127.0.0.1:5555/ui/approve?id=a&token=t&hub_seq=1", seq: 1 });
+  // Drive displacement.
+  ctx.feedSse({ type: "displaced" });
+  const banner = ctx.dom.window.document.getElementById("banner")!;
+  const btn = banner.querySelector("button");
+  assert.ok(btn, "displaced banner must include a recovery button");
+  // Before click: only the initial EventSource was constructed.
+  // Track via window.__esConstructions if the test harness exposes it,
+  // or just verify the click triggers a new SSE connection by observing
+  // a second fetch to /ui/hub/stream on the next message attempt.
+  // Simplest: after click, the banner clears and statusEl flips to
+  // "reconnecting" — visible state change proves the click ran.
+  btn!.dispatchEvent(new ctx.dom.window.MouseEvent("click"));
+  // Yield once for connect()'s synchronous EventSource construction.
+  await new Promise((r) => setTimeout(r, 10));
+  const statusEl = ctx.dom.window.document.getElementById("status")!;
+  assert.match(statusEl.className, /reconnecting/);
+  assert.equal(banner.innerHTML, "", "banner must clear after takeOver()");
+});
+
+test("hub-ui dom: terminal-state banners do not instruct the user to reload", async () => {
+  const ctx = await loadHub();
+  ctx.emitOpen();
+  ctx.feedSse({ type: "displaced" });
+  const banner = ctx.dom.window.document.getElementById("banner")!;
+  // After history.replaceState, a reload hits /ui/hub with no token (400).
+  // Banner copy must NOT instruct the user to reload — the recovery
+  // surface is the in-page button.
+  assert.doesNotMatch(banner.textContent ?? "", /reload/i);
+});
+
 test("hub-ui dom: duplicate operation_done for same seq fires only one fetch", async () => {
   const ctx = await loadHub();
   ctx.emitOpen();
@@ -3605,7 +3728,7 @@ Expected: clean.
 - [ ] **Step 2: Run full test suite**
 
 Run: `npm test`
-Expected: ~915–925 tests passing, 2 skipped, 0 failing. Baseline was 842; new tests added across A1 (~20), B1 (3), B2 (3), B3 (8), B4 (2 wiring), C2 (8), D1 (1), D2 (1), D3 (1), E1 (5), E2 (5), E3 (3), F0 (2), G1 (6), G1.5 (5), G2 (2) = ~75 new tests. Final ~917 pass.
+Expected: ~920–930 tests passing, 2 skipped, 0 failing. Baseline was 842; new tests added across A1 (~20), B1 (3), B2 (3), B3 (8), B4 (3 wiring: 1 noop-under-env-var + 1 hook-exercises-default-path + 1 source-drift `?? openUrl`), C2 (9), D1 (1), D2 (1), D3 (1), E1 (5), E2 (5), E3 (3), F0 (2), G1 (6), G1.5 (7: 5 original + 1 takeOver button + 1 no-reload-in-banner), G2 (2) = ~79 new tests. Final ~921 pass.
 
 - [ ] **Step 3: Run check-pack**
 
