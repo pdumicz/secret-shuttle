@@ -1,5 +1,6 @@
 import { ShuttleError } from "../../../shared/errors.js";
 import { requireApproval } from "../../approvals/require-approval.js";
+import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { domainMatches } from "../../../policy/domain-policy.js";
 import type { DaemonServer } from "../../server.js";
@@ -125,6 +126,7 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
         daemonPort: daemonPortRef(),
         force: true,
         sessionStore: services.sessionStore,
+        openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
         ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
         ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
