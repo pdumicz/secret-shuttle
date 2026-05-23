@@ -1,3 +1,4 @@
+import { normalizeDomain } from "../../../policy/domain-policy.js";
 import { ShuttleError } from "../../../shared/errors.js";
 import { openUrl } from "../../approvals/open-url.js";
 import {
@@ -135,7 +136,10 @@ function parseSessionPatternFromBody(o: Record<string, unknown>): SessionPattern
   return {
     actions: p.actions as SessionAction[], // assertSessionPatternValid will validate the SessionAction enum
     ref_glob: p.ref_glob,
-    destination_domains: p.destination_domains as string[],
+    // Canonicalize domains at the boundary so the stored pattern matches the
+    // already-normalized binding-side domains (see secrets.ts:100 et al).
+    // Without this, pattern ["Vercel.com"] silently refused binding "vercel.com".
+    destination_domains: (p.destination_domains as string[]).map(normalizeDomain),
     ...(p.template_ids !== undefined ? { template_ids: p.template_ids as string[] } : {}),
     ...(p.allowed_actions !== undefined ? { allowed_actions: p.allowed_actions as string[] } : {}),
     ttl_ms: p.ttl_ms,

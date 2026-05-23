@@ -1,3 +1,4 @@
+import { normalizeDomain } from "../../policy/domain-policy.js";
 import { canonicalAction, globToRegExp, type SessionPattern } from "./session.js";
 import type { ApprovalBinding } from "./store.js";
 
@@ -53,7 +54,11 @@ function injectSubmitMatches(binding: ApprovalBinding, pattern: SessionPattern):
   // destination_domains is REQUIRED non-empty by assertSessionPatternValid.
   if (pattern.destination_domains.length === 0) return false;
   if (binding.destination_domain === null) return false;
-  if (!pattern.destination_domains.includes(binding.destination_domain)) return false;
+  // Defense-in-depth: normalize both sides. Patterns are canonicalized at
+  // parseSessionPatternFromBody, but if a pattern slipped past via a
+  // different code path we still want canonical comparison.
+  const patternDomains = new Set(pattern.destination_domains.map(normalizeDomain));
+  if (!patternDomains.has(normalizeDomain(binding.destination_domain))) return false;
   return true;
 }
 
@@ -71,7 +76,9 @@ function revealCaptureMatches(binding: ApprovalBinding, pattern: SessionPattern)
   }
   if (pattern.destination_domains.length === 0) return false;
   if (binding.destination_domain === null) return false;
-  if (!pattern.destination_domains.includes(binding.destination_domain)) return false;
+  // Defense-in-depth normalization (see injectSubmitMatches).
+  const patternDomains = new Set(pattern.destination_domains.map(normalizeDomain));
+  if (!patternDomains.has(normalizeDomain(binding.destination_domain))) return false;
   return true;
 }
 
@@ -91,8 +98,12 @@ function secretsSetMatches(binding: ApprovalBinding, pattern: SessionPattern): b
   // rather than silently auto-approve a too-wide secret.
   if (pattern.destination_domains.length === 0) return false;
   if (pattern.allowed_actions === undefined || pattern.allowed_actions.length === 0) return false;
-  const allowedDomains = binding.allowed_domains ?? [];
-  const domainPatternSet = new Set(pattern.destination_domains);
+  // Defense-in-depth normalization on both sides. Bindings are normalized at
+  // the route layer (secrets.ts:100), patterns at parseSessionPatternFromBody;
+  // doing it again here means even a pattern that slipped past validation
+  // still compares canonically.
+  const allowedDomains = (binding.allowed_domains ?? []).map(normalizeDomain);
+  const domainPatternSet = new Set(pattern.destination_domains.map(normalizeDomain));
   for (const d of allowedDomains) {
     if (!domainPatternSet.has(d)) return false; // binding widens the approved domains
   }

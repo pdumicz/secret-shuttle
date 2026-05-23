@@ -146,6 +146,31 @@ test("POST /v1/approvals/session: ttl > 15min → bad_request", async () => {
   });
 });
 
+test("POST /v1/approvals/session: destination_domains canonicalized at create (VERCEL.COM → vercel.com in GET list)", async () => {
+  // Regression for the P2: pattern domains used to be stored raw, so a session
+  // created with ["VERCEL.COM"] silently refused bindings carrying the
+  // canonical "vercel.com". Now we normalize at parseSessionPatternFromBody —
+  // the stored + serialized pattern is the canonical form.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const created = await call(ctx, "POST", "/v1/approvals/session", {
+      pattern: {
+        actions: ["inject-submit"],
+        ref_glob: "ss://x/prod/*",
+        destination_domains: ["VERCEL.COM", "  GitHub.com  "],
+        ttl_ms: 60_000,
+      },
+      wait_for_approval: false,
+    });
+    assert.equal(created.status, 200);
+    const listed = await call(ctx, "GET", "/v1/approvals/sessions");
+    assert.equal(listed.status, 200);
+    const sessions = (listed.body as { sessions: Array<{ destination_domains: string[] }> }).sessions;
+    assert.equal(sessions.length, 1);
+    assert.deepEqual(sessions[0]!.destination_domains, ["vercel.com", "github.com"]);
+  });
+});
+
 test("POST /v1/approvals/session: wait flow — revoke mid-wait → returns session_revoked (no hang)", async () => {
   // Regression for the P1: prior wait loop checked granted/denied/expired
   // but not revoked. SessionStore.get() only flips pending/granted → expired

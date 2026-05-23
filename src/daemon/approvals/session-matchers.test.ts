@@ -123,6 +123,32 @@ test("inject-submit: domain mismatch → false", () => {
   assert.equal(matchesSessionPattern(b, p), false);
 });
 
+test("inject-submit: case-insensitive domain match (pattern Vercel.com, binding vercel.com) → true", () => {
+  // Regression for the P2: previously matchers used raw includes/Set.has, so
+  // a pattern with mixed-case domain refused a normalized binding. Now both
+  // sides are normalized at comparison time. Pattern-side canonicalization
+  // happens at parseSessionPatternFromBody; the matcher is defense-in-depth.
+  const p = makePattern({ actions: ["inject-submit"], destination_domains: ["Vercel.com"] });
+  const b = makeBinding({
+    action: "inject_submit",
+    ref: "ss://stripe/prod/STRIPE_KEY",
+    destination_domain: "vercel.com",
+  });
+  assert.equal(matchesSessionPattern(b, p), true);
+});
+
+test("inject-submit: whitespace + uppercase tolerated on both sides", () => {
+  // Weirder variant: leading/trailing whitespace + all-caps on one side.
+  // normalizeDomain trims + lowercases, so this matches.
+  const p = makePattern({ actions: ["inject-submit"], destination_domains: ["  VERCEL.COM  "] });
+  const b = makeBinding({
+    action: "inject_submit",
+    ref: "ss://stripe/prod/STRIPE_KEY",
+    destination_domain: "vercel.com",
+  });
+  assert.equal(matchesSessionPattern(b, p), true);
+});
+
 // =============================================================================
 // reveal-capture: PLANNED_REF (not binding.ref — see reveal-capture.ts:148)
 // =============================================================================
@@ -191,6 +217,26 @@ test("secrets-set: planned_ref matches glob; allowed_domains ⊆ pattern.destina
     planned_ref: "ss://stripe/prod/NEW_KEY",
     allowed_domains: ["vercel.com"], // ⊆ pattern.destination_domains
     allowed_actions: ["use_as_stdin"], // ⊆ pattern.allowed_actions
+  });
+  assert.equal(matchesSessionPattern(b, p), true);
+});
+
+test("secrets-set: case-insensitive domain subset check (pattern mixed-case, binding lowercase) → true", () => {
+  // Regression for the P2: secretsSetMatches builds a Set from
+  // pattern.destination_domains and checks binding.allowed_domains against it.
+  // Without normalization, a pattern with "Vercel.com" would silently refuse
+  // a binding with "vercel.com" (the canonical form bindings actually carry).
+  const p = makePattern({
+    actions: ["secrets-set"],
+    destination_domains: ["Vercel.com", "SUPABASE.io"],
+    allowed_actions: ["use_as_stdin"],
+  });
+  const b = makeBinding({
+    action: "generate",
+    ref: null,
+    planned_ref: "ss://stripe/prod/NEW_KEY",
+    allowed_domains: ["vercel.com", "supabase.io"],
+    allowed_actions: ["use_as_stdin"],
   });
   assert.equal(matchesSessionPattern(b, p), true);
 });
