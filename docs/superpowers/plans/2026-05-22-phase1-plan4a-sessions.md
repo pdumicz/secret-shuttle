@@ -657,10 +657,11 @@ export function matchesSessionPattern(binding: ApprovalBinding, pattern: Session
 ```
 
 Dispatch by `canonicalAction(binding.action)`:
-- `template-run` / `inject-submit` / `reveal-capture` — generic ref+domain matcher. Honors template_ids for template-run.
-- `secrets-set` — planned_ref against ref_glob; binding.allowed_domains ⊆ pattern.destination_domains; binding.allowed_actions ⊆ pattern.allowed_actions (when set).
-- `run` / `inject_render` — refs come from `binding.template_params.refs` as a comma-joined string; SPLIT it and check EACH against ref_glob. If pattern.ref_glob is empty, accept any refs.
-- Unknown action → false.
+- `template-run` — ref + template_ids only. `destination_domains` is IGNORED (binding sets `destination_domain: null` per templates.ts:91). Pattern MUST set non-empty `template_ids` (enforced at validate time).
+- `inject-submit` — ref + destination_domain. Pattern MUST set non-empty `destination_domains`.
+- `reveal-capture` — `binding.planned_ref` (not binding.ref — see reveal-capture.ts:148) + destination_domain. Pattern MUST set non-empty `destination_domains`.
+- `secrets-set` — planned_ref against ref_glob; binding.allowed_domains ⊆ pattern.destination_domains (subset, not equality); binding.allowed_actions ⊆ pattern.allowed_actions when set. Pattern MUST set non-empty `destination_domains`.
+- Anything else (including `run`, `inject_render`, `secrets_delete`, `secrets_rotate`) — `canonicalAction` returns null; matcher returns false outright; routes fall back to per-op approval.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -981,11 +982,15 @@ test("matchesSessionPattern: inject_render binding → false (not a SessionActio
   assert.equal(matchesSessionPattern(b, p), false);
 });
 
-test("matchesSessionPattern: secrets_rotate binding → false even with a permissive pattern", () => {
+test("matchesSessionPattern: secrets_rotate binding → false even with the broadest legal pattern", () => {
+  // The pattern below uses ALL four SessionAction values + non-empty destination_domains + template_ids (the most permissive shape assertSessionPatternValid will accept).
+  // run, inject_render, secrets_delete, secrets_rotate are NOT in SessionAction;
+  // canonicalAction returns null for them; matcher refuses outright.
   const p = makePattern({
-    actions: ["template-run", "run", "inject-submit", "reveal-capture", "secrets-set", "inject_render"],
+    actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
     ref_glob: "",
-    destination_domains: [],
+    destination_domains: ["any.com"],
+    template_ids: ["any"],
   });
   const b = makeBinding({ action: "secrets_rotate" });
   assert.equal(matchesSessionPattern(b, p), false);
@@ -1113,13 +1118,16 @@ function secretsSetMatches(binding: ApprovalBinding, pattern: SessionPattern): b
 git add src/daemon/approvals/session-matchers.ts src/daemon/approvals/session-matchers.test.ts
 git commit -m "feat(approvals): action-specific session matcher predicates
 
-Closes the P0 'matchers unsafe for run/inject_render/secrets-set'.
-Generic ref+domain check (used by template-run/inject-submit/
-reveal-capture) is wrong for actions whose binding has ref:null:
-  - run/inject_render: refs live in template_params.refs (comma-joined)
-  - secrets-set: ref lives in planned_ref; allowed_domains must be ⊆ pattern.destination_domains
-The dispatcher routes by canonical action; secrets-delete and
-secrets-rotate canonicalize to null and refuse outright."
+Closes the P0 'matchers unsafe for some action shapes'. Each SessionAction
+reads from the field where its real route stores the ref:
+  - template-run: binding.ref + template_ids (destination_domain is null on
+    template bindings; the security boundary is template_id)
+  - inject-submit: binding.ref + destination_domain
+  - reveal-capture: binding.planned_ref + destination_domain (binding.ref is
+    null for this action; refer to src/daemon/api/routes/reveal-capture.ts:148)
+  - secrets-set: binding.planned_ref + allowed_domains ⊆ pattern + allowed_actions ⊆ pattern
+The dispatcher routes by canonical action; run, inject_render,
+secrets_delete, secrets_rotate all canonicalize to null and refuse outright."
 ```
 
 ---
@@ -1635,12 +1643,13 @@ test("findOrMintFromSession: matched + granted → synthesizes used grant with s
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://x/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [], // ignored for template-run
+    template_ids: ["vercel-env-add"], // required for template-run
     ttl_ms: 60_000,
   });
   sessions.approve(sg.id);
   const binding = makeBindingFor("template", {
-    destination_domain: "vercel.com",
+    destination_domain: null, // current template binding shape (see templates.ts:91)
     template_id: "vercel-env-add",
   });
   const grant = store.findOrMintFromSession(sg.id, binding, sessions);
@@ -1656,14 +1665,15 @@ test("findOrMintFromSession: expired (granted past TTL) → session_expired", ()
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://x/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
     ttl_ms: 1000,
   });
   sessions.approve(sg.id);
   nowVal += 2000;
   const store = new ApprovalStore();
   assert.throws(
-    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { destination_domain: "vercel.com" }), sessions),
+    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { template_id: "vercel-env-add" }), sessions),
     (err: Error & { code?: string }) => err.code === "session_expired",
   );
 });
@@ -1673,14 +1683,15 @@ test("findOrMintFromSession: revoked → session_not_found", () => {
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://x/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
     ttl_ms: 60_000,
   });
   sessions.approve(sg.id);
   sessions.revoke(sg.id);
   const store = new ApprovalStore();
   assert.throws(
-    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { destination_domain: "vercel.com" }), sessions),
+    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { template_id: "vercel-env-add" }), sessions),
     (err: Error & { code?: string }) => err.code === "session_not_found",
   );
 });
@@ -1690,12 +1701,13 @@ test("findOrMintFromSession: pending (not approved) → session_unauthorized", (
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://x/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
     ttl_ms: 60_000,
   });
   const store = new ApprovalStore();
   assert.throws(
-    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { destination_domain: "vercel.com" }), sessions),
+    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { template_id: "vercel-env-add" }), sessions),
     (err: Error & { code?: string }) => err.code === "session_unauthorized",
   );
 });
@@ -1705,13 +1717,14 @@ test("findOrMintFromSession: denied → session_unauthorized", () => {
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://x/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
     ttl_ms: 60_000,
   });
   sessions.deny(sg.id);
   const store = new ApprovalStore();
   assert.throws(
-    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { destination_domain: "vercel.com" }), sessions),
+    () => store.findOrMintFromSession(sg.id, makeBindingFor("template", { template_id: "vercel-env-add" }), sessions),
     (err: Error & { code?: string }) => err.code === "session_unauthorized",
   );
 });
@@ -1721,13 +1734,14 @@ test("findOrMintFromSession: pattern mismatch → session_pattern_no_match", () 
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://stripe/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
     ttl_ms: 60_000,
   });
   sessions.approve(sg.id);
   const binding = makeBindingFor("template", {
-    ref: "ss://other/prod/A",
-    destination_domain: "vercel.com",
+    ref: "ss://other/prod/A", // outside the glob
+    template_id: "vercel-env-add",
   });
   const store = new ApprovalStore();
   assert.throws(
@@ -1741,13 +1755,14 @@ test("findOrMintFromSession: max_uses overflow → session_max_uses_exceeded", (
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://x/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
     ttl_ms: 60_000,
     max_uses: 2,
   });
   sessions.approve(sg.id);
   const store = new ApprovalStore();
-  const binding = makeBindingFor("template", { destination_domain: "vercel.com" });
+  const binding = makeBindingFor("template", { template_id: "vercel-env-add" });
   store.findOrMintFromSession(sg.id, binding, sessions);
   store.findOrMintFromSession(sg.id, binding, sessions);
   assert.throws(
@@ -1758,11 +1773,15 @@ test("findOrMintFromSession: max_uses overflow → session_max_uses_exceeded", (
 
 test("findOrMintFromSession: secrets_delete binding → session_pattern_no_match (action not allowed in sessions)", () => {
   const sessions = new SessionStore();
-  // Create a permissive session that COULD match in a generic matcher.
+  // The broadest legal pattern (covers all 4 SessionActions) with non-empty
+  // destination_domains and template_ids satisfies assertSessionPatternValid.
+  // secrets_delete is NOT a SessionAction; canonicalAction returns null;
+  // the matcher refuses outright.
   const sg = sessions.create({
-    actions: ["template-run", "run", "inject-submit", "reveal-capture", "secrets-set", "inject_render"],
+    actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
     ref_glob: "",
-    destination_domains: [],
+    destination_domains: ["any.com"],
+    template_ids: ["any"],
     ttl_ms: 60_000,
   });
   sessions.approve(sg.id);
@@ -1881,7 +1900,8 @@ test("requireApproval: matching session → returns session-minted grant; no ope
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://x/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
     ttl_ms: 60_000,
   });
   sessions.approve(sg.id);
@@ -1894,10 +1914,10 @@ test("requireApproval: matching session → returns session-minted grant; no ope
       action: "template",
       ref: "ss://x/prod/A",
       environment: "production",
-      destination_domain: "vercel.com",
+      destination_domain: null, // current template-run binding shape (templates.ts:91)
       target_id: null,
       field_fingerprint: null,
-      template_id: null,
+      template_id: "vercel-env-add",
       template_params: null,
       allowed_domains: [],
     },
@@ -1915,7 +1935,8 @@ test("requireApproval: session_pattern_no_match falls back to single-use flow", 
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://OTHER/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
     ttl_ms: 60_000,
   });
   sessions.approve(sg.id);
@@ -1927,12 +1948,12 @@ test("requireApproval: session_pattern_no_match falls back to single-use flow", 
       sessionId: sg.id,
       binding: {
         action: "template",
-        ref: "ss://x/prod/A",
+        ref: "ss://x/prod/A", // outside pattern.ref_glob
         environment: "production",
-        destination_domain: "vercel.com",
+        destination_domain: null,
         target_id: null,
         field_fingerprint: null,
-        template_id: null,
+        template_id: "vercel-env-add",
         template_params: null,
         allowed_domains: [],
       },
@@ -1958,10 +1979,10 @@ test("requireApproval: session_not_found re-thrown (no fallback)", async () => {
         action: "template",
         ref: "ss://x/prod/A",
         environment: "production",
-        destination_domain: "vercel.com",
+        destination_domain: null,
         target_id: null,
         field_fingerprint: null,
-        template_id: null,
+        template_id: "vercel-env-add",
         template_params: null,
         allowed_domains: [],
       },
@@ -1979,7 +2000,8 @@ test("requireApproval: session_expired re-thrown (no fallback)", async () => {
   const sg = sessions.create({
     actions: ["template-run"],
     ref_glob: "ss://x/prod/*",
-    destination_domains: ["vercel.com"],
+    destination_domains: [],
+    template_ids: ["vercel-env-add"],
     ttl_ms: 1000,
   });
   sessions.approve(sg.id);
@@ -1995,10 +2017,10 @@ test("requireApproval: session_expired re-thrown (no fallback)", async () => {
         action: "template",
         ref: "ss://x/prod/A",
         environment: "production",
-        destination_domain: "vercel.com",
+        destination_domain: null,
         target_id: null,
         field_fingerprint: null,
-        template_id: null,
+        template_id: "vercel-env-add",
         template_params: null,
         allowed_domains: [],
       },
@@ -2012,15 +2034,17 @@ test("requireApproval: session_expired re-thrown (no fallback)", async () => {
 });
 
 test("requireApproval: secrets_delete binding with a session → pattern_no_match → falls back to single-use", async () => {
-  // The session cannot include secrets-delete (it's not a SessionAction).
-  // Passing session_id with a secrets_delete binding fails the matcher and
-  // falls through to single-use.
+  // The session can't include secrets-delete (it's not a SessionAction).
+  // Passing session_id with a secrets_delete binding canonicalizes to null,
+  // matcher returns false → pattern_no_match → falls through to single-use.
   const store = new ApprovalStore();
   const sessions = new SessionStore();
+  // Broadest legal pattern: all 4 SessionActions + non-empty destination_domains + template_ids.
   const sg = sessions.create({
-    actions: ["template-run", "run", "inject-submit", "reveal-capture", "secrets-set", "inject_render"],
+    actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
     ref_glob: "",
-    destination_domains: [],
+    destination_domains: ["any.com"],
+    template_ids: ["any"],
     ttl_ms: 60_000,
   });
   sessions.approve(sg.id);
@@ -2162,7 +2186,8 @@ test("POST /v1/approvals/session with wait_for_approval=false returns session_id
       pattern: {
         actions: ["template-run"],
         ref_glob: "ss://x/prod/*",
-        destination_domains: ["vercel.com"],
+        destination_domains: [], // ignored for template-run
+        template_ids: ["vercel-env-add"],
         ttl_ms: 60_000,
       },
       wait_for_approval: false,
@@ -2202,8 +2227,9 @@ test("POST /v1/approvals/session: invalid glob → session_pattern_invalid_glob"
     const r = await call(ctx, "POST", "/v1/approvals/session", {
       pattern: {
         actions: ["template-run"],
-        ref_glob: "ss://*/prod/*",
+        ref_glob: "ss://*/prod/*", // ** equivalent — rejected by globToRegExp
         destination_domains: [],
+        template_ids: ["vercel-env-add"],
         ttl_ms: 60_000,
       },
       wait_for_approval: false,
@@ -2238,6 +2264,7 @@ test("POST /v1/approvals/session: ttl > 15min → bad_request", async () => {
         actions: ["template-run"],
         ref_glob: "",
         destination_domains: [],
+        template_ids: ["any"], // required for template-run; the ttl check is what we're testing
         ttl_ms: 16 * 60 * 1000,
       },
       wait_for_approval: false,
@@ -2256,7 +2283,8 @@ test("POST /v1/approvals/session: wait flow — approve via HTTP UI route → re
       pattern: {
         actions: ["template-run"],
         ref_glob: "ss://x/prod/*",
-        destination_domains: ["vercel.com"],
+        destination_domains: [],
+        template_ids: ["vercel-env-add"],
         ttl_ms: 5000,
       },
     });
@@ -2688,7 +2716,8 @@ test("GET /ui/sessions/:id with valid token → 200 with session JSON", async ()
     const sg = ctx.services.sessionStore.create({
       actions: ["template-run"],
       ref_glob: "ss://x/prod/*",
-      destination_domains: ["vercel.com"],
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
       ttl_ms: 60_000,
     });
     const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/sessions/${sg.id}?token=${sg.ui_token}`);
@@ -2707,7 +2736,8 @@ test("GET /ui/sessions/:id with WRONG token → 401 ui_token_mismatch", async ()
     const sg = ctx.services.sessionStore.create({
       actions: ["template-run"],
       ref_glob: "ss://x/prod/*",
-      destination_domains: ["vercel.com"],
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
       ttl_ms: 60_000,
     });
     const r = await fetch(`http://127.0.0.1:${ctx.port}/ui/sessions/${sg.id}?token=WRONG`);
@@ -2738,7 +2768,8 @@ test("POST /ui/sessions/:id/approve transitions status + resets expires_at", asy
     const sg = ctx.services.sessionStore.create({
       actions: ["template-run"],
       ref_glob: "ss://x/prod/*",
-      destination_domains: ["vercel.com"],
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
       ttl_ms: 60_000,
     });
     const r = await fetch(
@@ -2758,7 +2789,8 @@ test("POST /ui/sessions/:id/deny transitions status", async () => {
     const sg = ctx.services.sessionStore.create({
       actions: ["template-run"],
       ref_glob: "ss://x/prod/*",
-      destination_domains: ["vercel.com"],
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
       ttl_ms: 60_000,
     });
     const r = await fetch(
@@ -2776,7 +2808,8 @@ test("POST /ui/sessions/:id/approve with wrong token → 401", async () => {
     const sg = ctx.services.sessionStore.create({
       actions: ["template-run"],
       ref_glob: "ss://x/prod/*",
-      destination_domains: ["vercel.com"],
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
       ttl_ms: 60_000,
     });
     const r = await fetch(
@@ -2793,7 +2826,8 @@ test("POST /ui/sessions/:id/approve on an already-denied session → 409 session
     const sg = ctx.services.sessionStore.create({
       actions: ["template-run"],
       ref_glob: "ss://x/prod/*",
-      destination_domains: ["vercel.com"],
+      destination_domains: [], // ignored for template-run
+      template_ids: ["vercel-env-add"],
       ttl_ms: 60_000,
     });
     // Deny first via HTTP.
@@ -2942,14 +2976,15 @@ For each route below, add `session_id` body parsing, pass to `requireApproval`, 
 3. `src/daemon/api/routes/inject-submit.ts` — action `inject_submit` → SessionAction `inject-submit`
 4. `src/daemon/api/routes/reveal-capture.ts` — action `reveal_capture` → SessionAction `reveal-capture`
 
-**Pass-through routes** (matcher returns null/no-match; CLI flag still accepted for surface uniformity, daemon falls back to single-use; test asserts audit DOES NOT have `session_id` AND `sessionStore.get(id).uses` stayed at 0):
+**Pass-through routes** (matcher returns null/no-match; CLI flag still accepted for surface uniformity, daemon falls back to single-use; test asserts audit entry does NOT carry `session_id` AND `sessionStore.get(id).uses` stayed at 0):
 5. `src/daemon/api/routes/run-resolve.ts` — action `run` → null
 6. `src/daemon/api/routes/inject-render.ts` — action `inject_render` → null
 7. `src/daemon/api/routes/secrets-delete.ts` — action `secrets_delete` → null
 8. `src/daemon/api/routes/secrets-rotate.ts` — action `secrets_rotate` → null
-9. `src/daemon/api/routes/blind.ts` — if approval-gated (verify via grep; the V0 compare/capture/inject CLI commands hit endpoints in `secrets.ts` / `browser.ts` / `inject.ts` if those exist; only wire routes that exist AND have a `requireApproval` call)
 
-The unified plan listed nonexistent `compare.ts` / `capture.ts` / `inject.ts` (V0) as separate route files. Those V0 routes don't exist as standalone files — `secrets.ts` and `browser.ts` contain the relevant endpoints. Plan 4a wires only the eight files above; the implementer can grep `requireApproval` to confirm scope.
+`src/daemon/api/routes/blind.ts` is excluded from session wiring: confirm via `grep requireApproval src/daemon/api/routes/blind.ts` whether it has an approval gate at all. If it does, the action canonicalizes to null (`blind_end` is not a `SessionAction`); CLI flag pass-through behavior is identical to the four pass-through routes above. If it doesn't, no wiring needed.
+
+The unified plan also listed nonexistent `compare.ts` / `capture.ts` / `inject.ts` (V0) as standalone route files. Those V0 routes don't exist as separate files — the V0 compare/capture/inject CLI commands hit endpoints already covered by `secrets.ts` and `browser.ts`. Plan 4a explicitly does NOT wire `secrets.ts` (other than the generate endpoint covered by route 2 above) or `browser.ts` for session passthrough; their actions aren't in `SessionAction`.
 
 **Per-route change pattern:**
 
@@ -2984,13 +3019,15 @@ git add src/daemon/audit.ts
 git commit -m "feat(audit): DaemonAuditEvent.session_id field"
 ```
 
-- [ ] **Step 1-11: One commit per route.** Each commit:
+- [ ] **Step 1-4: One commit per session-capable route.** Each of the four session-capable routes (`templates.ts`, `secrets.ts` generate endpoint, `inject-submit.ts`, `reveal-capture.ts`) gets its own commit. Each commit:
   - Adds `session_id` body param.
-  - Passes through to `requireApproval`.
-  - Records `session_id` in audit entries.
-  - Adds ONE happy-path test that asserts the audit line carries `session_id` AND `sessionStore.get(id).uses` incremented.
+  - Passes through to `requireApproval` with `sessionStore: services.sessionStore`.
+  - Records `grant.session_id` in audit entries when set.
+  - Adds ONE happy-path test that asserts:
+    (a) the audit line carries `session_id`, AND
+    (b) `sessionStore.get(id).uses` was incremented to 1.
 
-Example per-route commit message:
+Example commit message for a session-capable route:
 
 ```
 feat(routes/templates): accept session_id; audit records source session
@@ -3001,10 +3038,32 @@ approval window. The grant carries session_id which the route now writes
 into the template_run audit entry.
 ```
 
-- [ ] **Step 12: After all 11 routes**, verify:
+- [ ] **Step 5-8: One commit per pass-through route.** Each of the four pass-through routes (`run-resolve.ts`, `inject-render.ts`, `secrets-delete.ts`, `secrets-rotate.ts`) gets its own commit. Each commit:
+  - Adds `session_id` body param.
+  - Passes through to `requireApproval` with `sessionStore: services.sessionStore`.
+  - The route's `writeDaemonAudit` call STILL receives `grant.session_id` (which will be undefined on the fallback path) — preserves the single audit shape.
+  - Adds ONE test that asserts:
+    (a) the audit line does NOT carry `session_id` (the matcher refused → single-use was used or required), AND
+    (b) `sessionStore.get(id).uses` stayed at 0.
+
+The two test shapes are structurally different. The pass-through test typically uses `wait_for_approval: false` so it gets `approval_required` back, then checks the audit + session state.
+
+Example commit message for a pass-through route:
+
+```
+feat(routes/secrets-delete): pass-through session_id; daemon refuses non-SessionAction
+
+secrets-delete is NOT a SessionAction (destructive ops are always human-
+gated). The route still accepts session_id in the body for CLI uniformity,
+threads it to requireApproval. The matcher canonicalizes secrets_delete to
+null and refuses; requireApproval falls back to the single-use flow. The
+audit entry does NOT receive session_id on this path.
+```
+
+- [ ] **Step 9: After all 8 routes**, verify:
 
 ```bash
-git log --oneline | head -15  # ~11 small commits + 1 audit-type commit
+git log --oneline | head -10  # ~8 per-route commits + 1 audit-type commit
 npm test  # all pass
 ```
 
@@ -3060,7 +3119,7 @@ export function internalSessionCommand(): Command {
   cmd
     .command("create")
     .description("Mint a session pattern. Opens the approval UI for the human to approve the SHAPE.")
-    .requiredOption("--actions <list>", "Comma-separated SessionActions: template-run | inject-submit | reveal-capture | secrets-set | run | inject_render")
+    .requiredOption("--actions <list>", "Comma-separated SessionActions: template-run | inject-submit | reveal-capture | secrets-set")
     .requiredOption("--ref-glob <glob>", "Literal prefix + optional trailing * (e.g. ss://stripe/prod/*). Empty string = no ref check.")
     .option("--destination-domain <domain>", "Allowed destination domain (repeatable)", collectRepeated, [])
     .option("--template-id <id>", "Restrict to specific template_id (repeatable)", collectRepeated, [])
@@ -3176,31 +3235,44 @@ npm test  # all pass
 - [ ] **Step 4**: Manual smoke:
 
 ```bash
-# 1. Daemon running + vault unlocked.
-# 2. Create a session.
+# Prereq: daemon running + vault unlocked + a production-classed secret seeded
+# at ss://local/prod/X that allows the template's required actions.
+
+# 1. Create a template-run session. For template-run, --template-id is REQUIRED
+#    and --destination-domain is IGNORED (templates have implicit destinations
+#    encoded by template_id — vercel-env-add is implicitly vercel.com).
 secret-shuttle internal session create \
   --actions template-run \
   --ref-glob "ss://local/prod/*" \
-  --destination-domain vercel.com \
+  --template-id vercel-env-add \
   --ttl 300000 \
   --no-wait
 # → returns { session_id, status: "pending", expires_at }
-# → approval UI opens with session details.
+# → /ui/session?id=&token= opens in browser with session details.
 
-# 3. Approve in UI.
+# 2. Approve in the browser UI.
 
-# 4. Verify session list.
+# 3. Verify session list shows status:granted + uses:0.
 secret-shuttle internal session list
 
-# 5. Run a template under the session — should NOT open a new approval tab.
-secret-shuttle template run vercel-env-add --ref ss://local/prod/X --param environment=production --session <id>
+# 4. Run the template under the session — should NOT open a new approval tab.
+secret-shuttle template run vercel-env-add \
+  --ref ss://local/prod/X \
+  --param environment=production \
+  --param project_id=prj_test \
+  --session <id>
+# (Required params depend on the actual template's validateParams.)
 
-# 6. Verify uses incremented.
+# 5. Verify uses incremented to 1.
 secret-shuttle internal session list
 
-# 7. Try a NON-matching op under the same session — should open a normal approval tab (single-use fallback).
+# 6. Try a NON-matching op (different template_id) under the same session →
+#    pattern_no_match → falls back to single-use approval window.
+secret-shuttle template run github-actions-secret --ref ss://local/prod/X --session <id> --no-wait
+# → approval_required (per-op flow kicked in; uses still 1).
+
+# 7. Try a non-matching ref under the same session → same fallback.
 secret-shuttle template run vercel-env-add --ref ss://OTHER/prod/Y --session <id> --no-wait
-# → approval_required (per-op flow kicked in).
 
 # 8. Revoke and verify subsequent uses fail with session_not_found.
 secret-shuttle internal session revoke <id>
@@ -3220,14 +3292,16 @@ secret-shuttle template run vercel-env-add --ref ss://local/prod/X --session <id
 
 ```markdown
 ### Added — Plan 4a (pre-approved sessions)
-- **Pre-approved sessions.** `POST /v1/approvals/session` mints a session pattern that the human approves once. Subsequent operations carrying `session_id` (CLI: `--session <id>`) that match the pattern skip the per-op approval window. Mismatches fall back to the single-use flow transparently. Each minted grant is a discrete one-shot binding under the hood; the audit log shows N distinct operations with `session_id` set, not "1 session". CLI: `secret-shuttle internal session create | list | revoke`. Spec §5.7.
-- **Action-specific matchers.** The session pattern's `ref_glob` is applied to:
-  - binding.ref for template-run, inject-submit, reveal-capture
-  - binding.planned_ref for secrets-set
-  - every ref in binding.template_params.refs for run and inject_render (every ref must match)
-  Generic-glob matching against binding.ref would have unsafely auto-approved any production ref under run/inject_render/secrets-set sessions; this fix scopes correctly per action.
+- **Pre-approved sessions.** `POST /v1/approvals/session` mints a session pattern that the human approves once via a real HTML page at `/ui/session?id=&token=`. Subsequent operations carrying `session_id` (CLI: `--session <id>`) that match the pattern skip the per-op approval window. Mismatches fall back to the single-use flow transparently. Each minted grant is a discrete one-shot binding under the hood; the audit log shows N distinct operations with `session_id` set, not "1 session". CLI: `secret-shuttle internal session create | list | revoke`. Spec §5.7.
+- **SessionAction is scoped to four actions in v0.2.0:** `template-run`, `inject-submit`, `reveal-capture`, `secrets-set`. Destructive actions (`secrets-delete`, `secrets-rotate`) and deferred actions (`run`, `inject_render`) all canonicalize to null and refuse outright; their CLI flags pass through for surface uniformity but the daemon falls back to single-use approval.
+- **Action-specific matchers** that read the field where the binding actually stores its ref:
+  - `template-run` → `binding.ref` + `template_ids` (binding.destination_domain is null on templates; template_id is the security boundary)
+  - `inject-submit` → `binding.ref` + `destination_domain`
+  - `reveal-capture` → `binding.planned_ref` (NOT binding.ref — that's null for reveal-capture) + `destination_domain`
+  - `secrets-set` → `binding.planned_ref` + `binding.allowed_domains` ⊆ `pattern.destination_domains` (subset; agent can't widen) + `binding.allowed_actions` ⊆ `pattern.allowed_actions` (when set).
+- **Pattern validation** rejects empty `destination_domains` for inject-submit / reveal-capture / secrets-set and empty `template_ids` for template-run — the dangerous "match anything" shapes are refused at create time.
 - **TTL anchored at approval, not creation.** `expires_at` starts at `created_at + 2min` (pending window for the human to click). On approve, `expires_at` resets to `now + pattern.ttl_ms`. So a human who takes 90 seconds to read the pattern still gets the full requested session window.
-- **Granted sessions expire.** `SessionStore.get()` flips both pending AND granted states to `expired` past `expires_at`. Without this, an approved session would live until revoke or process restart.
+- **Granted sessions expire.** `SessionStore.get()` and `.list()` both flip pending AND granted states to `expired` past `expires_at`. Without this, an approved session would live until revoke or process restart.
 - **Destructive actions cannot be put in a session.** `secrets-delete` and `secrets-rotate` are NOT `SessionAction` values; passing them in a session pattern throws `bad_request`. Their CLI commands accept `--session <id>` for surface uniformity, but the daemon rejects with `session_pattern_no_match` and falls back to a fresh per-op approval.
 - **Session UI HTTP routes.** New `GET /ui/sessions/:id?token=<ui_token>` and `POST /ui/sessions/:id/approve|deny?token=<ui_token>` mirror the per-URL-token approval-UI pattern. Tests approve via these HTTP routes — never by mutating the store directly.
 
