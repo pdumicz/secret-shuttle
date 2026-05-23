@@ -1,5 +1,6 @@
 // src/daemon/services.ts
 import { ApprovalStore } from "./approvals/store.js";
+import { SessionStore } from "./approvals/session-store.js";
 import { LockedVaultState } from "../vault/locked-state.js";
 import { Vault } from "../vault/vault.js";
 import { DaemonBlindModeState } from "./services-blind.js";
@@ -71,6 +72,7 @@ export class DaemonServices {
   readonly handles = new BrowserHandleStore();
   readonly compareLimiter = new RateLimiter(5, 60_000);
   readonly unlockSessions = new UnlockSessions();
+  readonly sessionStore = new SessionStore();
   browser: BrowserOps | null = null;
   browserSessionId: string | null = null;
   /** Internal CDP client for the running Chrome process; null before browser start. */

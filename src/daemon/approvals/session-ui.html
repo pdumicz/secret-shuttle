@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Secret Shuttle — Session approval</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <style>
+    body {
+      font-family: -apple-system, system-ui, sans-serif;
+      max-width: 40rem;
+      margin: 2rem auto;
+      padding: 1rem;
+      background: #f7f7f8;
+      color: #1c1c1e;
+    }
+    main {
+      background: #fff;
+      border: 1px solid #d1d1d6;
+      border-radius: 10px;
+      padding: 1.5rem;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.4rem;
+    }
+    p.warn {
+      background: #fff8e1;
+      border-left: 4px solid #c99a00;
+      padding: 0.75rem 1rem;
+      border-radius: 4px;
+      margin: 1rem 0;
+    }
+    pre {
+      background: #f0f0f3;
+      border: 1px solid #d1d1d6;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      overflow-x: auto;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+    .actions {
+      display: flex;
+      gap: 0.75rem;
+      margin: 1.5rem 0 0.5rem;
+    }
+    button {
+      font-size: 1rem;
+      padding: 0.6rem 1.2rem;
+      border-radius: 6px;
+      border: 0;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    #approve {
+      background: #0a7a3b;
+      color: #fff;
+    }
+    #deny {
+      background: #c2331a;
+      color: #fff;
+    }
+    #status {
+      margin-top: 1rem;
+      font-style: italic;
+      color: #444;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Approve session</h1>
+    <p class="warn">
+      The agent is asking you to <strong>auto-approve up to N operations</strong>
+      matching the pattern below, for the next <strong id="ttl-mins">__TTL_MINUTES__ minutes</strong> after you click <em>Approve</em>.
+    </p>
+    <pre id="pattern-json">__PATTERN_JSON__</pre>
+    <p>If anything looks wrong, click <em>Deny</em>.</p>
+    <div class="actions">
+      <button id="approve">Approve for __TTL_MINUTES__ minutes</button>
+      <button id="deny">Deny</button>
+    </div>
+    <p id="status"></p>
+  </main>
+  <script>
+    (() => {
+      const sessionId = "__SESSION_ID__";
+      const uiToken = "__UI_TOKEN__";
+      const url = (verb) => `/ui/sessions/${encodeURIComponent(sessionId)}/${verb}?token=${encodeURIComponent(uiToken)}`;
+      const status = document.getElementById("status");
+      function done(verb, ok) {
+        document.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+        status.textContent = ok ? `Session ${verb}. You can close this tab.` : `Failed to ${verb}; refresh and try again.`;
+      }
+      document.getElementById("approve").addEventListener("click", async () => {
+        const r = await fetch(url("approve"), { method: "POST" });
+        done("approved", r.ok);
+      });
+      document.getElementById("deny").addEventListener("click", async () => {
+        const r = await fetch(url("deny"), { method: "POST" });
+        done("denied", r.ok);
+      });
+    })();
+  </script>
+</body>
+</html>
