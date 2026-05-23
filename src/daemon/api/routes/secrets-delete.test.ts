@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,7 +8,7 @@ import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
 
 async function withDaemon<T>(
-  fn: (ctx: { port: number; token: string; services: DaemonServices }) => Promise<T>,
+  fn: (ctx: { port: number; token: string; services: DaemonServices; home: string }) => Promise<T>,
 ): Promise<T> {
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-delete-"));
   const prev = process.env.SECRET_SHUTTLE_HOME;
@@ -21,7 +21,7 @@ async function withDaemon<T>(
   registerRoutes(server, services, () => port);
   ({ port } = await server.listen(0));
   try {
-    return await fn({ port, token: "t", services });
+    return await fn({ port, token: "t", services, home });
   } finally {
     await server.close();
     if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
@@ -116,6 +116,86 @@ test("POST /v1/secrets/delete production refs require approval", async () => {
     });
     assert.equal(r.status, 400);
     assert.equal((r.body as { error: { code: string } }).error.code, "approval_required");
+  });
+});
+
+test("POST /v1/secrets/delete: session pass-through — audit lacks session_id; uses stays at 0", async () => {
+  // secrets_delete is NOT a SessionAction (destructive ops are always human-
+  // gated). The route still accepts session_id in the body for CLI uniformity,
+  // threads it to requireApproval. The matcher canonicalizes secrets_delete
+  // to null and refuses; requireApproval falls back to the single-use flow.
+  // With wait_for_approval:false we surface approval_required. The audit
+  // entry MUST NOT carry session_id, and the session use-counter MUST stay at 0.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+
+    // Seed a production secret via a pre-issued generate approval.
+    const genGrant = ctx.services.approvals.create({
+      action: "generate",
+      ref: null,
+      planned_ref: "ss://local/prod/PASSTHROUGH",
+      environment: "production",
+      destination_domain: null,
+      target_id: null,
+      field_fingerprint: null,
+      template_id: null,
+      template_params: null,
+      allowed_domains: ["example.com"],
+      allowed_actions: ["capture_from_page", "inject_into_field", "compare_fingerprint", "use_as_stdin", "inject_submit"],
+    });
+    ctx.services.approvals.approve(genGrant.id);
+    const gen = await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "PASSTHROUGH",
+      environment: "production",
+      source: "local",
+      allowed_domains: ["example.com"],
+      approval_id: genGrant.id,
+      wait_for_approval: false,
+    });
+    assert.equal(gen.status, 200);
+
+    // Broadest legal pattern still won't match the secrets_delete binding —
+    // canonicalAction returns null. See session-matchers.ts.
+    const sg = ctx.services.sessionStore.create({
+      actions: ["template-run", "inject-submit", "reveal-capture", "secrets-set"],
+      ref_glob: "",
+      destination_domains: ["any.com"],
+      template_ids: ["any"],
+      allowed_actions: [
+        "capture_from_page",
+        "inject_into_field",
+        "compare_fingerprint",
+        "use_as_stdin",
+        "inject_submit",
+      ],
+      ttl_ms: 60_000,
+    });
+    ctx.services.sessionStore.approve(sg.id);
+
+    const r = await call(ctx, "POST", "/v1/secrets/delete", {
+      ref: "ss://local/prod/PASSTHROUGH",
+      session_id: sg.id,
+      wait_for_approval: false,
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.body as { error: { code: string } }).error.code, "approval_required");
+
+    // Audit assertion: no session_id field present in the secrets_delete entry.
+    const auditPath = path.join(ctx.home, "audit.jsonl");
+    const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
+    const entry = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .reverse()
+      .find((e) => e.action === "secrets_delete");
+    assert.ok(entry, "expected a secrets_delete audit entry");
+    assert.equal(
+      (entry as { session_id?: string }).session_id,
+      undefined,
+      "pass-through: audit must NOT carry session_id (matcher refused → single-use fallback)",
+    );
+
+    // Session was NOT minted — uses stays at 0.
+    assert.equal(ctx.services.sessionStore.get(sg.id)!.uses, 0);
   });
 });
 
