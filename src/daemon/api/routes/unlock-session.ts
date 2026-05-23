@@ -6,7 +6,6 @@ import { ShuttleError } from "../../../shared/errors.js";
 import { decryptEnvelope, encryptEnvelope, readEnvelope, writeEnvelope } from "../../../vault/envelope.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
-import { openUrl } from "../../approvals/open-url.js";
 import { writeDaemonAudit } from "../../audit.js";
 
 const HTML_PATH = path.resolve(
@@ -19,9 +18,11 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
     const envelope = await readEnvelope();
     const session = services.unlockSessions.create();
     // Open the UI window from the daemon process itself, so the CLI/agent never
-    // sees the per-session ui_token.
-    const url = `http://127.0.0.1:${daemonPortRef()}/ui/unlock?id=${session.id}&token=${session.ui_token}${envelope === null ? "&create=1" : ""}`;
-    openUrl(url);
+    // sees the per-session ui_token. Capture port once so the URL and the
+    // broker's port arg can't diverge under a port-shift race.
+    const port = daemonPortRef();
+    const url = `http://127.0.0.1:${port}/ui/unlock?id=${session.id}&token=${session.ui_token}${envelope === null ? "&create=1" : ""}`;
+    services.hubBroker.surface(url, port);
     return {
       session_id: session.id,
       requires_create: envelope === null,
