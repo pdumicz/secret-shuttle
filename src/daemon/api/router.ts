@@ -12,6 +12,7 @@ import { registerSecretsRotateRoute } from "./routes/secrets-rotate.js";
 import { registerInjectSubmit } from "./routes/inject-submit.js";
 import { registerRevealCapture } from "./routes/reveal-capture.js";
 import { registerApprovals } from "./routes/approvals.js";
+import { registerApprovalsSessionRoutes } from "./routes/approvals-session.js";
 import { registerBrowser } from "./routes/browser.js";
 import { registerTemplates } from "./routes/templates.js";
 import { registerUnlockSession } from "./routes/unlock-session.js";
@@ -37,6 +38,7 @@ export function registerRoutes(
   registerInjectSubmit(server, services, daemonPortRef);
   registerRevealCapture(server, services, daemonPortRef);
   registerApprovals(server, services);
+  registerApprovalsSessionRoutes(server, services, daemonPortRef);
   registerBrowser(server, services);
   registerTemplates(server, services, daemonPortRef);
   registerRunResolveRoute(server, services, daemonPortRef);
