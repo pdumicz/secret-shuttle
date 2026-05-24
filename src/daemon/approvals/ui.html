@@ -69,6 +69,7 @@
           secrets_delete: `Delete the secret ${esc(g.ref ?? "")} from the vault (audit trail preserved).`,
           secrets_rotate: `Rotate the secret ${esc(g.ref ?? "")}: generate a new value and mark the old as rotating.`,
           run: `Resolve secret refs and inject them as env vars for the spawned command (refs visible in this approval; values stay in the daemon; child stdout/stderr are masked before relay).`,
+          run_stdin: `Resolve secret ${esc(g.ref ?? "")} and pipe its value to the child's stdin (fd 0). The daemon writes the bytes directly; the CLI process never sees the plaintext. Child stdout/stderr are masked before relay. Use for tools that read secrets from stdin: gh auth login --with-token, docker login --password-stdin, kubectl create secret ... --from-file=-.`,
           inject_render: `Resolve secret refs and write the rendered template file (refs visible in this approval; values are written to disk at mode 0600 inside $HOME).`,
         }[g.action] || `${esc(g.action)}`;
         const scope = Array.isArray(g.allowed_domains) && g.allowed_domains.length

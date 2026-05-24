@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { DaemonServer } from "../server.js";
 import { ApprovalStore } from "./store.js";
 import { registerUiRoutes } from "./ui-server.js";
@@ -112,4 +115,23 @@ test("GET /ui/approve sets CSP with frame-ancestors 'self'", async () => {
     assert.match(csp, /default-src 'self'/);
     assert.match(csp, /object-src 'none'/);
   });
+});
+
+test("ui.html human[].run_stdin: explains stdin pipe + masking", async () => {
+  const html = await readFile(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "ui.html"),
+    "utf8",
+  );
+  // The human[] map entry for run_stdin must exist and reference:
+  // - "stdin" (what's happening)
+  // - "pipe" (the action verb)
+  // - "fd 0" or "directly" (clarify CLI doesn't see plaintext)
+  // - "masked" (defense-in-depth on child stdout/stderr)
+  assert.match(html, /run_stdin\s*:/);
+  const runStdinSection = html.match(/run_stdin\s*:\s*`([^`]+)`/);
+  assert.ok(runStdinSection, "run_stdin human[] entry must exist as a template literal");
+  const copy = runStdinSection![1]!;
+  assert.match(copy, /stdin/i, "must mention stdin");
+  assert.match(copy, /pipe/i, "must describe piping");
+  assert.match(copy, /mask/i, "must mention masking");
 });
