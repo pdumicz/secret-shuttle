@@ -93,6 +93,22 @@
 - `SECRET_SHUTTLE_NO_OPEN_URL=1` continues to silence all tab spawning (including the hub spawn). Tests rely on this; `npm test` sets it.
 - **Unlock-blocking semantic** documented: an unlock that never succeeds blocks the hub queue until the user closes the tab. Acceptable for v0.2.0 since unlock is rare and a stuck unlock is operationally visible. An explicit `hub_queue_full` error is deferred to v0.3.
 
+### Added — Plan 4c (stdin pass-through)
+- **`secret-shuttle run --stdin <ref>`.** Pipes a secret value to the spawned child's stdin (fd 0). The daemon resolves the ref and writes the bytes directly to the child; the CLI process never holds plaintext. Use for tools that consume secrets from stdin: `gh auth login --with-token`, `docker login --password-stdin`, `kubectl create secret generic --from-file=-`, etc. Composable with `--env-file` in one invocation (the cmd reads N refs as env vars AND 1 ref as stdin).
+- **`--env-file` is now optional.** Previously required, now optional when `--stdin` is supplied. At least one of the two flags must be present (or `missing_param`).
+- **New audit action `run_stdin`.** Per-ref audit entries for the stdin ref read `{ action: "run_stdin", ok, ref, environment, value_visible_to_agent: false }`. Env-var refs continue to audit as `action: "run"`. Forensically distinguishes which transport carried which secret.
+- **New `ApprovalBinding` action `run_stdin`.** Production stdin refs gate through `requireApproval` with this binding. The approval UI's `human[]` map gains a `run_stdin` entry explaining the stdin pipe + daemon-side write + masking.
+- **New error code `stdin_ref_in_env_file → USAGE` (exit 2).** Fail-fast 400 when the same ref appears in both `--stdin` and `--env-file`. Almost always a user mistake; distinct code so the CLI can surface a precise hint.
+- **Masking applies to stdin bytes too.** The resolved stdin value is added to the per-stream masker's known-secrets set, so any echo by the child on stdout/stderr is masked to `***` before relay.
+- **`SessionAction` unchanged.** `run_stdin` canonicalizes to `null` (same as `run`, `inject_render`). Production stdin refs always go through per-op approval via the hub broker. The CLI's existing `--session <id>` flag accepts a value for surface uniformity; the matcher refuses and falls back to single-use.
+- **Cancellation, hub integration, child stdout/stderr streaming, env-file parsing, masker, audit semantics — all inherited unchanged from Plan 3 and Plan 4b.** Plan 4c is purely additive.
+
+### Security
+- The stdin bytes never cross the CLI ↔ daemon HTTP boundary as part of the request body. They live only inside the daemon process (resolved from the vault) and are written directly to the child's fd 0 via Node's `child.stdin.write` API.
+- EPIPE on stdin write (child closed stdin before reading) is swallowed silently. The child runs to completion; the secret is simply unconsumed. No partial-write or retry semantics.
+- The `stdin_ref_in_env_file` error prevents the user from accidentally piping the same secret two ways — defense-in-depth against doubled exposure surface.
+- `value_visible_to_agent: false` is asserted in the route tests on every audit entry. The CLI process never reads the resolved bytes.
+
 ### Known limitations
 - `run` does NOT pass stdin through to the child in v0.2.0 — the child sees EOF on read (`stdio: ["ignore", "pipe", "pipe"]`). Spec §5.3 calls for stdin inheritance; Plan 4 ships the bidirectional chunked-HTTP-body wiring needed to make this work. The majority of `run` use cases (`npm start`, `vercel deploy`, `npx <tool>`) don't read interactive stdin.
 - `run` children inherit a hardened-PATH baseline (from `buildChildEnv`), not the user's shell PATH. Users who need a custom PATH can put it in the env file: `PATH=/custom/path/here`. Variable expansion (`$PATH`) is not supported.
