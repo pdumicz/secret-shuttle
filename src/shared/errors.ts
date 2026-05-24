@@ -3,12 +3,14 @@ import { lookupErrorCode } from "./error-codes.js";
 export type ShuttleErrorOpts = {
   exitCode?: number;
   hint?: string | null;
+  details?: unknown;
 };
 
 export class ShuttleError extends Error {
   readonly code: string;
   readonly exitCode: number;
   readonly hint: string | null;
+  readonly details: unknown | undefined;
 
   constructor(
     code: string,
@@ -24,18 +26,18 @@ export class ShuttleError extends Error {
     const registryHint = registry?.hint(message) ?? null;
 
     if (typeof optsOrExitCode === "number") {
-      // Backward-compat positional form: explicit exitCode wins; hint from registry.
+      // Backward-compat positional form: explicit exitCode wins; hint from registry; no details.
       this.exitCode = optsOrExitCode;
       this.hint = registryHint;
+      this.details = undefined;
     } else {
-      // If the caller explicitly supplied `hint` (including null), respect it.
-      // If they didn't supply the key at all, fall through to the registry default.
       this.exitCode = "exitCode" in optsOrExitCode && optsOrExitCode.exitCode !== undefined
         ? optsOrExitCode.exitCode
         : registryExitCode;
       this.hint = "hint" in optsOrExitCode
         ? (optsOrExitCode.hint ?? null)
         : registryHint;
+      this.details = optsOrExitCode.details;
     }
   }
 }
@@ -52,7 +54,7 @@ export function assertCondition(
 
 export function errorToJson(error: unknown): Record<string, unknown> {
   if (error instanceof ShuttleError) {
-    return {
+    const base: Record<string, unknown> = {
       ok: false,
       // Legacy nested block — preserved indefinitely for backward compat.
       error: { code: error.code, message: error.message },
@@ -62,6 +64,10 @@ export function errorToJson(error: unknown): Record<string, unknown> {
       hint: error.hint,
       exit_code: error.exitCode,
     };
+    if (error.details !== undefined) {
+      base.details = error.details;
+    }
+    return base;
   }
 
   if (error instanceof Error) {

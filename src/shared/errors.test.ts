@@ -101,3 +101,31 @@ test("ShuttleError: explicit null hint suppresses registry default", () => {
   const err = new ShuttleError("daemon_not_running", "Down", { hint: null });
   assert.equal(err.hint, null);
 });
+
+test("ShuttleError carries details when supplied", () => {
+  const e = new ShuttleError("approval_required", "msg", { details: { approvals: [{ approval_id: "a", expires_at: 1, action: "run" }] } });
+  assert.deepStrictEqual(e.details, { approvals: [{ approval_id: "a", expires_at: 1, action: "run" }] });
+});
+
+test("ShuttleError.details is undefined when not supplied", () => {
+  const e = new ShuttleError("bad_request", "msg");
+  assert.strictEqual(e.details, undefined);
+});
+
+test("errorToJson includes details when present", () => {
+  const e = new ShuttleError("approval_required", "msg", { details: { approvals: [{ approval_id: "x", expires_at: 9, action: "run" }] } });
+  const j = errorToJson(e);
+  assert.deepStrictEqual(j.details, { approvals: [{ approval_id: "x", expires_at: 9, action: "run" }] });
+});
+
+test("errorToJson omits details when undefined", () => {
+  const e = new ShuttleError("bad_request", "msg");
+  const j = errorToJson(e);
+  assert.ok(!("details" in j), "details key must NOT appear when undefined");
+});
+
+test("ShuttleError positional-form opts (number) ignores details", () => {
+  const e = new ShuttleError("bad_request", "msg", 2);
+  assert.strictEqual(e.exitCode, 2);
+  assert.strictEqual(e.details, undefined);
+});
