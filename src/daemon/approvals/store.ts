@@ -227,49 +227,6 @@ export class ApprovalStore {
     this.onEvent?.({ kind: "mismatch", binding: againstBinding, existingGrant: g });
   }
 
-  findOrMintFromSession(
-    sessionId: string,
-    binding: ApprovalBinding,
-    sessionStore: SessionStore,
-  ): ApprovalGrant {
-    const session = sessionStore.get(sessionId);
-    if (session === undefined || session.status === "revoked") {
-      throw new ShuttleError("session_not_found", "Unknown session id.");
-    }
-    if (session.status === "expired") {
-      throw new ShuttleError("session_expired", "Session has expired.");
-    }
-    if (session.status === "denied") {
-      throw new ShuttleError("session_unauthorized", "Session was denied.");
-    }
-    if (session.status !== "granted") {
-      throw new ShuttleError(
-        "session_unauthorized",
-        `Session is not granted (status: ${session.status}).`,
-      );
-    }
-    if (!matchesSessionPattern(binding, session)) {
-      throw new ShuttleError(
-        "session_pattern_no_match",
-        "Operation does not match the session pattern.",
-      );
-    }
-    sessionStore.incrementUses(sessionId); // can throw session_max_uses_exceeded or session_expired
-    this.sessionMintCounter += 1;
-    const now = this.now();
-    const grant: ApprovalGrant = {
-      ...binding,
-      id: `session:${sessionId}:${this.sessionMintCounter}`,
-      status: "used",
-      created_at: now,
-      expires_at: now,
-      ui_token: "",
-      session_id: sessionId,
-    };
-    this.onEvent?.({ kind: "used", grant });
-    return grant;
-  }
-
   private requirePending(id: string): ApprovalGrant {
     const g = this.get(id);
     if (g === undefined) throw new ShuttleError("approval_not_found", "Unknown approval id.");
