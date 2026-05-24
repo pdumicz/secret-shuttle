@@ -4,9 +4,10 @@ import { parseEnvFile } from "../run/env-file.js";
 import { streamingDaemonRequest, streamLineDelimitedJson } from "../../client/streaming-request.js";
 import { daemonErrorFromPayload } from "../../client/daemon-client.js";
 import { ShuttleError } from "../../shared/errors.js";
+import { addApprovalIdOption } from "./_approval-id-option.js";
 
 export function runCommand(): Command {
-  return new Command("run")
+  const cmd = new Command("run")
     .description(
       "Run a command with secrets resolved into its env. " +
         "The daemon spawns the child and masks resolved values in stdout/stderr before relaying.",
@@ -19,7 +20,6 @@ export function runCommand(): Command {
       "--stdin <ref>",
       "Secret ref to pipe to the child's stdin (fd 0). The CLI never sees the value; the daemon writes it directly. Composable with --env-file. Production refs are approval-gated.",
     )
-    .option("--approval-id <id>", "Pre-issued approval id.")
     .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
     .option("--no-wait", "Return approval_required without waiting.")
     .option(
@@ -27,8 +27,9 @@ export function runCommand(): Command {
       "Forward-compat no-op (this command always streams).",
       false,
     )
-    .argument("[command...]", "Command and args to run (after `--`).")
-    .action(async (command: string[], options: Record<string, unknown>) => {
+    .argument("[command...]", "Command and args to run (after `--`).");
+  addApprovalIdOption(cmd);
+  return cmd.action(async (command: string[], options: Record<string, unknown>) => {
       if (command.length === 0) {
         throw new ShuttleError("missing_param", "Specify the command to run after `--`.");
       }
@@ -66,7 +67,7 @@ export function runCommand(): Command {
         cwd: process.cwd(),
       };
       if (options.stdin !== undefined) body.stdin_ref = options.stdin;
-      if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      if (options.approvalId !== undefined) body.approval_ids = options.approvalId;
       if (options.session !== undefined) body.session_id = options.session;
       if (options.wait === false) body.wait_for_approval = false;
 
