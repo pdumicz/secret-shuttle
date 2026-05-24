@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
-import { asObject, reqString, optStringArray, optStringRecord } from "./validate.js";
+import { asObject, reqString, optStringArray, optStringRecord, optApprovalIds } from "./validate.js";
 
 test("asObject rejects non-objects with bad_request", () => {
   assert.throws(() => asObject(null), (e) => e instanceof ShuttleError && e.code === "bad_request");
@@ -63,4 +63,48 @@ test("optStringRecord returns undefined when missing and the record on happy pat
   assert.equal(optStringRecord({}, "p"), undefined);
   assert.deepEqual(optStringRecord({ p: {} }, "p"), {});
   assert.deepEqual(optStringRecord({ p: { a: "x", b: "y" } }, "p"), { a: "x", b: "y" });
+});
+
+test("optApprovalIds: empty body → undefined", () => {
+  assert.strictEqual(optApprovalIds({}), undefined);
+});
+
+test("optApprovalIds: singular approval_id → [approval_id]", () => {
+  assert.deepStrictEqual(optApprovalIds({ approval_id: "a" }), ["a"]);
+});
+
+test("optApprovalIds: approval_ids array → array", () => {
+  assert.deepStrictEqual(optApprovalIds({ approval_ids: ["a", "b"] }), ["a", "b"]);
+});
+
+test("optApprovalIds: both fields supplied → bad_request approval_id_and_approval_ids_supplied", () => {
+  assert.throws(
+    () => optApprovalIds({ approval_id: "a", approval_ids: ["b"] }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bad_request" && e.message.includes("approval_id_and_approval_ids_supplied"),
+  );
+});
+
+test("optApprovalIds: approval_ids with duplicates → bad_request duplicate_approval_id", () => {
+  assert.throws(
+    () => optApprovalIds({ approval_ids: ["a", "a"] }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bad_request" && e.message.includes("duplicate_approval_id"),
+  );
+});
+
+test("optApprovalIds: empty array → undefined", () => {
+  assert.strictEqual(optApprovalIds({ approval_ids: [] }), undefined);
+});
+
+test("optApprovalIds: approval_id wrong type → bad_request", () => {
+  assert.throws(
+    () => optApprovalIds({ approval_id: 42 }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bad_request",
+  );
+});
+
+test("optApprovalIds: approval_ids contains non-string → bad_request", () => {
+  assert.throws(
+    () => optApprovalIds({ approval_ids: ["a", 42] }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bad_request",
+  );
 });
