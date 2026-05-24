@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { requireApproval } from "../../approvals/require-approval.js";
+import { requireApprovals } from "../../approvals/require-approvals.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { resolveBinary } from "../../templates/resolve-binary.js";
 import { runTemplate } from "../../templates/run.js";
@@ -10,7 +10,7 @@ import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { ShuttleError } from "../../../shared/errors.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
-import { asObject, optBool, optString, optStringRecord, reqString } from "../validate.js";
+import { asObject, optApprovalIds, optBool, optString, optStringRecord, reqString } from "../validate.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 
 /**
@@ -43,7 +43,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
     const templateId = reqString(o, "template_id");
     const ref = reqString(o, "ref");
     const params = optStringRecord(o, "params") ?? {};
-    const approvalId = optString(o, "approval_id");
+    const approvalIds = optApprovalIds(o);
     const waitForApproval = optBool(o, "wait_for_approval");
     const sessionId = optString(o, "session_id");
 
@@ -121,16 +121,17 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
       // from the session and the audit emitted below will carry
       // grant.session_id; otherwise the call falls back to the single-use flow
       // and grant.session_id is undefined.
-      grant = await requireApproval({
+      const grants = await requireApprovals({
         store: services.approvals,
-        binding,
+        bindings: [binding],
         daemonPort: daemonPortRef(),
         sessionStore: services.sessionStore,
         openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
         ...(sessionId !== undefined ? { sessionId } : {}),
-        ...(approvalId !== undefined ? { approvalIdFromClient: approvalId } : {}),
+        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
         ...(waitForApproval === false ? { waitMs: 0 } : {}),
       });
+      grant = grants[0]!;
 
       // Now that the human has approved, surface any binary resolution failure.
       // The request fails closed: approval was already gated, nothing executed.
