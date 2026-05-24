@@ -1,5 +1,5 @@
 import { ShuttleError } from "../../../shared/errors.js";
-import { requireApproval } from "../../approvals/require-approval.js";
+import { requireApprovals } from "../../approvals/require-approvals.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { domainMatches } from "../../../policy/domain-policy.js";
@@ -7,7 +7,7 @@ import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { canonicalEnvironment, buildSecretRef } from "../../../shared/refs.js";
-import { asObject, optString, reqString } from "../validate.js";
+import { asObject, optApprovalIds, optString, reqString } from "../validate.js";
 import { blankAllPages, disableObservationDomains } from "../../chrome/internal-ops.js";
 import type { Baseline, BackendNodeRef } from "../../chrome/internal-ops.js";
 import { enforceDomain } from "./secrets.js";
@@ -27,7 +27,7 @@ interface RevealCaptureBody {
   allowed_domains?: string[];
   description?: string;
   force?: boolean;
-  approval_id?: string;
+  approval_ids?: string[];
   wait_for_approval?: boolean;
   session_id?: string;
 }
@@ -44,6 +44,7 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
     const containerHandleLabel = optString(o, "container_handle");
     const hideHandleLabel = optString(o, "hide_handle");
     const captureOpt = optString(o, "capture");
+    const approvalIds = optApprovalIds(o);
     const b = raw as RevealCaptureBody;
     let plannedRef: string | undefined;
     // Hoisted OUTSIDE the try so a post-mint failure (e.g. pre-action
@@ -181,17 +182,18 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
       // destination_domain), the call mints a used grant from the session and
       // the audits emitted below carry grant.session_id; otherwise the call
       // falls back to the single-use flow and grant.session_id is undefined.
-      grant = await requireApproval({
+      const grants = await requireApprovals({
         store: services.approvals,
-        binding,
+        bindings: [binding],
         daemonPort: daemonPortRef(),
         force: true,
         sessionStore: services.sessionStore,
         openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
         ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
-        ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
+        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
+      grant = grants[0]!
 
       // Daemon OWNS the blind window: black out the agent BEFORE reveal.
       services.blind.start(domain, "reveal_capture");
