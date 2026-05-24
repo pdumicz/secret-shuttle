@@ -11,9 +11,13 @@ export function runCommand(): Command {
       "Run a command with secrets resolved into its env. " +
         "The daemon spawns the child and masks resolved values in stdout/stderr before relaying.",
     )
-    .requiredOption(
+    .option(
       "--env-file <path>",
-      "Path to env file. Entries: KEY=VALUE; ss:// values are resolved by the daemon.",
+      "Path to env file. Entries: KEY=VALUE; ss:// values are resolved by the daemon. Optional; combine with --stdin or use --stdin alone.",
+    )
+    .option(
+      "--stdin <ref>",
+      "Secret ref to pipe to the child's stdin (fd 0). The CLI never sees the value; the daemon writes it directly. Composable with --env-file. Production refs are approval-gated.",
     )
     .option("--approval-id <id>", "Pre-issued approval id.")
     .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
@@ -28,19 +32,29 @@ export function runCommand(): Command {
       if (command.length === 0) {
         throw new ShuttleError("missing_param", "Specify the command to run after `--`.");
       }
-
-      let envFileContent: string;
-      try {
-        envFileContent = await readFile(options.envFile as string, "utf8");
-      } catch {
+      if (options.envFile === undefined && options.stdin === undefined) {
         throw new ShuttleError(
-          "env_file_not_found",
-          `env file not found: ${options.envFile as string}`,
+          "missing_param",
+          "At least one of --env-file or --stdin must be supplied.",
         );
       }
 
-      const { entries } = parseEnvFile(envFileContent);
-      const refs = entries.filter((e) => e.isRef).map((e) => e.value);
+      let entries: Array<{ key: string; value: string; isRef: boolean }> = [];
+      let refs: string[] = [];
+      if (options.envFile !== undefined) {
+        let envFileContent: string;
+        try {
+          envFileContent = await readFile(options.envFile as string, "utf8");
+        } catch {
+          throw new ShuttleError(
+            "env_file_not_found",
+            `env file not found: ${options.envFile as string}`,
+          );
+        }
+        const parsed = parseEnvFile(envFileContent);
+        entries = parsed.entries;
+        refs = entries.filter((e) => e.isRef).map((e) => e.value);
+      }
 
       const body: Record<string, unknown> = {
         refs,
@@ -51,6 +65,7 @@ export function runCommand(): Command {
         // Send the CLI's cwd so the child runs in the caller's project, not the daemon's.
         cwd: process.cwd(),
       };
+      if (options.stdin !== undefined) body.stdin_ref = options.stdin;
       if (options.approvalId !== undefined) body.approval_id = options.approvalId;
       if (options.session !== undefined) body.session_id = options.session;
       if (options.wait === false) body.wait_for_approval = false;
@@ -124,26 +139,32 @@ export function runCommand(): Command {
       "after",
       `
 Examples:
-  # .env file contains:
-  #   STRIPE_KEY=ss://stripe/prod/STRIPE_KEY
-  #   PORT=3000
+  # .env file contains refs:
   secret-shuttle run --env-file=.env -- npm start
+
+  # Pipe a secret to a CLI that reads from stdin:
+  secret-shuttle run --stdin=ss://local/prod/DOCKERHUB_TOKEN -- \\
+    docker login -u myuser --password-stdin docker.io
+
+  # Combine env-file + stdin (tool needs both):
+  secret-shuttle run --env-file=.env --stdin=ss://local/prod/GH_TOKEN -- \\
+    gh auth login --with-token
 
   # With pre-issued approval for production refs:
   secret-shuttle run --env-file=.env --approval-id <id> -- vercel deploy
 
 Notes:
-  - Refs are resolved by the daemon, never the CLI. The child process gets
-    them as plain env vars in its env block.
-  - Non-ref entries (e.g. PORT=3000) pass through verbatim.
-  - Resolved secret values are best-effort MASKED in the child's stdout/stderr
-    before they reach this CLI. A hostile child can still exfiltrate via
-    network; masking is defense-in-depth.
+  - Refs are resolved by the daemon, never the CLI. The child gets them
+    as env vars (--env-file) or as bytes on fd 0 (--stdin).
+  - Non-ref entries in --env-file pass through verbatim.
+  - Resolved secret values are best-effort MASKED in the child's
+    stdout/stderr before they reach this CLI. A hostile child can still
+    exfiltrate via network; masking is defense-in-depth.
   - Production refs require approval. Use --no-wait to receive an
     approval_id immediately.
   - The child runs in the CURRENT working directory (this CLI's cwd).
-  - Interactive stdin is NOT supported in v0.2.0; the child sees EOF on read.
-    Plan 4 adds stdin pass-through.
+  - --stdin and --env-file cannot reference the SAME ref. Combining
+    them returns stdin_ref_in_env_file (exit 2).
 `,
     );
 }
