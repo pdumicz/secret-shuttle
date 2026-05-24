@@ -353,6 +353,52 @@ test("requireApprovals: multi-binding session with max_uses=1 + 2 matches → th
   assert.strictEqual(sessionStore.get(session.id)!.uses, usesBefore);
 });
 
+test("requireApprovals: all-dev bindings + supplied IDs → silently absorbed (legacy behavior)", async () => {
+  const store = new ApprovalStore();
+  // Both bindings are dev (no approval needed).
+  const devB1 = devBinding();
+  const devB2: ApprovalBinding = { ...devBinding(), action: "run_stdin" };
+  // Supplied IDs from elsewhere — they don't match dev synth (no approval was ever created for these).
+  // Use a real ID format so the Step 0 resolve doesn't trip first.
+  const dummyGrant = store.create({ ...envBinding() });
+  store.approve(dummyGrant.id);
+
+  // dev bindings + supplied prod ID → should silently absorb (all-synth case).
+  const grants = await requireApprovals({
+    store, bindings: [devB1, devB2], daemonPort: 1234,
+    approvalIdsFromClient: [dummyGrant.id],
+  });
+  assert.strictEqual(grants.length, 2);
+  assert.strictEqual(grants[0]!.id, "no-approval-required");
+  assert.strictEqual(grants[1]!.id, "no-approval-required");
+  // The dummy grant is still granted (NOT consumed).
+  assert.strictEqual(store.get(dummyGrant.id)!.status, "granted");
+});
+
+test("requireApprovals: mixed dev+prod + bad ID → throws approval_mismatch AND fires audit event", async () => {
+  const events: string[] = [];
+  const store = new ApprovalStore({ onEvent: (e) => events.push(e.kind) });
+  const dev = devBinding();
+  const prod = envBinding();
+  // Supplied ID doesn't match either binding (created for stdinBinding).
+  const wrongGrant = store.create(stdinBinding());
+  store.approve(wrongGrant.id);
+  events.length = 0; // clear setup events
+
+  await assert.rejects(
+    requireApprovals({
+      store, bindings: [dev, prod], daemonPort: 1234, waitMs: 0,
+      approvalIdsFromClient: [wrongGrant.id],
+      openUrlImpl: () => {},
+    }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_mismatch",
+  );
+  // Mismatch event fired for audit.
+  assert.ok(events.includes("mismatch"), "audit event must fire for leftover-ID mismatch");
+  // The wrong grant is NOT consumed (still granted).
+  assert.strictEqual(store.get(wrongGrant.id)!.status, "granted");
+});
+
 test("requireApprovals: waiting flow sequential — all granted → returns both", async () => {
   const store = new ApprovalStore({
     now: () => 1000,

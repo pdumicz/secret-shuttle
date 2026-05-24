@@ -516,6 +516,48 @@ test("mintFromSession: at max_uses (race) → throws session_max_uses_exceeded",
   );
 });
 
+// ---------------------------------------------------------------------------
+// fireMismatch
+// ---------------------------------------------------------------------------
+
+test("fireMismatch: fires onEvent without consuming the grant", () => {
+  const events: string[] = [];
+  const store = new ApprovalStore({ onEvent: (e) => events.push(e.kind) });
+  const binding = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const otherBinding = makeBindingFor("inject_submit", { destination_domain: "b.com", allowed_domains: ["b.com"] });
+  const grant = store.create(binding);
+  store.approve(grant.id);
+
+  // Clear earlier events.
+  events.length = 0;
+
+  store.fireMismatch(grant.id, otherBinding);
+  assert.strictEqual(events.length, 1);
+  assert.strictEqual(events[0], "mismatch");
+  // Grant is still granted (not consumed).
+  assert.strictEqual(store.get(grant.id)!.status, "granted");
+});
+
+test("fireMismatch: unknown id is a no-op", () => {
+  const events: string[] = [];
+  const store = new ApprovalStore({ onEvent: (e) => events.push(e.kind) });
+  const binding = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  store.fireMismatch("does-not-exist", binding);
+  assert.strictEqual(events.length, 0);
+});
+
+test("fireMismatch: used/expired grant doesn't fire", () => {
+  const events: string[] = [];
+  const store = new ApprovalStore({ onEvent: (e) => events.push(e.kind) });
+  const binding = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const grant = store.create(binding);
+  store.approve(grant.id);
+  store.consume(grant.id, binding); // grant.status = "used"
+  events.length = 0;
+  store.fireMismatch(grant.id, binding);
+  assert.strictEqual(events.length, 0, "no event for used grant");
+});
+
 test("mintFromSession: session_expired race (TTL elapses between peek and commit) → throws session_expired", () => {
   let nowMs = 1000;
   const sessionStore = new SessionStore({ now: () => nowMs });

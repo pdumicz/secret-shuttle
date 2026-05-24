@@ -205,6 +205,28 @@ export class ApprovalStore {
     return grant;
   }
 
+  /**
+   * Pure side-effect: fire onEvent({kind: "mismatch"}) for a grant that
+   * doesn't match the expected binding, WITHOUT consuming or mutating any
+   * state. Used by requireApprovals's leftover-ID path so the audit log
+   * records the mismatch event without the risk that store.consume would
+   * accidentally succeed (and burn an approval) for a binding that happens
+   * to match.
+   *
+   * If the id is unknown or already consumed/expired/denied, this is a
+   * no-op (no event fired). The store still emits a meaningful "mismatch"
+   * event only when there's an actual grant to mismatch against.
+   */
+  fireMismatch(id: string, againstBinding: ApprovalBinding): void {
+    const g = this.grants.get(id);
+    if (g === undefined) return;
+    // Only fire mismatch for grants that are valid candidates (granted/pending).
+    // For used/denied/expired, the mismatch is moot — the grant wouldn't have
+    // been consumable anyway.
+    if (g.status !== "granted" && g.status !== "pending") return;
+    this.onEvent?.({ kind: "mismatch", binding: againstBinding, existingGrant: g });
+  }
+
   findOrMintFromSession(
     sessionId: string,
     binding: ApprovalBinding,
