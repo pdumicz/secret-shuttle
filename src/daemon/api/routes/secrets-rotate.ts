@@ -1,15 +1,16 @@
 import type { IncomingMessage } from "node:http";
 import { ShuttleError } from "../../../shared/errors.js";
-import { requireApproval } from "../../approvals/require-approval.js";
+import { requireApprovals } from "../../approvals/require-approvals.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
+import { asObject, optApprovalIds } from "../validate.js";
 
 interface RotateBody {
   ref?: string;
   kind?: string;
-  approval_id?: string;
+  approval_ids?: string[];
   wait_for_approval?: boolean;
   session_id?: string;
 }
@@ -29,6 +30,8 @@ export function registerSecretsRotateRoute(
 ): void {
   server.addRoute("POST", "/v1/secrets/rotate", async (_req, body) => {
     services.lock.requireKey();
+    const o = asObject(body);
+    const approvalIds = optApprovalIds(o);
     const b = (body ?? {}) as RotateBody;
     if (typeof b.ref !== "string" || b.ref.length === 0) {
       throw new ShuttleError("missing_param", "ref is required.");
@@ -60,16 +63,17 @@ export function registerSecretsRotateRoute(
           template_params: null,
           allowed_domains: oldRecord.allowed_domains,
         };
-        grant = await requireApproval({
+        const grants = await requireApprovals({
           store: services.approvals,
-          binding,
+          bindings: [binding],
           daemonPort: daemonPortRef(),
           sessionStore: services.sessionStore,
           openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
           ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
-          ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
+          ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
           ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
         });
+        grant = grants[0];
       }
 
       // Generate the new secret via the shared Vault.generate() helper. Same
