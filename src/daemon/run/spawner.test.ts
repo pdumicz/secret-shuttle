@@ -31,6 +31,40 @@ class CollectingWriter implements OutputWriter {
   }
 }
 
+/**
+ * Minimal writer used by the stdin-pass-through tests below. Exposes raw
+ * Buffer arrays (so tests can use `Buffer.concat(writer.stdout)`) and a
+ * plain `exit` number, matching the Task C plan's test shape.
+ */
+interface TestWriter extends OutputWriter {
+  stdout: Buffer[];
+  stderr: Buffer[];
+  exit: number | null;
+  errors: Array<{ code: string; message: string; exit_code?: number }>;
+}
+
+function makeTestWriter(): TestWriter {
+  const w: TestWriter = {
+    stdout: [],
+    stderr: [],
+    exit: null,
+    errors: [],
+    writeStdout(chunk: Buffer): void {
+      w.stdout.push(chunk);
+    },
+    writeStderr(chunk: Buffer): void {
+      w.stderr.push(chunk);
+    },
+    writeExit(code: number): void {
+      w.exit = code;
+    },
+    writeError(err: { code: string; message: string; exit_code?: number }): void {
+      w.errors.push(err);
+    },
+  };
+  return w;
+}
+
 test("spawnAndStream: captures stdout from `node -e \"console.log('hi')\"`", async () => {
   const w = new CollectingWriter();
   await spawnAndStream({
@@ -159,4 +193,64 @@ test("spawnAndStream: stdin is closed (Plan 3 scope) — child sees EOF on read"
   });
   assert.equal(w.exitCode, 0);
   assert.equal(w.stdout().trim(), "eof 0");
+});
+
+test("spawnAndStream: stdinBytes undefined → child sees EOF on stdin", async () => {
+  const writer = makeTestWriter();
+  // `cat` exits when stdin closes. With stdio[0]="ignore", child reads EOF immediately.
+  await spawnAndStream({
+    cmd: "cat",
+    args: [],
+    env: process.env,
+    cwd: process.cwd(),
+    outputWriter: writer,
+  });
+  assert.equal(writer.exit, 0);
+  assert.equal(Buffer.concat(writer.stdout).toString(), "");
+});
+
+test("spawnAndStream: stdinBytes provided → child reads exactly those bytes + EOF", async () => {
+  const writer = makeTestWriter();
+  const payload = Buffer.from("hello-stdin-12345");
+  await spawnAndStream({
+    cmd: "cat",
+    args: [],
+    env: process.env,
+    cwd: process.cwd(),
+    outputWriter: writer,
+    stdinBytes: payload,
+  });
+  assert.equal(writer.exit, 0);
+  assert.equal(Buffer.concat(writer.stdout).toString(), "hello-stdin-12345");
+});
+
+test("spawnAndStream: stdinBytes empty Buffer → child reads EOF immediately", async () => {
+  const writer = makeTestWriter();
+  await spawnAndStream({
+    cmd: "cat",
+    args: [],
+    env: process.env,
+    cwd: process.cwd(),
+    outputWriter: writer,
+    stdinBytes: Buffer.alloc(0),
+  });
+  assert.equal(writer.exit, 0);
+  assert.equal(Buffer.concat(writer.stdout).toString(), "");
+});
+
+test("spawnAndStream: child that ignores stdin and exits early still completes (EPIPE swallowed)", async () => {
+  const writer = makeTestWriter();
+  // `true` is a POSIX no-op that exits 0 immediately without reading stdin.
+  // If our stdin write produces an unhandled EPIPE, this test would fail
+  // with an uncaught exception.
+  const payload = Buffer.from("never-read");
+  await spawnAndStream({
+    cmd: "true",
+    args: [],
+    env: process.env,
+    cwd: process.cwd(),
+    outputWriter: writer,
+    stdinBytes: payload,
+  });
+  assert.equal(writer.exit, 0);
 });

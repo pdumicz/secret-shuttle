@@ -32,6 +32,17 @@ export interface SpawnInput {
    * closed by the CLI (Ctrl-C, socket disconnect).
    */
   signal?: AbortSignal;
+  /**
+   * Optional bytes to write to the child's stdin. When set:
+   *  - The child is spawned with stdio[0] = "pipe" (instead of "ignore").
+   *  - The daemon writes the bytes synchronously, then calls .end() to
+   *    flush + send EOF.
+   *  - EPIPE (child closed stdin before reading) is swallowed; the
+   *    promise still resolves on child exit. The route-layer audit
+   *    can be extended to record stdin_write_failed if needed.
+   * The CLI never sees these bytes; only the daemon process holds them.
+   */
+  stdinBytes?: Buffer;
 }
 
 const KILL_GRACE_MS = 5_000;
@@ -44,8 +55,9 @@ const KILL_GRACE_MS = 5_000;
  * Spawn errors (binary not found, permission denied) are surfaced via
  * outputWriter.writeError + writeExit(127). This function does NOT throw.
  *
- * stdin: closed (Plan 3 scope). The child sees EOF on read. Plan 4 adds the
- * stdin-pass-through wiring (chunked-request-body multiplexing).
+ * stdin: when `input.stdinBytes` is set, the daemon writes those bytes to the
+ * child's fd 0 and closes the stream; otherwise the child sees EOF immediately
+ * (fd 0 → /dev/null).
  *
  * Cancellation: if `signal` fires, SIGTERM is sent immediately; if the child
  * is still alive after KILL_GRACE_MS, SIGKILL.
@@ -59,7 +71,9 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
         shell: false,
         env: input.env,
         cwd: input.cwd,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: input.stdinBytes !== undefined
+          ? ["pipe", "pipe", "pipe"]
+          : ["ignore", "pipe", "pipe"],
       });
     } catch (e) {
       input.outputWriter.writeError({
@@ -90,6 +104,25 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
 
     c.stdout?.on("data", (chunk: Buffer) => input.outputWriter.writeStdout(chunk));
     c.stderr?.on("data", (chunk: Buffer) => input.outputWriter.writeStderr(chunk));
+
+    // If stdin bytes were supplied, write+end the stream. EPIPE is
+    // swallowed: a child that ignores stdin (or exits before reading)
+    // produces this signal, but we don't want to crash the spawn for
+    // it — the child still runs to completion.
+    if (input.stdinBytes !== undefined && c.stdin !== null) {
+      c.stdin.on("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EPIPE") return;
+        // Non-EPIPE errors should still bubble through writeError but
+        // not crash the daemon. Log via outputWriter so the route can
+        // surface as a structured stream event.
+        input.outputWriter.writeError({
+          code: "stdin_write_failed",
+          message: err.message,
+        });
+      });
+      c.stdin.write(input.stdinBytes);
+      c.stdin.end();
+    }
 
     c.on("error", (err: Error) => {
       if (exited) return;
