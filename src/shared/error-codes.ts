@@ -73,6 +73,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   invalid_profile: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   invalid_template_param: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   request_too_large: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  stdin_ref_in_env_file: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   mark_kind_unsupported: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   handle_invalid: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   handle_kind_mismatch: { exitCode: EXIT_CODE_USAGE, hint: () => null },

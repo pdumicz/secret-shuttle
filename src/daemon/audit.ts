@@ -5,7 +5,7 @@ export type DaemonAuditAction =
   | "init" | "unlock" | "lock"
   | "blind_start" | "blind_end" | "blind_auto_resume"
   | "generate" | "capture" | "inject" | "inject_submit" | "reveal_capture" | "compare"
-  | "secrets_delete" | "secrets_rotate" | "run" | "inject_render"
+  | "secrets_delete" | "secrets_rotate" | "run" | "run_stdin" | "inject_render"
   | "template_run" | "template_tmp_sweep"
   | "approval_created" | "approval_granted" | "approval_denied"
   | "approval_expired" | "approval_used" | "approval_mismatch";

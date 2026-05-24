@@ -138,10 +138,11 @@ test("registry total entry count (sanity check)", () => {
   // inject_output_write_failed) = 110 total.
   // Plan 4a Task C1 adds 7 more session-related codes = 117 total.
   // Plan 4a post-review P1 adds 1 more (session_revoked) = 118 total.
+  // Plan 4c Task A adds 1 more (stdin_ref_in_env_file) = 119 total.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 118, `expected 118 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 119, `expected 119 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -162,4 +163,16 @@ test("registry total entry count (sanity check)", () => {
   const revoked = lookupErrorCode("session_revoked");
   assert.ok(revoked, "session_revoked should be registered");
   assert.equal(revoked.exitCode, EXIT_CODE_PERMISSION);
+
+  // Spot-check Plan 4c Task A addition.
+  const stdinRef = lookupErrorCode("stdin_ref_in_env_file");
+  assert.ok(stdinRef, "stdin_ref_in_env_file should be registered");
+  assert.equal(stdinRef.exitCode, EXIT_CODE_USAGE);
+});
+
+test("error-codes: stdin_ref_in_env_file registered with USAGE exit code", () => {
+  const entry = lookupErrorCode("stdin_ref_in_env_file");
+  assert.ok(entry, "stdin_ref_in_env_file must be registered");
+  assert.equal(entry.exitCode, EXIT_CODE_USAGE);
+  assert.equal(entry.hint(""), null);
 });

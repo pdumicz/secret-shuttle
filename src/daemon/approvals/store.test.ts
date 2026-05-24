@@ -312,3 +312,19 @@ test("findOrMintFromSession: secrets_delete binding → session_pattern_no_match
     (err: Error & { code?: string }) => err.code === "session_pattern_no_match",
   );
 });
+
+test("ApprovalBinding accepts run_stdin action", () => {
+  // Compile-time assertion: this only matters if the type allows the value.
+  // If TS rejects the literal, the test fails at typecheck before runtime.
+  const binding: ApprovalBinding = {
+    action: "run_stdin",
+    ref: "ss://local/prod/X",
+    environment: "production",
+    destination_domain: null,
+    target_id: null,
+    field_fingerprint: null,
+    template_id: null,
+    template_params: null,
+  };
+  assert.equal(binding.action, "run_stdin");
+});
