@@ -1,6 +1,6 @@
 import type { ServerResponse } from "node:http";
 import { ShuttleError, errorToJson } from "../../../shared/errors.js";
-import { requireApproval } from "../../approvals/require-approval.js";
+import { requireApprovals } from "../../approvals/require-approvals.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { buildChildEnv } from "../../safe-env.js";
@@ -10,7 +10,7 @@ import { spawnAndStream, type OutputWriter } from "../../run/spawner.js";
 import { createMasker } from "../../run/masker.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { writeDaemonAudit } from "../../audit.js";
-import { asObject, optBool, optString, reqString } from "../validate.js";
+import { asObject, optApprovalIds, optBool, optString, reqString } from "../validate.js";
 import { parseSecretRef } from "../../../shared/refs.js";
 import path from "node:path";
 
@@ -20,7 +20,7 @@ interface RunResolveBody {
   command: string;
   args: string[];
   cwd: string;
-  approval_id?: string;
+  approval_ids?: string[];
   wait_for_approval?: boolean;
   session_id?: string;
   /**
@@ -118,7 +118,7 @@ export function registerRunResolveRoute(
         args = o["args"] as string[];
       }
 
-      const approvalId = optString(o, "approval_id");
+      const approvalIds = optApprovalIds(o);
       const waitForApproval = optBool(o, "wait_for_approval");
       const sessionId = optString(o, "session_id");
 
@@ -181,7 +181,7 @@ export function registerRunResolveRoute(
         command: reqString(o, "command"),
         args,
         cwd: cwdOpt ?? "",
-        ...(approvalId !== undefined ? { approval_id: approvalId } : {}),
+        ...(approvalIds !== undefined ? { approval_ids: approvalIds } : {}),
         ...(waitForApproval !== undefined ? { wait_for_approval: waitForApproval } : {}),
         ...(sessionId !== undefined ? { session_id: sessionId } : {}),
         ...(stdinRefCanonical !== undefined ? { stdin_ref: stdinRefCanonical } : {}),
@@ -282,29 +282,21 @@ export function registerRunResolveRoute(
       return;
     }
 
-    // Approval gating. Env refs (action="run") and the stdin ref (action="run_stdin")
-    // require SEPARATE approval bindings — different actions imply different UI
-    // copy, different session-matcher behavior, and different audit lines. We
-    // mint up to two approvals here, in this order:
-    //   1. Env refs (if any production env ref is present): one combined `run`
-    //      binding (matches today's behavior; preserves the existing approval
-    //      UI for env-only invocations).
-    //   2. Stdin ref (if it exists and is production): a separate `run_stdin`
-    //      binding. The UI copy this routes through is in hub-ui.html under
-    //      human[].run_stdin (Plan 4c Task B).
-    // Either step can fail; on failure we audit per-ref (with the appropriate
-    // action discriminator) and short-circuit.
+    // Approval gating via multi-binding requireApprovals (Plan 4d).
+    // Env refs and the stdin ref require SEPARATE approval bindings (different
+    // actions imply different UI copy, audit lines, session-matcher rules).
+    // requireApprovals handles atomicity: under --no-wait with mints needed for
+    // either binding, it mints both atomically and surfaces details.approvals
+    // with both IDs. The legacy single requireApproval pattern with envApprovalRan
+    // flag bookkeeping is no longer needed.
     const envProductionRefs = body.refs.filter(
       (r) => resolved.get(r)!.environment === "production",
     );
-    // Track whether the env approval block actually consumed `approval_id`.
-    // Plan 4c P1 fix: stdin-only invocations skip the env approval entirely,
-    // so without this flag the stdin approval would never receive approval_id
-    // and the --no-wait → approve → retry --approval-id cycle would mint a
-    // fresh approval each retry and never converge.
-    let envApprovalRan = false;
+
+    const bindings: ApprovalBinding[] = [];
+
     if (envProductionRefs.length > 0) {
-      const binding: ApprovalBinding = {
+      const envBinding: ApprovalBinding = {
         action: "run",
         ref: null,
         environment: "production",
@@ -312,7 +304,6 @@ export function registerRunResolveRoute(
         target_id: null,
         field_fingerprint: null,
         template_id: null,
-        // Stash the ref list + command in template_params for UI display.
         template_params: {
           command: body.command,
           args: JSON.stringify(body.args),
@@ -320,33 +311,9 @@ export function registerRunResolveRoute(
         },
         allowed_domains: [],
       };
-      try {
-        grant = await requireApproval({
-          store: services.approvals,
-          binding,
-          daemonPort: daemonPortRef(),
-          sessionStore: services.sessionStore,
-          openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
-          ...(body.session_id !== undefined ? { sessionId: body.session_id } : {}),
-          ...(body.approval_id !== undefined ? { approvalIdFromClient: body.approval_id } : {}),
-          ...(body.wait_for_approval === false ? { waitMs: 0 } : {}),
-        });
-        // Set AFTER await — flag must reflect "env approval actually
-        // consumed approval_id", not "env approval was attempted". On
-        // approval failure (throw) the flag stays false, so the stdin
-        // approval gets approval_id only if env neither succeeded nor was
-        // attempted.
-        envApprovalRan = true;
-      } catch (e) {
-        // Approval failed (denied, expired, required-but-no-wait). Audit per ref.
-        // grant?.session_id is undefined here unless the session fast-path
-        // succeeded — for the run binding, the matcher always refuses (run is
-        // NOT a SessionAction), so the spread evaluates to nothing.
-        await auditPerRef(allRefs, body.stdin_ref, resolved, false, e instanceof ShuttleError ? e.code : "unexpected_error", grant?.session_id);
-        writeJsonError(res, 400, e);
-        return;
-      }
+      bindings.push(envBinding);
     }
+
     if (body.stdin_ref !== undefined && resolved.get(body.stdin_ref)!.environment === "production") {
       const stdinBinding: ApprovalBinding = {
         action: "run_stdin",
@@ -363,27 +330,24 @@ export function registerRunResolveRoute(
         },
         allowed_domains: [],
       };
+      bindings.push(stdinBinding);
+    }
+
+    if (bindings.length > 0) {
       try {
-        const stdinGrant = await requireApproval({
+        const grants = await requireApprovals({
           store: services.approvals,
-          binding: stdinBinding,
+          bindings,
           daemonPort: daemonPortRef(),
           sessionStore: services.sessionStore,
           openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
           ...(body.session_id !== undefined ? { sessionId: body.session_id } : {}),
-          // approval_id routes to whichever approval is the FIRST to need
-          // one. For env+stdin combined, the env approval consumes it. For
-          // stdin-only (no production env refs), the env block never runs
-          // so stdin consumes it here — without this, the client's retry
-          // loop would mint a fresh approval every iteration.
-          ...(body.approval_id !== undefined && !envApprovalRan
-            ? { approvalIdFromClient: body.approval_id }
-            : {}),
+          ...(body.approval_ids !== undefined ? { approvalIdsFromClient: body.approval_ids } : {}),
           ...(body.wait_for_approval === false ? { waitMs: 0 } : {}),
         });
-        // Preserve any session_id from the first grant; if there was no first
-        // grant (stdin-only), pick up the stdin one.
-        if (grant === undefined) grant = stdinGrant;
+        // session_id propagation: any grant with session_id wins; default to first.
+        // ApprovalGrant.session_id is `string | undefined` (store.ts:56).
+        grant = grants.find((g) => g.session_id !== undefined) ?? grants[0];
       } catch (e) {
         await auditPerRef(allRefs, body.stdin_ref, resolved, false, e instanceof ShuttleError ? e.code : "unexpected_error", grant?.session_id);
         writeJsonError(res, 400, e);
