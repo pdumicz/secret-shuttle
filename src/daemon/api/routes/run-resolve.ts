@@ -295,6 +295,9 @@ export function registerRunResolveRoute(
 
     const bindings: ApprovalBinding[] = [];
 
+    // Env binding first, stdin binding second — deterministic order. requireApprovals
+    // preserves this order in the returned grants array and in details.approvals,
+    // which downstream code (session_id propagation, audit logs) relies on.
     if (envProductionRefs.length > 0) {
       const envBinding: ApprovalBinding = {
         action: "run",
@@ -304,6 +307,7 @@ export function registerRunResolveRoute(
         target_id: null,
         field_fingerprint: null,
         template_id: null,
+        // template_params carries display data for the hub UI (no template_id needed).
         template_params: {
           command: body.command,
           args: JSON.stringify(body.args),
@@ -323,6 +327,7 @@ export function registerRunResolveRoute(
         target_id: null,
         field_fingerprint: null,
         template_id: null,
+        // template_params carries display data for the hub UI (no template_id needed).
         template_params: {
           command: body.command,
           args: JSON.stringify(body.args),
@@ -346,7 +351,11 @@ export function registerRunResolveRoute(
           ...(body.wait_for_approval === false ? { waitMs: 0 } : {}),
         });
         // session_id propagation: any grant with session_id wins; default to first.
-        // ApprovalGrant.session_id is `string | undefined` (store.ts:56).
+        // In practice, run and run_stdin are NOT in CANONICAL_MAP (session.ts), so
+        // canMatchSession always returns false for both bindings and neither grant
+        // ever has a session_id today. The find() is forward-compat for when/if
+        // run-resolve-eligible actions gain session support. ApprovalGrant.session_id
+        // is `string | undefined` (store.ts:56).
         grant = grants.find((g) => g.session_id !== undefined) ?? grants[0];
       } catch (e) {
         await auditPerRef(allRefs, body.stdin_ref, resolved, false, e instanceof ShuttleError ? e.code : "unexpected_error", grant?.session_id);
