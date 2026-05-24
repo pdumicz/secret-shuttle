@@ -169,3 +169,44 @@ test("ShuttleError details round-trip via errorToJson + JSON wire + daemonErrorF
   assert.strictEqual(reconstructed.code, "approval_required");
   assert.strictEqual(reconstructed.message, "msg");
 });
+
+test("daemonErrorFromPayload: details survives a real HTTP round trip", async () => {
+  // Inline the withEphemeralDaemon pattern with a custom route that throws
+  // ShuttleError with details, so we exercise the full daemonRequest →
+  // fetch → response body decode → daemonErrorFromPayload path.
+  const home = await mkdtemp(path.join(os.tmpdir(), "ss-client-"));
+  const prev = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  const server = new DaemonServer({ token: "tok" });
+  server.addRoute("POST", "/v1/test/details-roundtrip", () => {
+    throw new ShuttleError("approval_required", "msg", {
+      details: { approvals: [{ approval_id: "abc", expires_at: 999, action: "run" }] },
+    });
+  });
+  const { port } = await server.listen(0);
+  await writeSocketFile({ port, token: "tok", pid: process.pid });
+  try {
+    await daemonRequest("POST", "/v1/test/details-roundtrip");
+    assert.fail("daemonRequest should have thrown ShuttleError");
+  } catch (e) {
+    assert.ok(e instanceof ShuttleError);
+    assert.strictEqual(e.code, "approval_required");
+    assert.deepStrictEqual(e.details, { approvals: [{ approval_id: "abc", expires_at: 999, action: "run" }] });
+  } finally {
+    await server.close();
+    if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+    else process.env.SECRET_SHUTTLE_HOME = prev;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("daemonErrorFromPayload preserves array-shaped details", () => {
+  const payload = {
+    ok: false,
+    error_code: "x",
+    message: "m",
+    details: [1, 2, "three"],
+  };
+  const e = daemonErrorFromPayload(payload);
+  assert.deepStrictEqual(e.details, [1, 2, "three"]);
+});

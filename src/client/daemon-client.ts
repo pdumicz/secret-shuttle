@@ -20,6 +20,12 @@ async function endpoint(): Promise<{ url: string; token: string }> {
  *  - Both (the canonical new contract)
  * If both are present, the nested block wins for code/message (it's the
  * source of truth in the documented contract).
+ *
+ * `details` handling: read via `"details" in p` (presence check), not value
+ * check, so `null` from a rogue sender is preserved as-is on the reconstructed
+ * ShuttleError. The canonical B1 serializer (`errorToJson`) never emits null —
+ * it omits the key for both `undefined` and `null` — but this client stays
+ * tolerant of other shapes.
  */
 export function daemonErrorFromPayload(payload: unknown): ShuttleError {
   const p = (payload ?? {}) as Record<string, unknown>;
