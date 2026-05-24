@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
-import { ApprovalStore, type ApprovalBinding } from "./store.js";
+import { ApprovalStore, approvalBindingsMatch, type ApprovalBinding } from "./store.js";
 import { SessionStore } from "./session-store.js";
 
 const sample = {
@@ -327,4 +327,41 @@ test("ApprovalBinding accepts run_stdin action", () => {
     template_params: null,
   };
   assert.equal(binding.action, "run_stdin");
+});
+
+// ---------------------------------------------------------------------------
+// approvalBindingsMatch (public matcher)
+// ---------------------------------------------------------------------------
+
+test("approvalBindingsMatch: identical bindings match", () => {
+  const b: ApprovalBinding = {
+    action: "run",
+    ref: null,
+    environment: "production",
+    destination_domain: null,
+    target_id: null,
+    field_fingerprint: null,
+    template_id: null,
+    template_params: { command: "npm", args: "[]", refs: "ss://local/prod/A" },
+    allowed_domains: [],
+  };
+  assert.strictEqual(approvalBindingsMatch(b, { ...b }), true);
+});
+
+test("approvalBindingsMatch: differing action → mismatch", () => {
+  const a: ApprovalBinding = { action: "run", ref: null, environment: "production", destination_domain: null, target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_domains: [] };
+  const b = { ...a, action: "run_stdin" as const };
+  assert.strictEqual(approvalBindingsMatch(a, b), false);
+});
+
+test("approvalBindingsMatch: differing template_params → mismatch", () => {
+  const a: ApprovalBinding = { action: "run", ref: null, environment: "production", destination_domain: null, target_id: null, field_fingerprint: null, template_id: null, template_params: { x: "1" }, allowed_domains: [] };
+  const b: ApprovalBinding = { ...a, template_params: { x: "2" } };
+  assert.strictEqual(approvalBindingsMatch(a, b), false);
+});
+
+test("approvalBindingsMatch: allowed_domains order-insensitive", () => {
+  const a: ApprovalBinding = { action: "run", ref: null, environment: "production", destination_domain: null, target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_domains: ["a.com", "b.com"] };
+  const b: ApprovalBinding = { ...a, allowed_domains: ["b.com", "a.com"] };
+  assert.strictEqual(approvalBindingsMatch(a, b), true);
 });

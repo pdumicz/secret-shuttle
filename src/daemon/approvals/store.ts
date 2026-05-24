@@ -118,7 +118,7 @@ export class ApprovalStore {
       g.status = "expired";
       throw new ShuttleError("approval_expired", "Approval expired.");
     }
-    if (!bindingsMatch(g, binding)) {
+    if (!approvalBindingsMatch(g, binding)) {
       this.onEvent?.({ kind: "mismatch", binding, existingGrant: g });
       throw new ShuttleError("approval_mismatch", "Approval does not match the requested action.");
     }
@@ -178,7 +178,7 @@ export class ApprovalStore {
   }
 }
 
-function bindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
+export function approvalBindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
   return (
     a.action === b.action &&
     a.ref === b.ref &&
