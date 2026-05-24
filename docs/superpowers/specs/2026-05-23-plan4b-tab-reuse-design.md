@@ -37,7 +37,7 @@ A persistent **hub page** (one tab) acts as a thin shell that:
 
 A daemon-side **HubBroker** owns the FIFO queue of pending operation URLs. The broker spawns the hub tab on first surface (or on respawn when the hub has closed and a new operation arrives), drains queued URLs to the attached subscriber, and advances the queue on done signals.
 
-The existing per-URL `ui_token` on each operation page remains the operational security boundary. The new `hub_token` authenticates only the hub shell; it does not grant access to any operation.
+The per-URL `ui_token` on each operation page is the action-level capability — gating approve/deny and the unlock POST. The new `hub_token` is a daemon-lifetime broker-subscription capability — it authenticates `/ui/hub` and `/ui/hub/stream` and grants the bearer the ability to OBSERVE every navigate event the broker emits (each event carrying an operation URL with its own `ui_token`). The two tokens compose: without `hub_token` an attacker cannot subscribe to the broker; without `ui_token` an attacker cannot act on a specific operation. **A leaked `hub_token` is roughly equivalent to a leaked daemon bearer in scope** — the attacker can observe every operation as it surfaces. Daemon binds 127.0.0.1, so the threat model is hostile local processes (which can already enumerate ports anyway).
 
 ---
 
@@ -245,7 +245,7 @@ function onMessage(ev) {
   if (data.type === "displaced") {
     terminal = true;
     es.close();
-    showBanner("Another tab is now driving Secret Shuttle. Reload here to take back over.", "displaced");
+    showBanner("Another tab is now driving Secret Shuttle. Click below to take over here.", "displaced");
     return;
   }
   if (data.type === "navigate") {
@@ -271,7 +271,7 @@ function connect() {
       setTimeout(connect, 1000);
     } else {
       terminal = true;
-      showBanner("Disconnected from Secret Shuttle. Reload to reconnect.", "disconnected");
+      showBanner("Disconnected from Secret Shuttle. Click below to reconnect.", "disconnected");
     }
   });
 }
@@ -320,10 +320,11 @@ async function postDone(seq) {
     // sees currentSubscriber !== null and new surfaces enqueue behind a
     // permanently-stuck activeUrl. Closing the SSE triggers the daemon's
     // detach callback → currentSubscriber=null → next surface() respawns.
-    // activeUrl stays set so reload/reattach resends the operation.
+    // activeUrl stays set so the next attach (triggered by takeOver()
+    // or a fresh surface() respawn) resends the operation.
     terminal = true;
     es?.close();
-    showBanner("Failed to advance Secret Shuttle. Reload to continue.", "disconnected");
+    showBanner("Failed to advance Secret Shuttle. Click below to reconnect.", "disconnected");
   } finally {
     doneInFlight.delete(seq);
     if (succeeded) lastCompletedSeq = Math.max(lastCompletedSeq, seq);

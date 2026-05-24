@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { JSDOM, ResourceLoader } from "jsdom";
+import { JSDOM } from "jsdom";
 
 const HUB_HTML_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -26,10 +26,16 @@ async function loadHub(): Promise<{
   emitError: () => void;
   fetches: Array<{ url: string; init: RequestInit | undefined }>;
   fetchResponder: (handler: (url: string, init?: RequestInit) => Response | Promise<Response>) => void;
+  /** Total EventSource constructions since loadHub() returned. Proves that
+   *  takeOver() actually re-issued a new EventSource (Plan 4b post-ship P3
+   *  fix: visible-DOM-state assertions alone don't catch a regression
+   *  where the click handler ran but connect() didn't). */
+  esConstructions: () => number;
 }> {
   const html = await readFile(HUB_HTML_PATH, "utf8");
 
   let latestEs: { listeners: Record<string, Array<(e: unknown) => void>>; closed: boolean } | null = null;
+  let esConstructionsCount = 0;
   const fetches: Array<{ url: string; init: RequestInit | undefined }> = [];
   let responder: (url: string, init?: RequestInit) => Response | Promise<Response> = () =>
     new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
@@ -41,6 +47,7 @@ async function loadHub(): Promise<{
     constructor(url: string) {
       this.url = url;
       latestEs = this;
+      esConstructionsCount += 1;
     }
     addEventListener(name: string, fn: (e: unknown) => void): void {
       (this.listeners[name] = this.listeners[name] ?? []).push(fn);
@@ -52,7 +59,12 @@ async function loadHub(): Promise<{
     url: "http://127.0.0.1:5555/ui/hub?token=hubT",
     runScripts: "dangerously",
     pretendToBeVisual: true,
-    resources: new ResourceLoader({ strictSSL: false }),
+    // No `resources` option: jsdom defaults to NOT fetching external
+    // resources. The hub HTML is self-contained (no external assets),
+    // so we don't want jsdom to try fetching iframe URLs or favicons —
+    // doing so produced noisy ECONNREFUSED logs during otherwise
+    // passing tests (Plan 4b post-ship P3 cleanup).
+    //
     // CRITICAL: install globals BEFORE the parser touches the inline
     // <script>. The hub script calls connect() at the bottom, which
     // does `new EventSource(...)` — without these mocks in place at
@@ -83,6 +95,7 @@ async function loadHub(): Promise<{
     emitError: () => driveEvent("error", {}),
     fetches,
     fetchResponder: (h) => { responder = h; },
+    esConstructions: () => esConstructionsCount,
   };
 }
 
@@ -162,15 +175,22 @@ test("hub-ui dom: clicking the displaced-banner button (takeOver) re-issues the 
   const banner = ctx.dom.window.document.getElementById("banner")!;
   const btn = banner.querySelector("button");
   assert.ok(btn, "displaced banner must include a recovery button");
-  // Before click: only the initial EventSource was constructed.
-  // Track via window.__esConstructions if the test harness exposes it,
-  // or just verify the click triggers a new SSE connection by observing
-  // a second fetch to /ui/hub/stream on the next message attempt.
-  // Simplest: after click, the banner clears and statusEl flips to
-  // "reconnecting" — visible state change proves the click ran.
+
+  // Snapshot the EventSource construction count BEFORE clicking. The
+  // initial connect() ran during page load; we want to prove the click
+  // triggers a SECOND construction — not just visible DOM state changes.
+  // A regression where the click handler ran but connect() didn't would
+  // otherwise pass on visible-state assertions alone.
+  const constructionsBefore = ctx.esConstructions();
   btn!.dispatchEvent(new ctx.dom.window.MouseEvent("click"));
   // Yield once for connect()'s synchronous EventSource construction.
   await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(
+    ctx.esConstructions(),
+    constructionsBefore + 1,
+    "takeOver() must construct a new EventSource (not just update DOM)",
+  );
   const statusEl = ctx.dom.window.document.getElementById("status")!;
   assert.match(statusEl.className, /reconnecting/);
   assert.equal(banner.innerHTML, "", "banner must clear after takeOver()");
