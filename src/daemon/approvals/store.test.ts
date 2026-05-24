@@ -470,3 +470,48 @@ test("canMatchSession: pending (not yet approved) → throws session_not_pending
     (e: unknown) => e instanceof ShuttleError && e.code === "session_not_pending",
   );
 });
+
+// ---------------------------------------------------------------------------
+// mintFromSession
+// ---------------------------------------------------------------------------
+
+test("mintFromSession: granted+matching session → bumps uses, returns synthetic grant with session_id", () => {
+  const sessionStore = new SessionStore({ now: () => 1000 });
+  const session = sessionStore.create({
+    ref_glob: "",
+    actions: ["inject-submit"],
+    destination_domains: ["example.com"],
+    max_uses: 5,
+    ttl_ms: 60_000,
+  });
+  sessionStore.approve(session.id);
+  const approvals = new ApprovalStore({ now: () => 1000 });
+  const binding = makeBindingFor("inject_submit", { destination_domain: "example.com", allowed_domains: ["example.com"] });
+
+  const usesBefore = sessionStore.get(session.id)!.uses;
+  const grant = approvals.mintFromSession(session.id, binding, sessionStore);
+
+  assert.strictEqual(sessionStore.get(session.id)!.uses, usesBefore + 1);
+  assert.strictEqual(grant.session_id, session.id);
+  assert.strictEqual(grant.status, "used");
+  assert.strictEqual(grant.action, "inject_submit");
+});
+
+test("mintFromSession: at max_uses (race) → throws session_max_uses_exceeded", () => {
+  const sessionStore = new SessionStore({ now: () => 1000 });
+  const session = sessionStore.create({
+    ref_glob: "",
+    actions: ["inject-submit"],
+    destination_domains: ["example.com"],
+    max_uses: 1,
+    ttl_ms: 60_000,
+  });
+  sessionStore.approve(session.id);
+  sessionStore.incrementUses(session.id); // pretend concurrent request burned it
+  const approvals = new ApprovalStore({ now: () => 1000 });
+  const binding = makeBindingFor("inject_submit", { destination_domain: "example.com", allowed_domains: ["example.com"] });
+  assert.throws(
+    () => approvals.mintFromSession(session.id, binding, sessionStore),
+    (e: unknown) => e instanceof ShuttleError && e.code === "session_max_uses_exceeded",
+  );
+});

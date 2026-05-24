@@ -168,6 +168,38 @@ export class ApprovalStore {
     return matchesSessionPattern(binding, session);
   }
 
+  /**
+   * Side-effect half of the session fast-path. ASSUMES canMatchSession
+   * returned true for the same (sessionId, binding) — but re-checks
+   * incrementUses-specific failures in case of a race (concurrent request
+   * crossed the use cap between Phase 1 and Phase 2).
+   *
+   * Bumps sessionStore.incrementUses, mints a synthetic ApprovalGrant
+   * (status: "used", session_id: <sessionId>) — same shape today's
+   * findOrMintFromSession returns. Use only when committing a binding
+   * via the session fast-path.
+   */
+  mintFromSession(
+    sessionId: string,
+    binding: ApprovalBinding,
+    sessionStore: SessionStore,
+  ): ApprovalGrant {
+    sessionStore.incrementUses(sessionId); // can throw session_max_uses_exceeded or session_expired in races
+    this.sessionMintCounter += 1;
+    const now = this.now();
+    const grant: ApprovalGrant = {
+      ...binding,
+      id: `session:${sessionId}:${this.sessionMintCounter}`,
+      status: "used",
+      created_at: now,
+      expires_at: now,
+      ui_token: "",
+      session_id: sessionId,
+    };
+    this.onEvent?.({ kind: "used", grant });
+    return grant;
+  }
+
   findOrMintFromSession(
     sessionId: string,
     binding: ApprovalBinding,
