@@ -1,5 +1,5 @@
 import { ShuttleError } from "../../../shared/errors.js";
-import { requireApproval } from "../../approvals/require-approval.js";
+import { requireApprovals } from "../../approvals/require-approvals.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { domainMatches } from "../../../policy/domain-policy.js";
@@ -7,7 +7,7 @@ import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
-import { asObject, reqString } from "../validate.js";
+import { asObject, optApprovalIds, reqString } from "../validate.js";
 import { blankAllPages, disableObservationDomains } from "../../chrome/internal-ops.js";
 import { enforceDomain } from "./secrets.js";
 import { autoResumeBlind } from "../../blind-auto-resume.js";
@@ -19,7 +19,7 @@ interface InjectSubmitBody {
   submit_handle: string;
   success_text: string;
   success_timeout_ms?: number;
-  approval_id?: string;
+  approval_ids?: string[];
   wait_for_approval?: boolean;
   session_id?: string;
 }
@@ -35,6 +35,7 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
     const fieldHandleLabel = reqString(o, "field_handle");
     const submitHandleLabel = reqString(o, "submit_handle");
     const successText = reqString(o, "success_text");
+    const approvalIds = optApprovalIds(o);
     const b = raw as InjectSubmitBody;
     let blindStarted = false;
     // Hoisted OUTSIDE the try so a post-mint failure (e.g. pre-write
@@ -120,17 +121,18 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
       // destination_domain), the call mints a used grant from the session and
       // the audits emitted below carry grant.session_id; otherwise the call
       // falls back to the single-use flow and grant.session_id is undefined.
-      grant = await requireApproval({
+      const grants = await requireApprovals({
         store: services.approvals,
-        binding,
+        bindings: [binding],
         daemonPort: daemonPortRef(),
         force: true,
         sessionStore: services.sessionStore,
         openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
         ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
-        ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
+        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
+      grant = grants[0]!
 
       // Daemon OWNS the blind window: black out the agent BEFORE the value can
       // ever reach the page (mirrors /v1/secrets/inject).
