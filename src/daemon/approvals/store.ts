@@ -178,6 +178,15 @@ export class ApprovalStore {
   }
 }
 
+/**
+ * Returns true when two ApprovalBindings represent the same approval intent.
+ *
+ * Comparison notes:
+ * - `template_params` keys are compared in sorted order (insertion order ignored).
+ * - `allowed_domains` and `allowed_actions` are compared as order-insensitive sets.
+ * - Null/undefined and empty arrays are equivalent for the set-typed fields.
+ * - Display-only fields (`page_title`, `page_url_host`, `*_handle_label`) are excluded.
+ */
 export function approvalBindingsMatch(a: ApprovalBinding, b: ApprovalBinding): boolean {
   return (
     a.action === b.action &&

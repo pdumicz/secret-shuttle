@@ -100,7 +100,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
 
       // Build ONE binding carrying the resolved binary details (real values when
       // resolution succeeded, null when it failed).  Using one binding for both
-      // grant creation and consumption ensures bindingsMatch always passes on
+      // grant creation and consumption ensures approvalBindingsMatch always passes on
       // retry — no self-mismatch.
       const binding: ApprovalBinding = {
         action: "template",

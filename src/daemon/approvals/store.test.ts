@@ -365,3 +365,19 @@ test("approvalBindingsMatch: allowed_domains order-insensitive", () => {
   const b: ApprovalBinding = { ...a, allowed_domains: ["b.com", "a.com"] };
   assert.strictEqual(approvalBindingsMatch(a, b), true);
 });
+
+test("approvalBindingsMatch: allowed_actions order-insensitive", () => {
+  const a: ApprovalBinding = { action: "run", ref: null, environment: "production", destination_domain: null, target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_actions: ["write", "read"] };
+  const b: ApprovalBinding = { ...a, allowed_actions: ["read", "write"] };
+  assert.strictEqual(approvalBindingsMatch(a, b), true);
+});
+
+test("approvalBindingsMatch: null/undefined/empty allowed_domains are equivalent", () => {
+  const base: ApprovalBinding = { action: "run", ref: null, environment: "production", destination_domain: null, target_id: null, field_fingerprint: null, template_id: null, template_params: null };
+  const withNull: ApprovalBinding = { ...base, allowed_domains: null };
+  const withUndefined: ApprovalBinding = { ...base };
+  const withEmpty: ApprovalBinding = { ...base, allowed_domains: [] };
+  assert.strictEqual(approvalBindingsMatch(withNull, withUndefined), true);
+  assert.strictEqual(approvalBindingsMatch(withNull, withEmpty), true);
+  assert.strictEqual(approvalBindingsMatch(withUndefined, withEmpty), true);
+});
