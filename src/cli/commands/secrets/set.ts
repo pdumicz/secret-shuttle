@@ -4,9 +4,10 @@ import { ok, outputJson } from "../../../shared/result.js";
 import { collectRepeated } from "../helpers.js";
 import { ShuttleError } from "../../../shared/errors.js";
 import { canonicalEnvironment } from "../../../shared/refs.js";
+import { addApprovalIdOption } from "../_approval-id-option.js";
 
 export function secretsSetCommand(): Command {
-  return new Command("set")
+  const cmd = new Command("set")
     .description("Store a new secret in the vault. Returns a ref; the value is never returned to the caller.")
     .requiredOption("--name <name>", "Logical secret name (e.g. STRIPE_WEBHOOK_SECRET).")
     .requiredOption("--env <environment>", "Environment (e.g. production, preview, local).")
@@ -16,11 +17,11 @@ export function secretsSetCommand(): Command {
     .option("--allow-action <action>", "Allowed action (repeatable).", collectRepeated, [])
     .option("--description <description>", "Free-form description (stored in metadata).")
     .option("--force", "Overwrite an existing secret with the same ref.", false)
-    .option("--approval-id <id>", "Pre-issued approval id (skip the approval window).")
     .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
     .option("--no-wait", "Return approval_required without waiting.")
-    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
-    .action(async (options) => {
+    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false);
+  addApprovalIdOption(cmd);
+  return cmd.action(async (options) => {
       // Paste mode is not yet supported. (User-facing copy must NOT mention
       // internal plan numbers — say what works now.)
       if (options.kind === "paste") {
@@ -49,7 +50,7 @@ export function secretsSetCommand(): Command {
       const actions = options.allowAction as string[];
       if (actions.length > 0) body.allowed_actions = actions;
       if (options.description !== undefined) body.description = options.description;
-      if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      if (options.approvalId !== undefined) body.approval_ids = options.approvalId;
       if (options.session !== undefined) body.session_id = options.session;
       const r = await daemonRequest("POST", "/v1/secrets/generate", body);
       outputJson(ok(r as Record<string, unknown>));

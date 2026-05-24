@@ -2,18 +2,19 @@ import { Command } from "commander";
 import { daemonRequest } from "../../../client/daemon-client.js";
 import { ok, outputJson } from "../../../shared/result.js";
 import { normalizeRef } from "../helpers.js";
+import { addApprovalIdOption } from "../_approval-id-option.js";
 
 export function secretsDeleteCommand(): Command {
-  return new Command("delete")
+  const cmd = new Command("delete")
     .description("Soft-delete a secret. Audit trail preserved. Production refs require approval.")
     .argument("<ref>", "Secret ref to delete (e.g. ss://stripe/prod/STRIPE_KEY).")
-    .option("--approval-id <id>", "Pre-issued approval id.")
     .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
     .option("--no-wait", "Return approval_required without waiting.")
-    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
-    .action(async (ref: string, options) => {
+    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false);
+  addApprovalIdOption(cmd);
+  return cmd.action(async (ref: string, options) => {
       const body: Record<string, unknown> = { ref: normalizeRef(ref) };
-      if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      if (options.approvalId !== undefined) body.approval_ids = options.approvalId;
       if (options.session !== undefined) body.session_id = options.session;
       if (options.wait === false) body.wait_for_approval = false;
       const r = await daemonRequest("POST", "/v1/secrets/delete", body);
