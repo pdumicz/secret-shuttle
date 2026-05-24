@@ -127,6 +127,47 @@ export class ApprovalStore {
     return g;
   }
 
+  /**
+   * Pure peek: does this session permit `binding`?
+   * Returns true on match; false on pattern no-match. Throws on hard-fail
+   * session states (revoked / expired / denied / not-pending). Mirrors EVERY
+   * precondition SessionStore.incrementUses enforces, including max_uses,
+   * so Phase 1 of requireApprovals can be sure that a planned "session"
+   * binding can actually commit in Phase 2 without raising session_max_uses_exceeded.
+   *
+   * IMPORTANT: must NOT call sessionStore.incrementUses (would burn a use
+   * for a binding that may never be committed).
+   */
+  canMatchSession(
+    sessionId: string,
+    binding: ApprovalBinding,
+    sessionStore: SessionStore,
+  ): boolean {
+    const session = sessionStore.get(sessionId);
+    if (session === undefined || session.status === "revoked") {
+      throw new ShuttleError("session_not_found", "Unknown session id.");
+    }
+    if (session.status === "expired") {
+      throw new ShuttleError("session_expired", "Session has expired.");
+    }
+    if (session.status === "denied") {
+      throw new ShuttleError("session_unauthorized", "Session was denied.");
+    }
+    if (session.status !== "granted") {
+      throw new ShuttleError(
+        "session_unauthorized",
+        `Session is not granted (status: ${session.status}).`,
+      );
+    }
+    if (session.max_uses !== undefined && session.uses >= session.max_uses) {
+      throw new ShuttleError(
+        "session_max_uses_exceeded",
+        `Session ${sessionId} reached its max_uses cap of ${session.max_uses}.`,
+      );
+    }
+    return matchesSessionPattern(binding, session);
+  }
+
   findOrMintFromSession(
     sessionId: string,
     binding: ApprovalBinding,
