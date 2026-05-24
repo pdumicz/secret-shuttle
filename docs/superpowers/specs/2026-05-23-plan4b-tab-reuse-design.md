@@ -292,9 +292,13 @@ function shouldPostDone(seq) {
 async function postDone(seq) {
   // Retry transient failures so a single network blip can't strand the
   // daemon's activeUrl forever. Cap at MAX_ATTEMPTS; auth/400 errors
-  // are terminal (no retry). After all attempts fail, fall through to
-  // the terminal banner so the user knows to reload AND close the SSE
-  // connection so the broker detaches and a future surface() respawns.
+  // are terminal (no retry). After all attempts fail, surface the
+  // terminal banner with an in-page Reconnect button AND close the
+  // SSE connection so the broker detaches and a future surface()
+  // respawns. Reload is NOT the recovery path: history.replaceState
+  // stripped the hub_token, so a bare reload hits /ui/hub with no
+  // token and 400s. The Reconnect click handler re-issues the SSE
+  // via the closure-local hubToken.
   const MAX_ATTEMPTS = 5;
   const BASE_DELAY_MS = 250;
   let succeeded = false;
@@ -519,7 +523,7 @@ V0 (3) — same file, three more handlers:
 1. State: active set, subscriber=hub1.
 2. Network/proxy hiccup → `es.onerror` fires. `terminal=false`. `es.close()`, `consecutiveFailures` increments to 1 (< 2), setTimeout(connect, 1000). On successful reopen, the `open` listener resets `consecutiveFailures = 0` so a later unrelated blip again gets one reconnect attempt before going terminal.
 3. Successful reconnect → new EventSource → SSE route attaches → broker displaces zombie (close() is no-op on torn-down res) → resend active.
-4. Second consecutive error → `terminal=true`, render "Disconnected — reload to reconnect."
+4. Second consecutive error → `terminal=true`, render "Disconnected from Secret Shuttle. Click below to reconnect." with the in-page Reconnect button. Clicking it invokes `takeOver()`, which flips `terminal=false`, resets `consecutiveFailures=0`, and calls `connect()` to re-issue the SSE.
 
 ### Daemon-driven cleanup of expired grant
 1. Grant `url1` is active in iframe. User walks away.
@@ -541,10 +545,10 @@ V0 (3) — same file, three more handlers:
 **Hub HTML JS terminal-state flag.** One `terminal: boolean` gates all reconnect logic. Both error-path and displaced-path flip it before any `es.close()` (which itself fires another `onerror` we want suppressed).
 
 **Iframe failures.**
-- `iframe.onerror` (browser fails to load): show inline banner "Failed to load approval page. Reload to retry." activeUrl preserved daemon-side → next attach resends.
+- `iframe.onerror` (browser fails to load): show inline banner "Failed to load approval page. Click Reconnect to retry." activeUrl preserved daemon-side → the takeOver()-driven reattach resends.
 - Non-Secret-Shuttle postMessage from iframe: rejected via `event.source === iframe.contentWindow && event.origin === location.origin` check.
 
-**Daemon process lifecycle.** Daemon restart → new `hub_token` → any still-open hub from prior process gets 401 on next SSE attempt → banner appears → user reloads. No persistence, no migration needed.
+**Daemon process lifecycle.** Daemon restart → new `hub_token` → any still-open hub from prior process gets 401 on next SSE attempt → terminal banner appears. The old hub **cannot self-recover** via its in-page Reconnect button because the closure-local hubToken is stale (the new daemon process minted a different one). The user closes the stale tab; the next surfaced operation on the new daemon opens a fresh hub with the new token. No persistence, no migration needed.
 
 **Test bypass.** `SECRET_SHUTTLE_NO_OPEN_URL=1` continues to short-circuit `openUrl`. HubBroker calls `openUrl` for the hub spawn, so the env var disables spawn entirely under test. Tests inject `openUrlImpl: spy` for state-machine coverage.
 
@@ -713,6 +717,6 @@ With env var set: `surface()` works (state mutates), `openUrl` no-ops. Test:
 
 - **Nonce-based CSP.** Plan 4b ships with `script-src 'self' 'unsafe-inline'` on all UI routes. A nonce-based CSP that drops `'unsafe-inline'` is a future hardening pass.
 - **Queue cap.** Self-limiting via TTL + polling for v0.2.0. Explicit `hub_queue_full` error in 0.3 if needed.
-- **CLI verb `secret-shuttle hub open`.** No CLI surface added in 4b. If a user wants to manually open the hub, they reload an open hub tab (banner says "reload here to take back over") OR restart the daemon (new hub_token, fresh tab on next operation). Future: add the CLI verb if real workflows need it.
+- **CLI verb `secret-shuttle hub open`.** No CLI surface added in 4b. If a user wants to manually take over an existing hub, they click the in-page "Take over here" button on the displaced tab (banner says "Click below to take over here") OR restart the daemon (new hub_token, fresh tab on next operation — old hub can't self-recover because its closure-local token is now stale). Future: add the CLI verb if real workflows need it.
 - **Hub-token rotation.** Token is daemon-lifetime. Rotation requires daemon restart. Acceptable given the low blast radius (token is in-memory only, never written to disk or socket file, daemon binds 127.0.0.1).
 - **Persisted queue across daemon restart.** Daemon restart loses the queue. CLI clients re-emit their requests on next call (or fail with the existing approval_timeout). Persistence is not required.
