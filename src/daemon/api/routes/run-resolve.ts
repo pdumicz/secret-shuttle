@@ -131,9 +131,17 @@ export function registerRunResolveRoute(
       // "stdin_ref malformed → bad_request" — invalid_ref would conflate this
       // with a separate code path (resolveRefs's own invalid_ref handling).
       const stdinRefRaw = optString(o, "stdin_ref");
+      let stdinRefCanonical: string | undefined;
       if (stdinRefRaw !== undefined) {
+        // parseSecretRef returns the canonicalized form via `.ref` (built by
+        // buildSecretRef: lowercase source, short environment alias, exact
+        // name). The vault resolver, env-file parser, and audit log all key
+        // off this canonical form — using the raw user-typed string would
+        // (a) miss the dup-guard when env refs are canonical and stdin_ref
+        // isn't, and (b) crash at `resolved.get(body.stdin_ref)!` because
+        // the resolved map is keyed on canonical refs.
         try {
-          parseSecretRef(stdinRefRaw);
+          stdinRefCanonical = parseSecretRef(stdinRefRaw).ref;
         } catch {
           throw new ShuttleError(
             "bad_request",
@@ -145,10 +153,16 @@ export function registerRunResolveRoute(
         // at the same secret). Fail closed with a distinct code so the CLI
         // can surface a precise hint — and BEFORE the resolve batch so the
         // user gets a fast 400 with no vault work.
-        if (refs.includes(stdinRefRaw)) {
+        //
+        // Compare the CANONICAL stdin ref against env refs. Env refs are
+        // already canonical at this point (parseEnvFile canonicalizes them
+        // upstream), so includes() with the canonical stdin form catches
+        // duplicates that differ only in surface form (uppercase source,
+        // long environment alias, etc.).
+        if (refs.includes(stdinRefCanonical)) {
           throw new ShuttleError(
             "stdin_ref_in_env_file",
-            `stdin_ref ${stdinRefRaw} also appears in env refs. Use one mechanism, not both.`,
+            `stdin_ref ${stdinRefCanonical} also appears in env refs. Use one mechanism, not both.`,
           );
         }
       }
@@ -170,7 +184,7 @@ export function registerRunResolveRoute(
         ...(approvalId !== undefined ? { approval_id: approvalId } : {}),
         ...(waitForApproval !== undefined ? { wait_for_approval: waitForApproval } : {}),
         ...(sessionId !== undefined ? { session_id: sessionId } : {}),
-        ...(stdinRefRaw !== undefined ? { stdin_ref: stdinRefRaw } : {}),
+        ...(stdinRefCanonical !== undefined ? { stdin_ref: stdinRefCanonical } : {}),
       };
     } catch (e) {
       // Validation throws before any side effect — safe to surface as pre-stream JSON.
@@ -242,6 +256,12 @@ export function registerRunResolveRoute(
     const envProductionRefs = body.refs.filter(
       (r) => resolved.get(r)!.environment === "production",
     );
+    // Track whether the env approval block actually consumed `approval_id`.
+    // Plan 4c P1 fix: stdin-only invocations skip the env approval entirely,
+    // so without this flag the stdin approval would never receive approval_id
+    // and the --no-wait → approve → retry --approval-id cycle would mint a
+    // fresh approval each retry and never converge.
+    let envApprovalRan = false;
     if (envProductionRefs.length > 0) {
       const binding: ApprovalBinding = {
         action: "run",
@@ -270,6 +290,12 @@ export function registerRunResolveRoute(
           ...(body.approval_id !== undefined ? { approvalIdFromClient: body.approval_id } : {}),
           ...(body.wait_for_approval === false ? { waitMs: 0 } : {}),
         });
+        // Set AFTER await — flag must reflect "env approval actually
+        // consumed approval_id", not "env approval was attempted". On
+        // approval failure (throw) the flag stays false, so the stdin
+        // approval gets approval_id only if env neither succeeded nor was
+        // attempted.
+        envApprovalRan = true;
       } catch (e) {
         // Approval failed (denied, expired, required-but-no-wait). Audit per ref.
         // grant?.session_id is undefined here unless the session fast-path
@@ -304,9 +330,14 @@ export function registerRunResolveRoute(
           sessionStore: services.sessionStore,
           openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
           ...(body.session_id !== undefined ? { sessionId: body.session_id } : {}),
-          // approval_id only applies to the FIRST approval; for the second
-          // approval the client cannot pre-mint an ID. The Plan 4c CLI in
-          // Task E supplies one approval_id (the env approval gets it).
+          // approval_id routes to whichever approval is the FIRST to need
+          // one. For env+stdin combined, the env approval consumes it. For
+          // stdin-only (no production env refs), the env block never runs
+          // so stdin consumes it here — without this, the client's retry
+          // loop would mint a fresh approval every iteration.
+          ...(body.approval_id !== undefined && !envApprovalRan
+            ? { approvalIdFromClient: body.approval_id }
+            : {}),
           ...(body.wait_for_approval === false ? { waitMs: 0 } : {}),
         });
         // Preserve any session_id from the first grant; if there was no first

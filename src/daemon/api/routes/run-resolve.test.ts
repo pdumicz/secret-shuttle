@@ -930,3 +930,153 @@ test("POST /v1/run/resolve: stdin-only audit emits action=run_stdin (not run)", 
     assert.equal(runEntries.length, 0, "stdin-only run must not emit a `run` audit entry");
   });
 });
+
+// -----------------------------------------------------------------------------
+// Plan 4c post-ship regressions
+//
+// F1: approval_id was only routed to the env-refs approval. For stdin-only
+//     invocations (no production env refs), the env approval block is skipped
+//     entirely so the stdin approval never received approval_id → each
+//     --no-wait → approve → retry --approval-id cycle minted a fresh approval
+//     and the loop never converged.
+//
+// F2: parseSecretRef(stdinRefRaw) was called for validation but its
+//     canonicalized `.ref` was discarded — downstream code used the raw string
+//     for refs.includes(), resolveRefs, and resolved.get(). A surface form
+//     like ss://LOCAL/production/FOO passed validation but produced
+//     secret_not_found at lookup AND bypassed the dup-guard against the
+//     canonical form ss://local/prod/FOO.
+// -----------------------------------------------------------------------------
+
+test("POST /v1/run/resolve: stdin-only --no-wait → approve → retry --approval-id consumes the existing approval (no fresh mint)", async () => {
+  if (process.platform === "win32") return; // `cat` is POSIX
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "local", environment: "production", name: "PROD_STDIN",
+      value: "stdin-prod-value",
+      allowedActions: ["use_as_stdin"],
+    });
+
+    // Step 1: --no-wait stdin-only call → 400 approval_required + approval_id.
+    const first = await callStream(ctx, "/v1/run/resolve", {
+      refs: [],
+      env: [],
+      command: "cat",
+      args: [],
+      stdin_ref: ref,
+      cwd: process.cwd(),
+      wait_for_approval: false,
+    });
+    assert.equal(first.status, 400);
+    assert.equal((first.errorBody as { error_code: string }).error_code, "approval_required");
+    const { approval_id: approvalId } = JSON.parse(
+      (first.errorBody as { error: { message: string } }).error.message,
+    ) as { approval_id: string };
+
+    // Snapshot the approval-store size BEFORE retry so we can prove no fresh mint.
+    const grantsBeforeRetry = (
+      ctx.services.approvals as unknown as { grants: Map<string, unknown> }
+    ).grants.size;
+
+    // Step 2: human approves the route-created grant via the store.
+    ctx.services.approvals.approve(approvalId);
+
+    // Step 3: retry with the approval_id — MUST consume the existing approval
+    // and NOT mint a fresh one. Pre-fix: the stdin approval block ignored
+    // approval_id, so this either minted a brand-new approval (and threw
+    // approval_required again) or succeeded by accident.
+    const second = await callStream(ctx, "/v1/run/resolve", {
+      refs: [],
+      env: [],
+      command: "cat",
+      args: [],
+      stdin_ref: ref,
+      cwd: process.cwd(),
+      approval_id: approvalId,
+      wait_for_approval: false,
+    });
+    assert.equal(second.status, 200, "retry with approval_id must succeed (no fresh mint loop)");
+    const exitLine = second.lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 0);
+
+    // Approval store size MUST be unchanged → no fresh mint occurred during retry.
+    const grantsAfterRetry = (
+      ctx.services.approvals as unknown as { grants: Map<string, unknown> }
+    ).grants.size;
+    assert.equal(
+      grantsAfterRetry,
+      grantsBeforeRetry,
+      "retry must consume the existing approval, not mint a fresh one",
+    );
+
+    // The consumed approval is now status=used (single-use semantics).
+    const consumed = ctx.services.approvals.get(approvalId);
+    assert.ok(consumed, "the approval the client supplied must still exist in the store");
+    assert.equal(consumed!.status, "used");
+  });
+});
+
+test("POST /v1/run/resolve: stdin_ref with non-canonical surface form is canonicalized before lookup", async () => {
+  if (process.platform === "win32") return;
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Seed at canonical ss://local/dev/FOO.
+    await seedSecret(ctx.services, {
+      source: "local", environment: "development", name: "FOO",
+      value: "canonical-value",
+      allowedActions: ["use_as_stdin"],
+    });
+
+    // Pass a non-canonical surface form: uppercase source + long environment alias.
+    // canonicalEnvironment("development") === "development" → ref becomes
+    // ss://local/dev/FOO via buildSecretRef. Source is lowercased by buildSecretRef.
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [],
+      env: [],
+      command: "cat",
+      args: [],
+      stdin_ref: "ss://LOCAL/development/FOO",
+      cwd: process.cwd(),
+    });
+    // Pre-fix: secret_not_found (resolved.get keyed on canonical, lookup used raw).
+    assert.equal(r.status, 200, "canonicalized lookup must succeed (pre-fix would secret_not_found)");
+    assert.equal(r.stdout, "***");
+    const exitLine = r.lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 0);
+  });
+});
+
+test("POST /v1/run/resolve: stdin_ref dup-guard sees through canonicalization (env canonical vs stdin non-canonical)", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Seed at canonical ss://local/dev/FOO.
+    const refCanonical = await seedSecret(ctx.services, {
+      source: "local", environment: "development", name: "FOO",
+      value: "v",
+      allowedActions: ["use_as_stdin"],
+    });
+    assert.equal(refCanonical, "ss://local/dev/FOO");
+
+    // Env refs carry the canonical form (parseEnvFile upstream canonicalizes);
+    // stdin_ref arrives in a non-canonical surface form. Both refer to the
+    // SAME secret — the dup-guard must reject this with stdin_ref_in_env_file.
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [refCanonical],
+      env: [{ key: "FOO", value: refCanonical, isRef: true }],
+      command: "true",
+      args: [],
+      stdin_ref: "ss://LOCAL/development/FOO",
+      cwd: process.cwd(),
+    });
+    // Pre-fix: refs.includes("ss://LOCAL/development/FOO") returned false
+    // because env_refs contained the canonical "ss://local/dev/FOO" only.
+    // Post-fix: stdin_ref is canonicalized before the includes() check.
+    assert.equal(r.status, 400);
+    assert.equal(
+      (r.errorBody as { error_code: string }).error_code,
+      "stdin_ref_in_env_file",
+      "dup-guard must canonicalize stdin_ref before comparing against env refs",
+    );
+  });
+});
