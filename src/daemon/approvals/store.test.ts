@@ -397,7 +397,7 @@ test("canMatchSession: granted session with matching pattern under max_uses → 
   });
   sessionStore.approve(session.id);
   const approvals = new ApprovalStore({ now: () => 1000 });
-  const binding: ApprovalBinding = { action: "inject_submit", ref: null, environment: "production", destination_domain: "example.com", target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_domains: ["example.com"] };
+  const binding = makeBindingFor("inject_submit", { destination_domain: "example.com", allowed_domains: ["example.com"] });
 
   const before = sessionStore.get(session.id)!.uses;
   const result = approvals.canMatchSession(session.id, binding, sessionStore);
@@ -413,7 +413,7 @@ test("canMatchSession: pattern no-match → false (no throw, no side effects)", 
   sessionStore.approve(session.id);
   const approvals = new ApprovalStore({ now: () => 1000 });
   // inject_submit with a destination_domain not in the session pattern → no match
-  const binding: ApprovalBinding = { action: "inject_submit", ref: null, environment: "production", destination_domain: "other.com", target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_domains: ["other.com"] };
+  const binding = makeBindingFor("inject_submit", { destination_domain: "other.com", allowed_domains: ["other.com"] });
 
   assert.strictEqual(approvals.canMatchSession(session.id, binding, sessionStore), false);
   assert.strictEqual(sessionStore.get(session.id)!.uses, 0);
@@ -425,7 +425,7 @@ test("canMatchSession: revoked → throws session_not_found", () => {
   sessionStore.approve(session.id);
   sessionStore.revoke(session.id);
   const approvals = new ApprovalStore({ now: () => 1000 });
-  const binding: ApprovalBinding = { action: "inject_submit", ref: null, environment: "production", destination_domain: "example.com", target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_domains: ["example.com"] };
+  const binding = makeBindingFor("inject_submit", { destination_domain: "example.com", allowed_domains: ["example.com"] });
   assert.throws(() => approvals.canMatchSession(session.id, binding, sessionStore), (e: unknown) => e instanceof ShuttleError && e.code === "session_not_found");
 });
 
@@ -435,7 +435,7 @@ test("canMatchSession: at max_uses → throws session_max_uses_exceeded (no side
   sessionStore.approve(session.id);
   sessionStore.incrementUses(session.id); // now at max
   const approvals = new ApprovalStore({ now: () => 1000 });
-  const binding: ApprovalBinding = { action: "inject_submit", ref: null, environment: "production", destination_domain: "example.com", target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_domains: ["example.com"] };
+  const binding = makeBindingFor("inject_submit", { destination_domain: "example.com", allowed_domains: ["example.com"] });
 
   const usesBefore = sessionStore.get(session.id)!.uses;
   assert.throws(() => approvals.canMatchSession(session.id, binding, sessionStore), (e: unknown) => e instanceof ShuttleError && e.code === "session_max_uses_exceeded");
@@ -448,7 +448,25 @@ test("canMatchSession: expired → throws session_expired", () => {
   const session = sessionStore.create({ actions: ["inject-submit"], ref_glob: "", destination_domains: ["example.com"], max_uses: 5, ttl_ms: 1000 });
   sessionStore.approve(session.id);
   nowMs += 2000; // past expiry
-  const approvals = new ApprovalStore({ now: () => nowMs });
-  const binding: ApprovalBinding = { action: "inject_submit", ref: null, environment: "production", destination_domain: "example.com", target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_domains: ["example.com"] };
+  const approvals = new ApprovalStore();
+  const binding = makeBindingFor("inject_submit", { destination_domain: "example.com", allowed_domains: ["example.com"] });
   assert.throws(() => approvals.canMatchSession(session.id, binding, sessionStore), (e: unknown) => e instanceof ShuttleError && e.code === "session_expired");
+});
+
+test("canMatchSession: pending (not yet approved) → throws session_not_pending (matches incrementUses)", () => {
+  const sessionStore = new SessionStore({ now: () => 1000 });
+  // Create session but DO NOT approve — status stays "pending".
+  const session = sessionStore.create({
+    ref_glob: "",
+    actions: ["inject-submit"],
+    destination_domains: ["example.com"],
+    max_uses: 5,
+    ttl_ms: 60_000,
+  });
+  const approvals = new ApprovalStore();
+  const binding = makeBindingFor("inject_submit", { destination_domain: "example.com", allowed_domains: ["example.com"] });
+  assert.throws(
+    () => approvals.canMatchSession(session.id, binding, sessionStore),
+    (e: unknown) => e instanceof ShuttleError && e.code === "session_not_pending",
+  );
 });
