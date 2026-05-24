@@ -78,6 +78,24 @@ export async function requireApprovals(
     // 1. Synth path
     const needsApproval = opts.force === true || binding.environment === "production";
     if (!needsApproval) {
+      // Silently drain any supplied ID that matches this non-requiring binding
+      // (mirrors requireApproval's behaviour: dev-env ignores a supplied id
+      // rather than rejecting it as a mismatch).  Check binding match first;
+      // if no match, drain the first available ID — on dev env the old singular
+      // primitive completely ignored the supplied id regardless of binding shape.
+      let drained = false;
+      for (const id of unusedIds) {
+        const peek = opts.store.get(id);
+        if (peek !== undefined && approvalBindingsMatch(peek, binding)) {
+          unusedIds.delete(id);
+          drained = true;
+          break;
+        }
+      }
+      if (!drained && unusedIds.size > 0) {
+        const firstId = unusedIds.values().next().value as string;
+        unusedIds.delete(firstId);
+      }
       plans.push({ kind: "synth", binding });
       continue;
     }
@@ -152,6 +170,17 @@ export async function requireApprovals(
 
   // After loop: any leftover unused IDs are mismatches.
   if (unusedIds.size > 0) {
+    // Fire the store's onEvent({ kind: "mismatch" }) for each leftover ID so that
+    // audit-wiring picks up the event (mirrors requireApproval's store.consume path).
+    // Use the first binding as the representative (any binding triggers the event).
+    const representativeBinding = opts.bindings[0]!;
+    for (const id of unusedIds) {
+      try {
+        opts.store.consume(id, representativeBinding);
+      } catch {
+        // Expected: consume throws approval_mismatch after firing onEvent. Swallow.
+      }
+    }
     throw new ShuttleError(
       "approval_mismatch",
       `Supplied approval id(s) did not match any required binding: ${[...unusedIds].join(", ")}`,

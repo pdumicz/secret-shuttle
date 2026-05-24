@@ -1,5 +1,5 @@
 import { ShuttleError } from "../../../shared/errors.js";
-import { requireApproval } from "../../approvals/require-approval.js";
+import { requireApprovals } from "../../approvals/require-approvals.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import { generateSecretValue } from "../../helpers/generate-value.js";
@@ -12,7 +12,7 @@ import { writeDaemonAudit } from "../../audit.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { DEFAULT_ACTIONS } from "../../../vault/vault.js";
 import { ALL_SECRET_ACTIONS, type SecretAction } from "../../../vault/types.js";
-import { asObject, reqString } from "../validate.js";
+import { asObject, optApprovalIds, reqString } from "../validate.js";
 import { disableObservationDomains } from "../../chrome/internal-ops.js";
 import type { InjectResult } from "../../chrome/internal-ops.js";
 
@@ -26,7 +26,7 @@ interface GenerateBody {
   allowed_actions?: string[];
   description?: string;
   force?: boolean;
-  approval_id?: string;
+  approval_ids?: string[];
   wait_for_approval?: boolean;
   session_id?: string;
 }
@@ -38,20 +38,20 @@ interface CaptureBody {
   allowed_domains?: string[];
   description?: string;
   force?: boolean;
-  approval_id?: string;
+  approval_ids?: string[];
   wait_for_approval?: boolean;
 }
 interface InjectBody {
   ref: string;
   domain?: string;
-  approval_id?: string;
+  approval_ids?: string[];
   wait_for_approval?: boolean;
 }
 interface CompareBody {
   ref: string;
   with?: "focused-field" | "selection";
   domain?: string;
-  approval_id?: string;
+  approval_ids?: string[];
   wait_for_approval?: boolean;
 }
 
@@ -87,11 +87,13 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
 
   server.addRoute("POST", "/v1/secrets/generate", async (_req, raw) => {
     services.lock.requireKey();
+    const o = asObject(raw);
+    const approvalIds = optApprovalIds(o);
     const b = raw as GenerateBody;
     // Hoisted OUTSIDE the try so a post-mint failure (e.g. vault.upsertSecret
-    // throws secret_exists AFTER requireApproval consumed the session) still
+    // throws secret_exists AFTER requireApprovals consumed the session) still
     // carries grant.session_id into the failure audit.  Optional-chained at
-    // use site because grant remains undefined if requireApproval itself threw
+    // use site because grant remains undefined if requireApprovals itself threw
     // (pre-mint failure), in which case no session was consumed and audit
     // MUST NOT carry session_id.
     let grant: ApprovalGrant | undefined;
@@ -100,7 +102,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       const plannedRef = buildSecretRef(b.source ?? "local", env, b.name);
       const effectiveAllowed = (b.allowed_domains ?? []).map(normalizeDomain);
 
-      // Validate BEFORE building the binding / requireApproval (§4.4): a bad
+      // Validate BEFORE building the binding / requireApprovals (§4.4): a bad
       // action set must fail fast, never after a human has approved.
       const requestedActions = validatedActions(b.allowed_actions);
       // Effective scope shown in the approval == what will actually be stored
@@ -131,22 +133,23 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         allowed_domains: effectiveAllowed,
         allowed_actions: effectiveActions,
       };
-      // Single requireApproval call — handles both the initial (no approval_id)
-      // and the retry (approval_id supplied) paths.  When session_id is set and
+      // Single requireApprovals call — handles both the initial (no approval_ids)
+      // and the retry (approval_ids supplied) paths.  When session_id is set and
       // the binding matches the session pattern, the call mints a used grant
       // from the session and the audit emitted below will carry
       // grant.session_id; otherwise the call falls back to the single-use flow
       // and grant.session_id is undefined.
-      grant = await requireApproval({
+      const grants = await requireApprovals({
         store: services.approvals,
-        binding,
+        bindings: [binding],
         daemonPort: daemonPortRef(),
         sessionStore: services.sessionStore,
         openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
         ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
-        ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
+        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
+      grant = grants[0]!;
 
       const value = generateSecretValue(b.kind ?? "random_32_bytes");
       const meta = await services.vault.upsertSecret({
@@ -180,7 +183,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         ok: false,
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
         ...(b.name !== undefined && b.environment !== undefined ? { ref: buildSecretRef(b.source ?? "local", b.environment, b.name) } : {}),
-        // Optional-chain: grant is undefined if requireApproval itself threw
+        // Optional-chain: grant is undefined if requireApprovals itself threw
         // (pre-mint failure — no session consumed → audit MUST NOT carry
         // session_id).  Otherwise grant.session_id is the source session iff
         // the binding matched the session pattern.
@@ -192,6 +195,8 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
 
   server.addRoute("POST", "/v1/secrets/capture", async (_req, raw) => {
     services.lock.requireKey();
+    const o = asObject(raw);
+    const approvalIds = optApprovalIds(o);
     const b = raw as CaptureBody;
     try {
       if (services.browser === null) throw new ShuttleError("browser_not_started", "Run `secret-shuttle browser start` first.");
@@ -222,12 +227,12 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         ...(pre.page_title !== undefined ? { page_title: pre.page_title } : {}),
         ...(pre.page_url_host !== undefined ? { page_url_host: pre.page_url_host } : {}),
       };
-      await requireApproval({
+      await requireApprovals({
         store: services.approvals,
-        binding,
+        bindings: [binding],
         daemonPort: daemonPortRef(),
         openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
-        ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
+        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
 
@@ -275,6 +280,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
   server.addRoute("POST", "/v1/secrets/inject", async (_req, raw) => {
     services.lock.requireKey();
     const o = asObject(raw);
+    const approvalIds = optApprovalIds(o);
     const b = raw as InjectBody;
     reqString(o, "ref");
     try {
@@ -308,12 +314,12 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         ...(pre.page_title !== undefined ? { page_title: pre.page_title } : {}),
         ...(pre.page_url_host !== undefined ? { page_url_host: pre.page_url_host } : {}),
       };
-      await requireApproval({
+      await requireApprovals({
         store: services.approvals,
-        binding,
+        bindings: [binding],
         daemonPort: daemonPortRef(),
         openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
-        ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
+        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
 
@@ -364,6 +370,8 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
 
   server.addRoute("POST", "/v1/secrets/compare", async (_req, raw) => {
     services.lock.requireKey();
+    const o = asObject(raw);
+    const approvalIds = optApprovalIds(o);
     const b = raw as CompareBody;
     if (typeof b?.ref === "string") services.compareLimiter.check(b.ref);
     try {
@@ -389,12 +397,12 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         template_params: null,
         allowed_domains: secret.allowed_domains,
       };
-      await requireApproval({
+      await requireApprovals({
         store: services.approvals,
-        binding,
+        bindings: [binding],
         daemonPort: daemonPortRef(),
         openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
-        ...(b.approval_id !== undefined ? { approvalIdFromClient: b.approval_id } : {}),
+        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
 
