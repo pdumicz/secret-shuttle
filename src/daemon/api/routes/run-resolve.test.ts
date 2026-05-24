@@ -1047,6 +1047,162 @@ test("POST /v1/run/resolve: stdin_ref with non-canonical surface form is canonic
   });
 });
 
+// -----------------------------------------------------------------------------
+// Plan 4c post-ship P1: combined production env+stdin + --no-wait fail-fast
+//
+// The CLI carries only one `approval_id` field, but combined production
+// env-file + production stdin requires two approval IDs across the --no-wait
+// retry chain (env consumes id 1; stdin returns id 2; the third retry applies
+// id 2 to the env block → approval_mismatch dead-end). Multi-approval
+// continuation is bigger than 4c scope. We fail fast at the route entry with
+// `combined_no_wait_unsupported` (USAGE/exit 2). The error hints to omit
+// --no-wait (default waiting flow surfaces both approvals via the hub broker)
+// or to split the operation.
+// -----------------------------------------------------------------------------
+
+test("POST /v1/run/resolve: combined production env+stdin + --no-wait → 400 combined_no_wait_unsupported (no approval minted)", async () => {
+  if (process.platform === "win32") return;
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const envRef = await seedSecret(ctx.services, {
+      source: "local", environment: "production", name: "PROD_ENV",
+      value: "env-prod-value",
+      allowedActions: ["use_as_stdin"],
+    });
+    const stdinRef = await seedSecret(ctx.services, {
+      source: "local", environment: "production", name: "PROD_STDIN",
+      value: "stdin-prod-value",
+      allowedActions: ["use_as_stdin"],
+    });
+
+    // Snapshot approval store size BEFORE so we can prove fail-fast did NOT
+    // mint any approval. Without the fail-fast, the env approval block would
+    // mint an approval and we'd see grants.size advance.
+    const grantsBefore = (
+      ctx.services.approvals as unknown as { grants: Map<string, unknown> }
+    ).grants.size;
+
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [envRef],
+      env: [{ key: "PROD_ENV", value: envRef, isRef: true }],
+      command: "cat",
+      args: [],
+      stdin_ref: stdinRef,
+      cwd: process.cwd(),
+      wait_for_approval: false,
+    });
+    // Pre-fix: env approval block ran first → 400 approval_required (with id A
+    // minted). Post-fix: fail-fast returns combined_no_wait_unsupported before
+    // any approval call.
+    assert.equal(r.status, 400);
+    assert.equal(
+      (r.errorBody as { error_code: string }).error_code,
+      "combined_no_wait_unsupported",
+      "expected fail-fast combined_no_wait_unsupported, not approval_required",
+    );
+    // The error message must mention BOTH recovery paths so the human knows
+    // why this dead-ends and how to proceed.
+    const msg = (r.errorBody as { error: { message: string } }).error.message;
+    assert.match(msg, /--no-wait/);
+    assert.match(msg, /split/i);
+
+    // No approval was minted — proves the fail-fast fired BEFORE the env
+    // approval block. Without this guarantee, a retrying client could
+    // strand an approval grant in the store.
+    const grantsAfter = (
+      ctx.services.approvals as unknown as { grants: Map<string, unknown> }
+    ).grants.size;
+    assert.equal(
+      grantsAfter,
+      grantsBefore,
+      "fail-fast must NOT mint any approval (no grant churn from unsupported usage)",
+    );
+  });
+});
+
+test("POST /v1/run/resolve: combined production env+stdin WITHOUT --no-wait → both approvals approved sequentially → success", async () => {
+  // Counter-test: the fail-fast is conditional on wait_for_approval === false.
+  // Default waiting flow (omitting --no-wait) MUST proceed normally. We
+  // approve both grants from the test by polling approvals.list() between the
+  // two requireApproval calls. Mirrors hub-e2e.test.ts:200 (single approval)
+  // but extended to a two-approval ordered sequence.
+  if (process.platform === "win32") return;
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const envRef = await seedSecret(ctx.services, {
+      source: "local", environment: "production", name: "COMBINED_ENV",
+      value: "combined-env-value",
+      allowedActions: ["use_as_stdin"],
+    });
+    const stdinRef = await seedSecret(ctx.services, {
+      source: "local", environment: "production", name: "COMBINED_STDIN",
+      value: "combined-stdin-value",
+      allowedActions: ["use_as_stdin"],
+    });
+
+    // Fire the streaming request without awaiting. The daemon will block in
+    // requireApproval until we approve via the store. No --no-wait flag here
+    // → default waiting flow is engaged.
+    const responsePromise = callStream(ctx, "/v1/run/resolve", {
+      refs: [envRef],
+      env: [{ key: "COMBINED_ENV", value: envRef, isRef: true }],
+      command: "cat",
+      args: [],
+      stdin_ref: stdinRef,
+      cwd: process.cwd(),
+    });
+
+    // Helper: poll approvals.list() until a pending grant for the given
+    // binding action shows up, then approve it. Without this poll there's a
+    // race between the daemon entering requireApproval's wait loop and us
+    // calling approve().
+    const pollAndApprove = async (
+      action: "run" | "run_stdin",
+      label: string,
+    ): Promise<string> => {
+      // ApprovalGrant extends ApprovalBinding (store.ts:49), so `action` lives
+      // directly on the grant — not nested under `.binding`.
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        const grants = (
+          ctx.services.approvals as unknown as {
+            grants: Map<string, { action: string; status: string }>;
+          }
+        ).grants;
+        for (const [id, g] of grants) {
+          if (g.action === action && g.status === "pending") {
+            ctx.services.approvals.approve(id);
+            return id;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      throw new Error(`timed out waiting for ${label} approval to appear`);
+    };
+
+    // Env approval first (the route mints it before the stdin approval).
+    await pollAndApprove("run", "env");
+    // Then stdin approval.
+    await pollAndApprove("run_stdin", "stdin");
+
+    // Await the streamed response. The daemon resumes, spawns `cat`, pipes
+    // the resolved stdin secret to fd 0, sets COMBINED_ENV in the child's
+    // env, and the masker replaces echoed bytes with *** before relay.
+    const r = await responsePromise;
+    assert.equal(r.status, 200);
+    assert.match(r.contentType, /ndjson/);
+    const exitLine = r.lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 0, "combined env+stdin default-wait must complete successfully");
+    // `cat` echoes the resolved stdin secret; masker replaces with ***.
+    assert.equal(r.stdout, "***");
+    assert.equal(
+      r.stdout.includes("combined-stdin-value"),
+      false,
+      "raw stdin secret leaked into stdout",
+    );
+  });
+});
+
 test("POST /v1/run/resolve: stdin_ref dup-guard sees through canonicalization (env canonical vs stdin non-canonical)", async () => {
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });

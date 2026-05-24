@@ -241,6 +241,47 @@ export function registerRunResolveRoute(
       return;
     }
 
+    // Plan 4c post-ship P1: fail-fast combined production env+stdin under
+    // --no-wait. The CLI carries only ONE `approval_id` field, but combined
+    // production env-file + production stdin requires TWO approval IDs across
+    // the --no-wait retry chain (env consumes id 1; stdin returns id 2; the
+    // third retry applies id 2 to the env block → approval_mismatch dead-end).
+    // Multi-approval continuation is bigger than 4c scope; until then, refuse
+    // the unsupportable case with a specific code so the CLI can hint at the
+    // two viable workarounds (omit --no-wait; or split the operation).
+    //
+    // Placement: AFTER resolve (need to know which refs are production) and
+    // AFTER assertSecretActionAllowed (so action-policy failures still fire
+    // their own clean code) BUT BEFORE any requireApproval call so that:
+    //  - the env approval is never minted for the unsupported usage (no
+    //    stranded grants in the store),
+    //  - a user retrying with a valid env approval id can re-run without
+    //    --no-wait and have that id consume normally (we fail before
+    //    requireApproval would consume it).
+    //
+    // Detection: stdin_ref is set AND production; AT LEAST ONE env ref is
+    // production; AND wait_for_approval === false. The
+    // `r !== body.stdin_ref` filter is defense-in-depth — the dup-guard above
+    // already proves stdin_ref ∉ body.refs, so allRefs.some over allRefs
+    // would catch the stdin ref via the production check, but excluding it
+    // explicitly makes the intent obvious.
+    const hasProductionStdin = body.stdin_ref !== undefined
+      && resolved.get(body.stdin_ref)!.environment === "production";
+    const hasProductionEnv = allRefs.some(
+      (r) => r !== body.stdin_ref && resolved.get(r)?.environment === "production",
+    );
+    if (hasProductionEnv && hasProductionStdin && body.wait_for_approval === false) {
+      writeJsonError(
+        res,
+        400,
+        new ShuttleError(
+          "combined_no_wait_unsupported",
+          "Combined --env-file (with production refs) + --stdin (with production ref) + --no-wait is not supported in v0.2.0. The CLI carries only one approval_id, so the env+stdin retry chain cannot converge. Either omit --no-wait (the daemon will wait + surface both approvals via the hub), or split the operation (approve env refs separately, then run with --stdin alone using --no-wait).",
+        ),
+      );
+      return;
+    }
+
     // Approval gating. Env refs (action="run") and the stdin ref (action="run_stdin")
     // require SEPARATE approval bindings — different actions imply different UI
     // copy, different session-matcher behavior, and different audit lines. We
