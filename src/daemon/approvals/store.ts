@@ -178,6 +178,10 @@ export class ApprovalStore {
    * (status: "used", session_id: <sessionId>) — same shape today's
    * findOrMintFromSession returns. Use only when committing a binding
    * via the session fast-path.
+   *
+   * Throws: session_max_uses_exceeded or session_expired (race — session
+   * TTL elapsed between Phase 1 and Phase 2), or any error
+   * sessionStore.incrementUses propagates.
    */
   mintFromSession(
     sessionId: string,
@@ -196,6 +200,7 @@ export class ApprovalStore {
       ui_token: "",
       session_id: sessionId,
     };
+    // Synthetic grant: skips pending/granted lifecycle — emit "used" directly.
     this.onEvent?.({ kind: "used", grant });
     return grant;
   }

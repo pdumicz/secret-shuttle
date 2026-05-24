@@ -515,3 +515,23 @@ test("mintFromSession: at max_uses (race) → throws session_max_uses_exceeded",
     (e: unknown) => e instanceof ShuttleError && e.code === "session_max_uses_exceeded",
   );
 });
+
+test("mintFromSession: session_expired race (TTL elapses between peek and commit) → throws session_expired", () => {
+  let nowMs = 1000;
+  const sessionStore = new SessionStore({ now: () => nowMs });
+  const session = sessionStore.create({
+    ref_glob: "",
+    actions: ["inject-submit"],
+    destination_domains: ["example.com"],
+    max_uses: 5,
+    ttl_ms: 1000,
+  });
+  sessionStore.approve(session.id);
+  nowMs += 2000; // TTL elapsed — incrementUses will flip status to expired
+  const approvals = new ApprovalStore({ now: () => nowMs });
+  const binding = makeBindingFor("inject_submit", { destination_domain: "example.com", allowed_domains: ["example.com"] });
+  assert.throws(
+    () => approvals.mintFromSession(session.id, binding, sessionStore),
+    (e: unknown) => e instanceof ShuttleError && e.code === "session_expired",
+  );
+});
