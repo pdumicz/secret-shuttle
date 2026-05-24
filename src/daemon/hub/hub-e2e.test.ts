@@ -196,3 +196,119 @@ test("e2e: permanent postDone failure → SSE detach → respawn-on-next-surface
     assert.match((sub2.events[0] as Extract<HubEvent, { type: "navigate" }>).url, /id=a/);
   });
 });
+
+test("e2e: production stdin op → hub surface → approve → child reads value", async () => {
+  await withE2EDaemon(async (ctx) => {
+    // Unlock the vault so the run-resolve route can resolve refs.
+    const unlockRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock`, {
+      method: "POST",
+      headers: { Authorization: "Bearer t", "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "p", set_passphrase: true }),
+    });
+    assert.equal(unlockRes.status, 200);
+
+    // Seed a production secret with use_as_stdin allowed. allowed_domains is
+    // required by the vault contract for production refs; canonicalized to
+    // null SessionAction on the run_stdin path so the value is irrelevant.
+    await ctx.services.vault.upsertSecret({
+      source: "local",
+      environment: "production",
+      name: "PROD_STDIN",
+      value: "prod-secret-value",
+      allowedDomains: ["docker.io"],
+      allowedActions: ["use_as_stdin"],
+    });
+
+    // Pre-attach a fake subscriber so the broker's surface() routes the
+    // approval URL into `activeUrl` (instead of just queueing it). Without
+    // an attached subscriber, peekState().activeUrl would stay null and the
+    // poll loop below would time out.
+    const { sub, events } = makeSub();
+    ctx.broker.attach(sub);
+
+    // Fire the run-resolve request. Don't await — the daemon will block in
+    // requireApproval's polling loop until we approve via the hub-surfaced URL.
+    const responsePromise = fetch(`http://127.0.0.1:${ctx.port}/v1/run/resolve`, {
+      method: "POST",
+      headers: { Authorization: "Bearer t", "content-type": "application/json" },
+      body: JSON.stringify({
+        refs: [],
+        env: [],
+        command: "cat",
+        args: [],
+        cwd: process.cwd(),
+        stdin_ref: "ss://local/prod/PROD_STDIN",
+      }),
+    });
+
+    // Poll the broker for the pending operation. requireApproval calls
+    // openUrlImpl → broker.surface → activeUrl is set (because we attached
+    // above). ~50ms window is typical; 2s is generous.
+    let pending: { url: string; seq: number } | undefined;
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && pending === undefined) {
+      const state = ctx.broker.peekState();
+      if (state.activeUrl !== null && state.activeSeq !== null) {
+        pending = { url: state.activeUrl, seq: state.activeSeq };
+      } else {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    assert.ok(pending, "expected a pending operation URL in the hub broker");
+
+    // Sanity: the subscriber should have received the matching navigate event.
+    assert.equal(events.length, 1);
+    assert.equal((events[0] as Extract<HubEvent, { type: "navigate" }>).type, "navigate");
+
+    // Extract id + token and approve via the existing /ui/approvals/:id/approve
+    // route. The per-URL token is the grant's ui_token; the approve POST flips
+    // status:pending → status:granted which unblocks the daemon's wait loop.
+    const url = new URL(pending!.url);
+    const id = url.searchParams.get("id");
+    const token = url.searchParams.get("token");
+    assert.ok(id && token, "approval URL must carry id + token");
+    const approveRes = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/approvals/${id}/approve?token=${encodeURIComponent(token!)}`,
+      { method: "POST" },
+    );
+    assert.equal(approveRes.status, 200);
+
+    // Now await the streamed response. The daemon resumes, spawns `cat`,
+    // pipes the resolved secret to fd 0, and the masker replaces the
+    // echoed value with `***` before relay.
+    const res = await responsePromise;
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /ndjson/);
+
+    // Drain the ndjson stream into lines.
+    const lines: Record<string, unknown>[] = [];
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const nl = buffer.indexOf("\n");
+        if (nl === -1) break;
+        const raw = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (raw.trim().length === 0) continue;
+        lines.push(JSON.parse(raw) as Record<string, unknown>);
+      }
+    }
+
+    const exitLine = lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 0);
+
+    // The cat child read the secret value and echoed it; the masker
+    // converted it to *** before relay. No raw plaintext on the wire.
+    const stdout = lines
+      .filter((l) => "stream" in l && (l as { stream: string }).stream === "stdout")
+      .map((l) => Buffer.from((l as { data: string }).data, "base64").toString("utf8"))
+      .join("");
+    assert.equal(stdout, "***");
+    assert.equal(stdout.includes("prod-secret-value"), false, "raw secret leaked into stdout");
+  });
+});
