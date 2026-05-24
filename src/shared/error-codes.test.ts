@@ -139,11 +139,10 @@ test("registry total entry count (sanity check)", () => {
   // Plan 4a Task C1 adds 7 more session-related codes = 117 total.
   // Plan 4a post-review P1 adds 1 more (session_revoked) = 118 total.
   // Plan 4c Task A adds 1 more (stdin_ref_in_env_file) = 119 total.
-  // Plan 4c post-ship P1 adds 1 more (combined_no_wait_unsupported) = 120 total.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 120, `expected 120 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 119, `expected 119 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -178,15 +177,3 @@ test("error-codes: stdin_ref_in_env_file registered with USAGE exit code", () =>
   assert.equal(entry.hint(""), null);
 });
 
-test("error-codes: combined_no_wait_unsupported registered with USAGE exit code", () => {
-  // Plan 4c post-ship P1: combined production env+stdin + --no-wait is a
-  // fail-fast usage error. CLI carries only one approval_id field; the env
-  // approval consumes it, stdin needs a separate id, and the next retry
-  // applies that id to the env block → approval_mismatch dead-end. We
-  // surface a distinct code so the CLI can suggest "omit --no-wait" or
-  // "split the operation" rather than the misleading approval_required.
-  const entry = lookupErrorCode("combined_no_wait_unsupported");
-  assert.ok(entry, "combined_no_wait_unsupported must be registered");
-  assert.equal(entry.exitCode, EXIT_CODE_USAGE);
-  assert.equal(entry.hint(""), null);
-});

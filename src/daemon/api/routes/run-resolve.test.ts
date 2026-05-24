@@ -1047,79 +1047,6 @@ test("POST /v1/run/resolve: stdin_ref with non-canonical surface form is canonic
   });
 });
 
-// -----------------------------------------------------------------------------
-// Plan 4c post-ship P1: combined production env+stdin + --no-wait fail-fast
-//
-// The CLI carries only one `approval_id` field, but combined production
-// env-file + production stdin requires two approval IDs across the --no-wait
-// retry chain (env consumes id 1; stdin returns id 2; the third retry applies
-// id 2 to the env block → approval_mismatch dead-end). Multi-approval
-// continuation is bigger than 4c scope. We fail fast at the route entry with
-// `combined_no_wait_unsupported` (USAGE/exit 2). The error hints to omit
-// --no-wait (default waiting flow surfaces both approvals via the hub broker)
-// or to split the operation.
-// -----------------------------------------------------------------------------
-
-test("POST /v1/run/resolve: combined production env+stdin + --no-wait → 400 combined_no_wait_unsupported (no approval minted)", async () => {
-  if (process.platform === "win32") return;
-  await withDaemon(async (ctx) => {
-    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
-    const envRef = await seedSecret(ctx.services, {
-      source: "local", environment: "production", name: "PROD_ENV",
-      value: "env-prod-value",
-      allowedActions: ["use_as_stdin"],
-    });
-    const stdinRef = await seedSecret(ctx.services, {
-      source: "local", environment: "production", name: "PROD_STDIN",
-      value: "stdin-prod-value",
-      allowedActions: ["use_as_stdin"],
-    });
-
-    // Snapshot approval store size BEFORE so we can prove fail-fast did NOT
-    // mint any approval. Without the fail-fast, the env approval block would
-    // mint an approval and we'd see grants.size advance.
-    const grantsBefore = (
-      ctx.services.approvals as unknown as { grants: Map<string, unknown> }
-    ).grants.size;
-
-    const r = await callStream(ctx, "/v1/run/resolve", {
-      refs: [envRef],
-      env: [{ key: "PROD_ENV", value: envRef, isRef: true }],
-      command: "cat",
-      args: [],
-      stdin_ref: stdinRef,
-      cwd: process.cwd(),
-      wait_for_approval: false,
-    });
-    // Pre-fix: env approval block ran first → 400 approval_required (with id A
-    // minted). Post-fix: fail-fast returns combined_no_wait_unsupported before
-    // any approval call.
-    assert.equal(r.status, 400);
-    assert.equal(
-      (r.errorBody as { error_code: string }).error_code,
-      "combined_no_wait_unsupported",
-      "expected fail-fast combined_no_wait_unsupported, not approval_required",
-    );
-    // The error message must mention BOTH recovery paths so the human knows
-    // why this dead-ends and how to proceed.
-    const msg = (r.errorBody as { error: { message: string } }).error.message;
-    assert.match(msg, /--no-wait/);
-    assert.match(msg, /split/i);
-
-    // No approval was minted — proves the fail-fast fired BEFORE the env
-    // approval block. Without this guarantee, a retrying client could
-    // strand an approval grant in the store.
-    const grantsAfter = (
-      ctx.services.approvals as unknown as { grants: Map<string, unknown> }
-    ).grants.size;
-    assert.equal(
-      grantsAfter,
-      grantsBefore,
-      "fail-fast must NOT mint any approval (no grant churn from unsupported usage)",
-    );
-  });
-});
-
 test("POST /v1/run/resolve: combined production env+stdin WITHOUT --no-wait → both approvals approved sequentially → success", async () => {
   // Counter-test: the fail-fast is conditional on wait_for_approval === false.
   // Default waiting flow (omitting --no-wait) MUST proceed normally. We
@@ -1242,7 +1169,7 @@ test("POST /v1/run/resolve: stdin_ref dup-guard sees through canonicalization (e
 // -----------------------------------------------------------------------------
 
 test("POST /v1/run/resolve: combined production env+stdin + --no-wait converges via approval_ids", async () => {
-  // Plan 4d gate test. Asserts the post-fail-fast-deletion behavior:
+  // Plan 4d gate test. This proves the post-multi-binding continuation path:
   //
   //   (a) First call (no approval_ids) → 400 approval_required with
   //       details.approvals of length 2 (run + run_stdin), each entry
@@ -1250,14 +1177,10 @@ test("POST /v1/run/resolve: combined production env+stdin + --no-wait converges 
   //   (b) After approving both in the store (simulating UI clicks), retry
   //       with both approval_ids → 200, command runs, exit 0.
   //
-  // CURRENT STATE (Task I1 commit): this test FAILS. The combined_no_wait_unsupported
-  // fail-fast block at run-resolve.ts:244-283 intercepts the first call and
-  // returns the fail-fast error code, not approval_required. The failure is the
-  // INTENDED contract: the safety net is still doing its job.
-  //
-  // The test transitions to PASSING in Task J1 when the fail-fast is deleted.
-  // That order is the spec's §10 invariant: prove the continuation path FIRST,
-  // delete the fail-fast SECOND.
+  // Was failing under Task I1 (the combined_no_wait_unsupported fail-fast
+  // intercepted the first call). Started passing under Task J1 when the
+  // fail-fast was deleted. The test order — prove the path first, delete the
+  // fail-fast second — is the spec's §10 invariant.
   if (process.platform === "win32") return;
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
@@ -1287,7 +1210,7 @@ test("POST /v1/run/resolve: combined production env+stdin + --no-wait converges 
     assert.equal(
       (first.errorBody as { error_code: string }).error_code,
       "approval_required",
-      "expected approval_required, not combined_no_wait_unsupported — the fail-fast is still in place (will be removed in J1)",
+      "expected approval_required — fail-fast was removed in J1",
     );
     const approvals = (
       first.errorBody as { details?: { approvals?: Array<{ approval_id: string; action: string }> } }
