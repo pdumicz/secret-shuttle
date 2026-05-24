@@ -1236,3 +1236,89 @@ test("POST /v1/run/resolve: stdin_ref dup-guard sees through canonicalization (e
     );
   });
 });
+
+// -----------------------------------------------------------------------------
+// Plan 4d gate test — combined env+stdin --no-wait converges via approval_ids
+// -----------------------------------------------------------------------------
+
+test("POST /v1/run/resolve: combined production env+stdin + --no-wait converges via approval_ids", async () => {
+  // Plan 4d gate test. Asserts the post-fail-fast-deletion behavior:
+  //
+  //   (a) First call (no approval_ids) → 400 approval_required with
+  //       details.approvals of length 2 (run + run_stdin), each entry
+  //       carrying its approval_id and expires_at.
+  //   (b) After approving both in the store (simulating UI clicks), retry
+  //       with both approval_ids → 200, command runs, exit 0.
+  //
+  // CURRENT STATE (Task I1 commit): this test FAILS. The combined_no_wait_unsupported
+  // fail-fast block at run-resolve.ts:244-283 intercepts the first call and
+  // returns the fail-fast error code, not approval_required. The failure is the
+  // INTENDED contract: the safety net is still doing its job.
+  //
+  // The test transitions to PASSING in Task J1 when the fail-fast is deleted.
+  // That order is the spec's §10 invariant: prove the continuation path FIRST,
+  // delete the fail-fast SECOND.
+  if (process.platform === "win32") return;
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const envRef = await seedSecret(ctx.services, {
+      source: "local", environment: "production", name: "GATE_ENV",
+      value: "gate-env-value",
+      allowedActions: ["use_as_stdin"],
+    });
+    const stdinRef = await seedSecret(ctx.services, {
+      source: "local", environment: "production", name: "GATE_STDIN",
+      value: "gate-stdin-value",
+      allowedActions: ["use_as_stdin"],
+    });
+
+    // Step (a): first call — no approval_ids, --no-wait → 400 approval_required
+    // with details.approvals of length 2.
+    const first = await callStream(ctx, "/v1/run/resolve", {
+      refs: [envRef],
+      env: [{ key: "GATE_ENV", value: envRef, isRef: true }],
+      command: "/bin/echo",
+      args: ["hello"],
+      cwd: process.cwd(),
+      stdin_ref: stdinRef,
+      wait_for_approval: false,
+    });
+    assert.equal(first.status, 400, "first call (no approval_ids) must return 400");
+    assert.equal(
+      (first.errorBody as { error_code: string }).error_code,
+      "approval_required",
+      "expected approval_required, not combined_no_wait_unsupported — the fail-fast is still in place (will be removed in J1)",
+    );
+    const approvals = (
+      first.errorBody as { details?: { approvals?: Array<{ approval_id: string; action: string }> } }
+    ).details?.approvals;
+    assert.ok(Array.isArray(approvals), "details.approvals must be an array");
+    assert.equal(approvals!.length, 2, "must have exactly 2 approvals (run + run_stdin)");
+    const envApproval = approvals!.find((a) => a.action === "run");
+    const stdinApproval = approvals!.find((a) => a.action === "run_stdin");
+    assert.ok(envApproval, "details.approvals must include a 'run' entry for env");
+    assert.ok(stdinApproval, "details.approvals must include a 'run_stdin' entry for stdin");
+    const envApprovalId = envApproval!.approval_id;
+    const stdinApprovalId = stdinApproval!.approval_id;
+
+    // Step (b): approve both grants in the store (simulating two UI clicks).
+    ctx.services.approvals.approve(envApprovalId);
+    ctx.services.approvals.approve(stdinApprovalId);
+
+    // Step (b) continued: retry with both approval_ids → 200, exit 0.
+    const second = await callStream(ctx, "/v1/run/resolve", {
+      refs: [envRef],
+      env: [{ key: "GATE_ENV", value: envRef, isRef: true }],
+      command: "/bin/echo",
+      args: ["hello"],
+      cwd: process.cwd(),
+      stdin_ref: stdinRef,
+      approval_ids: [envApprovalId, stdinApprovalId],
+      wait_for_approval: false,
+    });
+    assert.equal(second.status, 200, "retry with both approval_ids must succeed");
+    assert.match(second.contentType, /ndjson/);
+    const exitLine = second.lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 0, "combined env+stdin --no-wait with approval_ids must complete exit 0");
+  });
+});
