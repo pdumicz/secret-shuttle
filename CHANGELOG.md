@@ -110,6 +110,6 @@
 - `value_visible_to_agent: false` is asserted in the route tests on every audit entry. The CLI process never reads the resolved bytes.
 
 ### Known limitations
-- `run` does NOT pass stdin through to the child in v0.2.0 — the child sees EOF on read (`stdio: ["ignore", "pipe", "pipe"]`). Spec §5.3 calls for stdin inheritance; Plan 4 ships the bidirectional chunked-HTTP-body wiring needed to make this work. The majority of `run` use cases (`npm start`, `vercel deploy`, `npx <tool>`) don't read interactive stdin.
+- `run` stdin pass-through is **one-shot, not interactive** (Plan 4c): the daemon writes the supplied `--stdin <ref>` value to fd 0 then closes the stream, so the child reads exactly those bytes followed by EOF. Interactive TTY-driven stdin (passwords typed live during the child's runtime, line-by-line prompts) is not supported. The majority of stdin-consuming CLIs use the one-shot pattern (`gh auth login --with-token`, `docker login --password-stdin`, `kubectl create secret … --from-file=-`) so this covers the common case; truly interactive stdin would need bidirectional chunked-HTTP-body wiring and is deferred.
 - `run` children inherit a hardened-PATH baseline (from `buildChildEnv`), not the user's shell PATH. Users who need a custom PATH can put it in the env file: `PATH=/custom/path/here`. Variable expansion (`$PATH`) is not supported.
 - Masking can leak if a child encodes the secret (base64, percent-encoding, etc.) before printing. This is by design — masking is the last line of defense, not the only one.
