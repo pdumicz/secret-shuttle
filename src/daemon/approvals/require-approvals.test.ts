@@ -1,4 +1,4 @@
-import { describe, test } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert";
 import { ApprovalStore, type ApprovalBinding } from "./store.js";
 import { SessionStore } from "./session-store.js";
@@ -324,6 +324,33 @@ test("requireApprovals: waiting flow sequential — env denied → throws approv
     (e: unknown) => e instanceof ShuttleError && e.code === "approval_denied",
   );
   assert.strictEqual(stdinCreated, false, "stdin must NOT have been minted after env denial");
+});
+
+test("requireApprovals: multi-binding session with max_uses=1 + 2 matches → throws session_max_uses_exceeded in Phase 1 (no Phase 2 commit)", async () => {
+  const sessionStore = new SessionStore({ now: () => 1000 });
+  const session = sessionStore.create({
+    ref_glob: "",
+    actions: ["inject-submit"],
+    destination_domains: ["a.example.com", "b.example.com"],
+    max_uses: 1,
+    ttl_ms: 60_000,
+  });
+  sessionStore.approve(session.id);
+  const store = new ApprovalStore({ now: () => 1000 });
+  // Two bindings both match the session by domain.
+  const bindingA: ApprovalBinding = { action: "inject_submit", ref: null, environment: "production", destination_domain: "a.example.com", target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_domains: ["a.example.com"] };
+  const bindingB: ApprovalBinding = { action: "inject_submit", ref: null, environment: "production", destination_domain: "b.example.com", target_id: null, field_fingerprint: null, template_id: null, template_params: null, allowed_domains: ["b.example.com"] };
+
+  const usesBefore = sessionStore.get(session.id)!.uses;
+  await assert.rejects(
+    requireApprovals({
+      store, bindings: [bindingA, bindingB], daemonPort: 1234,
+      sessionId: session.id, sessionStore,
+    }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "session_max_uses_exceeded",
+  );
+  // CRITICAL: Phase 1 threw before any Phase 2 commit. session.uses unchanged.
+  assert.strictEqual(sessionStore.get(session.id)!.uses, usesBefore);
 });
 
 test("requireApprovals: waiting flow sequential — all granted → returns both", async () => {

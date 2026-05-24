@@ -44,6 +44,11 @@ const POLL_MS = 200;
  * Under waiting flow with mints needed, sequential per-binding: mint, wait,
  * consume one at a time. Earlier non-mint plans are committed only after all
  * mints have been waited on, so a mid-flow denial doesn't burn earlier plans.
+ *
+ * Waiting-flow timeout semantics: `waitMs` is the PER-MINT deadline, not
+ * the cumulative deadline. With N mint-bindings, the maximum wall-clock
+ * wait is N × waitMs. This matches the semantics of the singular
+ * requireApproval that this primitive replaces.
  */
 export async function requireApprovals(
   opts: RequireApprovalsOptions,
@@ -61,6 +66,13 @@ export async function requireApprovals(
   // Phase 1: per-binding plan.
   const unusedIds = new Set(suppliedIds);
   const plans: Plan[] = [];
+  // Track how many session-fast-path mints we're planning for the current
+  // sessionId. canMatchSession reads session.uses live but doesn't know about
+  // sibling bindings we've already planned in this call. Without tracking,
+  // Phase 1 could plan N session bindings against a max_uses=N-1 session, and
+  // Phase 2 would fail mid-loop on the Nth mintFromSession — breaking the
+  // two-phase invariant.
+  let plannedSessionUses = 0;
 
   for (const binding of opts.bindings) {
     // 1. Synth path
@@ -73,6 +85,17 @@ export async function requireApprovals(
     // 2. Session peek
     if (opts.sessionId !== undefined && opts.sessionStore !== undefined) {
       if (opts.store.canMatchSession(opts.sessionId, binding, opts.sessionStore)) {
+        // Additionally check that planning ONE MORE session use won't blow past max_uses.
+        // canMatchSession reads session.uses live; plannedSessionUses tracks the sibling
+        // bindings already planned as "session" in this Phase 1 walk.
+        const session = opts.sessionStore.get(opts.sessionId)!;
+        if (session.max_uses !== undefined && session.uses + plannedSessionUses + 1 > session.max_uses) {
+          throw new ShuttleError(
+            "session_max_uses_exceeded",
+            `Session ${opts.sessionId} would exceed its max_uses cap of ${session.max_uses} (already at ${session.uses}, ${plannedSessionUses + 1} planned for this operation).`,
+          );
+        }
+        plannedSessionUses += 1;
         // Session takes precedence. If the client also supplied an ID matching
         // this binding, silently discard it from unusedIds so it doesn't trigger
         // approval_mismatch — but do NOT consume it (status stays "granted").
@@ -86,7 +109,10 @@ export async function requireApprovals(
         plans.push({ kind: "session", binding });
         continue;
       }
-      // false → fall through; throws bubble out
+      // canMatchSession contract: returns false on pattern no-match
+      // (fall through to supplied-ID path); throws on hard-fail session
+      // states (revoked / expired / denied / at-max-uses) which bubble
+      // out of requireApprovals entirely.
     }
 
     // 3. Supplied-ID match
@@ -204,6 +230,9 @@ async function waitForGrant(
   while (Date.now() < deadline) {
     const g = store.get(id);
     if (g === undefined) throw new ShuttleError("approval_not_found", "Approval vanished.");
+    // Defensive: if a grant we just minted was somehow consumed externally,
+    // surface that immediately rather than spinning to timeout.
+    if (g.status === "used") throw new ShuttleError("approval_already_used", "Approval was already used.");
     if (g.status === "granted") {
       return store.consume(id, binding);
     }
