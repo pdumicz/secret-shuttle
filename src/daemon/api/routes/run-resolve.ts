@@ -48,7 +48,7 @@ export function registerRunResolveRoute(
     // grant remains undefined for non-production refs) and the post-spawn
     // success/failure paths. For the run action this only ever holds a
     // single-use grant (run is NOT a SessionAction; the session matcher
-    // refuses and requireApproval falls back), so grant.session_id is
+    // refuses and requireApprovals falls back), so grant.session_id is
     // ALWAYS undefined and the conditional spread evaluates to nothing —
     // but we still wire the spread to preserve a single audit shape across
     // all routes.
@@ -246,7 +246,7 @@ export function registerRunResolveRoute(
     // actions imply different UI copy, audit lines, session-matcher rules).
     // requireApprovals handles atomicity: under --no-wait with mints needed for
     // either binding, it mints both atomically and surfaces details.approvals
-    // with both IDs. The legacy single requireApproval pattern with envApprovalRan
+    // with both IDs. The legacy single requireApprovals pattern with envApprovalRan
     // flag bookkeeping is no longer needed.
     const envProductionRefs = body.refs.filter(
       (r) => resolved.get(r)!.environment === "production",

@@ -25,7 +25,7 @@ export interface DaemonAuditEvent {
    * (a SessionGrant in src/daemon/approvals/session-store.ts) rather than from
    * a single-use approval window.  Present on BOTH the success audit and any
    * catch-block failure audit IFF the session was actually consumed
-   * (requireApproval returned a grant carrying session_id) — preserving the
+   * (requireApprovals returned a grant carrying session_id) — preserving the
    * contract "session_id appears in audit iff the session was charged a use".
    */
   session_id?: string;

@@ -151,8 +151,17 @@ Examples:
   secret-shuttle run --env-file=.env --stdin=ss://local/prod/GH_TOKEN -- \\
     gh auth login --with-token
 
-  # With pre-issued approval for production refs:
-  secret-shuttle run --env-file=.env --approval-id <id> -- vercel deploy
+  # With pre-issued approval for production refs (after --no-wait round-trip):
+  secret-shuttle run --env-file=.env --no-wait --approval-id <id> -- vercel deploy
+
+  # Combined env-file + stdin with multiple approvals (--no-wait + retry):
+  secret-shuttle run --env-file=.env --stdin=ss://local/prod/TOKEN --no-wait \\
+    -- gh auth login --with-token
+  # → emits approval_required; read both ids from details.approvals,
+  #   approve them in the hub, then retry with both --approval-id flags:
+  secret-shuttle run --env-file=.env --stdin=ss://local/prod/TOKEN --no-wait \\
+    --approval-id <env-id> --approval-id <stdin-id> \\
+    -- gh auth login --with-token
 
 Notes:
   - Refs are resolved by the daemon, never the CLI. The child gets them
@@ -161,8 +170,10 @@ Notes:
   - Resolved secret values are best-effort MASKED in the child's
     stdout/stderr before they reach this CLI. A hostile child can still
     exfiltrate via network; masking is defense-in-depth.
-  - Production refs require approval. Use --no-wait to receive an
-    approval_id immediately.
+  - Production refs require approval. Use --no-wait to receive
+    approval ids immediately (single id under error.message JSON, OR
+    multiple ids under details.approvals for combined env+stdin).
+    Retry with --approval-id <id> (repeatable for each pending approval).
   - The child runs in the CURRENT working directory (this CLI's cwd).
   - --stdin and --env-file cannot reference the SAME ref. Combining
     them returns stdin_ref_in_env_file (exit 2).

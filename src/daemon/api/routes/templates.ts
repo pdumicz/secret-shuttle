@@ -51,9 +51,9 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
     let effectiveEnv: string | undefined;
     let destEnv: string | undefined;
     // Hoisted OUTSIDE the try so a post-mint failure (e.g. resolveErr
-    // re-thrown after requireApproval consumed the session) still carries
+    // re-thrown after requireApprovals consumed the session) still carries
     // grant.session_id into the failure audit.  Optional-chained at use site
-    // because grant remains undefined if requireApproval itself threw
+    // because grant remains undefined if requireApprovals itself threw
     // (pre-mint failure), in which case no session was consumed and audit
     // MUST NOT carry session_id.
     let grant: ApprovalGrant | undefined;
@@ -115,7 +115,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         template_binary_sha256: sha256,
       };
 
-      // Single requireApproval call — handles both the initial (no approval_id)
+      // Single requireApprovals call — handles both the initial (no approval_id)
       // and the retry (approval_id supplied) paths.  When sessionId is set and
       // the binding matches the session pattern, the call mints a used grant
       // from the session and the audit emitted below will carry
@@ -172,7 +172,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
         ...(effectiveEnv !== undefined ? { environment: effectiveEnv } : {}),
         ...(destEnv !== undefined ? { destination_environment: destEnv } : {}),
         template_id: templateId,
-        // Optional-chain: grant is undefined if requireApproval itself threw
+        // Optional-chain: grant is undefined if requireApprovals itself threw
         // (pre-mint failure — no session consumed → audit MUST NOT carry
         // session_id).  Otherwise grant.session_id is the source session iff
         // the binding matched the session pattern.
