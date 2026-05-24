@@ -8,6 +8,8 @@ Cooperative blind mode, CLI, local encrypted vault, focused-field CDP capture/in
 
 Daemon-owned vault key (passphrase + scrypt envelope), one-shot context-bound approval grants through a local web UI, daemon-owned Chrome over `--remote-debugging-pipe`, filtered CDP proxy that blocks screenshots / DOM / AX / Runtime / Console / network-body reads during blind mode, command templates (no arbitrary `use-as-stdin`), exact-by-default domain matching, migration from V0.
 
+Plans 4a–4d (in progress): pre-approved sessions (4a), single hub tab (4b), stdin pass-through (4c), multi-approval continuation — `run --env-file <prod> --stdin <prod> --no-wait` now works end-to-end (4d, closed).
+
 ## V3 — Stronger Key Storage
 
 - OS keychain (macOS / Windows / Linux Secret Service)

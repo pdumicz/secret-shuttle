@@ -76,6 +76,52 @@ secret-shuttle inject-submit \
 
 Before blind mode, mark the field and submit control with `secret-shuttle browser mark focused|pick --as <label>`; the daemon then owns the whole transaction (the agent's browser access is severed while the secret is on the page). The daemon injects the stored secret into the marked field, clicks the marked submit control, waits for the approved success marker, and proves the raw secret is absent from every daemon-observable surface. It always requires human approval through the daemon UI (it authorizes auto-resume; `--approval-id` / `--no-wait` work as elsewhere); the approval UI shows the field/submit labels, the success marker, and an explicit auto-resume disclosure. Observation auto-resumes only if the success marker was observed and the absence proof passed; otherwise blind mode stays active and the response is `next: "manual_recovery_required"`, which the agent must surface to the human to run `secret-shuttle blind end` — the agent must not resume itself. The handles are revalidated and the submit handle must be on the same page/target + domain as the field handle (fail-closed), and the secret's `allowed_actions` must include `inject_submit` (no implicit grant from `inject_into_field`). Responses are enum-only and never contain the raw secret or any observed page text. Whether auto-resume succeeds in practice on a given provider's pages is best-effort; if a site forces manual recovery the secret was still written safely under blind mode and `secret-shuttle blind end` is the recovery. Unlike `inject`, which only writes the secret into the focused field and leaves a human to save and end blind manually, `inject-submit` also clicks submit, verifies success, and auto-resumes only if the secret is proven gone.
 
+## `secret-shuttle run`
+
+```bash
+# Env-var injection:
+secret-shuttle run --env-file=.env -- gh repo list
+
+# Stdin injection:
+secret-shuttle run --stdin=ss://local/prod/TOKEN -- gh auth login --with-token
+
+# Combined env + stdin:
+secret-shuttle run --env-file=.env --stdin=ss://local/prod/TOKEN -- gh auth login --with-token
+```
+
+Runs a command with resolved secrets injected as environment variables (`--env-file`) and/or piped to stdin (`--stdin`). The CLI never holds plaintext; secrets are resolved daemon-side. At least one of `--env-file` or `--stdin` is required.
+
+Key flags:
+
+```
+--env-file <path>       Dotenv-like file; ss:// refs at full-value position only.
+--stdin <ref>           ss:// ref whose value is piped to the child's fd 0 (one-shot).
+--no-wait               Return approval_required immediately instead of polling.
+--approval-id <id>      Pre-issued approval id. Repeatable for operations
+                        needing multiple approvals.
+--session <id>          Pre-approved session id.
+```
+
+Production refs always require approval through the hub UI. Use `--no-wait` for agentic flows that loop:
+
+```bash
+# First call — emits approval_required (single approval):
+secret-shuttle run --env-file=.env --no-wait -- gh repo list
+# → { error_code: "approval_required", message: "{\"approval_id\":\"...\",\"expires_at\":\"...\"}", ... }
+# After approving in the hub UI:
+secret-shuttle run --env-file=.env --no-wait --approval-id <id> -- gh repo list
+
+# Combined env + stdin with multiple approvals (--no-wait path):
+secret-shuttle run --env-file=.env --stdin=ss://local/prod/TOKEN --no-wait -- gh auth login --with-token
+# → emits approval_required with details.approvals: [
+#     {"approval_id": "...", "action": "run"},
+#     {"approval_id": "...", "action": "run_stdin"}
+#   ]
+# After approving both in the hub UI:
+secret-shuttle run --env-file=.env --stdin=ss://local/prod/TOKEN --no-wait \
+  --approval-id <env-id> --approval-id <stdin-id> -- gh auth login --with-token
+```
+
 ## `secret-shuttle reveal-capture`
 
 ```bash

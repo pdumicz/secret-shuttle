@@ -147,9 +147,10 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   action_not_allowed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   approval_required: {
     exitCode: EXIT_CODE_PERMISSION,
-    // The thrown message is JSON: {approval_id, expires_at}. The hint
-    // tells the agent how to recover.
-    hint: () => "Approve in the daemon UI, then re-run with --approval-id <id> (id is in the message JSON).",
+    // Single-approval ops: read approval_id from the message JSON.
+    // Multi-approval ops: read details.approvals (array of {approval_id, expires_at, action}).
+    // Either way, retry with --approval-id <id> (repeatable for each pending approval).
+    hint: () => "Open the printed URL to approve. For multiple approvals listed under details.approvals, repeat --approval-id <id> for each.",
   },
   blind_mode_domain_mismatch: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   blind_mode_required: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },

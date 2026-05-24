@@ -113,3 +113,29 @@
 - `run` stdin pass-through is **one-shot, not interactive** (Plan 4c): the daemon writes the supplied `--stdin <ref>` value to fd 0 then closes the stream, so the child reads exactly those bytes followed by EOF. Interactive TTY-driven stdin (passwords typed live during the child's runtime, line-by-line prompts) is not supported. The majority of stdin-consuming CLIs use the one-shot pattern (`gh auth login --with-token`, `docker login --password-stdin`, `kubectl create secret … --from-file=-`) so this covers the common case; truly interactive stdin would need bidirectional chunked-HTTP-body wiring and is deferred.
 - `run` children inherit a hardened-PATH baseline (from `buildChildEnv`), not the user's shell PATH. Users who need a custom PATH can put it in the env file: `PATH=/custom/path/here`. Variable expansion (`$PATH`) is not supported.
 - Masking can leak if a child encodes the secret (base64, percent-encoding, etc.) before printing. This is by design — masking is the last line of defense, not the only one.
+
+### Added — Plan 4d (multi-approval continuation)
+
+- **Multi-approval continuation.** Operations that gate on multiple `ApprovalBinding`s (currently only `run --env-file <prod> --stdin <prod>`) now work end-to-end under `--no-wait`. The daemon mints all required approvals atomically on the first round-trip and returns them via the new `details.approvals` array. The CLI carries them back via repeatable `--approval-id <id>` flags. Closes the combined `--env-file` (prod) + `--stdin` (prod) + `--no-wait` Known-limitation that was documented after Plan 4c.
+
+- **`ShuttleError.details`.** `ShuttleError` now carries an optional `details` field, propagated through `errorToJson` and reconstructed by `daemonErrorFromPayload`. Used by `approval_required` to surface the `approvals` array; available for any future error code that needs structured side-channel data.
+
+- **`--approval-id <id>` is repeatable** on every approval-gated command, via the shared `addApprovalIdOption` factory.
+
+### Changed — Plan 4d
+
+- **Internal: `require-approval.ts` → `require-approvals.ts`.** Single primitive `requireApprovals(bindings, …)` replaces the old `requireApproval(binding, …)`. All approval-gated routes updated. Single-binding callers pass `[binding]`. No behavioral change for single-approval operations.
+
+- **Internal: `ApprovalStore.findOrMintFromSession` split.** `canMatchSession` (pure peek; includes `max_uses` precondition) + `mintFromSession` (side-effect) replace the combined method. The new primitive's Phase 1 / Phase 2 invariant relies on this split — sessions are only used when the entire operation is guaranteed to commit.
+
+- **Wire format: `approval_ids` is now canonical.** `approval_id` (singular) in request bodies is a deprecated alias for `approval_ids: [approval_id]`. Sending both → `bad_request`. The singular form will be dropped in a future release.
+
+- **Wire format: `approval_required` carries `details.approvals`.** For multi-approval operations, `error.details.approvals` is an array of `{approval_id, expires_at, action}`. The legacy singular `approval_id` field in `error.message` (JSON-encoded) is kept for one release as the cross-version alias; it points at the first approval.
+
+- **`approval_required` registry hint** updated to mention repeatable `--approval-id` and the `details.approvals` field.
+
+### Removed — Plan 4d
+
+- **`combined_no_wait_unsupported` error code** (added in Plan 4c post-ship `460e750`). The multi-approval continuation path replaces the fail-fast.
+
+- **`src/daemon/approvals/require-approval.ts`** and its test file, once all callers were migrated to `require-approvals.ts`.

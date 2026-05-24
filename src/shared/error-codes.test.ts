@@ -85,7 +85,7 @@ test("approval_required → permission with workflow hint", () => {
   assert.equal(entry.exitCode, EXIT_CODE_PERMISSION);
   assert.equal(
     entry.hint("any"),
-    "Approve in the daemon UI, then re-run with --approval-id <id> (id is in the message JSON).",
+    "Open the printed URL to approve. For multiple approvals listed under details.approvals, repeat --approval-id <id> for each.",
   );
 });
 
