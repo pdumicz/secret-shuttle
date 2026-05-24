@@ -795,3 +795,138 @@ test("POST /v1/run/resolve: CLI disconnect actually kills the daemon-spawned chi
     }
   });
 });
+
+// -----------------------------------------------------------------------------
+// Plan 4c Task D: stdin_ref body field
+// -----------------------------------------------------------------------------
+
+test("POST /v1/run/resolve: stdin_ref resolves and child reads it (masked to ***)", async () => {
+  // End-to-end: seed a secret with use_as_stdin, ask the daemon to pipe it to
+  // `cat`, and confirm the child read it (echo to stdout) AND the masker
+  // replaced the raw value with *** in the streamed payload.
+  if (process.platform === "win32") return; // `cat` is POSIX
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "local", environment: "development", name: "STDIN_TOKEN",
+      value: "hello-from-stdin",
+      allowedActions: ["use_as_stdin"],
+    });
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [],
+      env: [],
+      command: "cat",
+      args: [],
+      stdin_ref: ref,
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 200);
+    // `cat` echoes the secret value, the masker replaces it with ***.
+    assert.equal(r.stdout, "***");
+    assert.equal(r.stdout.includes("hello-from-stdin"), false, "raw secret leaked to stdout");
+    const exitLine = r.lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 0);
+  });
+});
+
+test("POST /v1/run/resolve: stdin_ref malformed → bad_request before resolve", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [],
+      env: [],
+      command: "true",
+      args: [],
+      stdin_ref: "not-an-ss-url",
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.errorBody as { error_code: string }).error_code, "bad_request");
+  });
+});
+
+test("POST /v1/run/resolve: stdin_ref also in env refs → stdin_ref_in_env_file", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "local", environment: "development", name: "DUPED", value: "x",
+      allowedActions: ["use_as_stdin"],
+    });
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [ref],
+      env: [{ key: "DUPED", value: ref, isRef: true }],
+      command: "true",
+      args: [],
+      stdin_ref: ref,
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 400);
+    assert.equal(
+      (r.errorBody as { error_code: string }).error_code,
+      "stdin_ref_in_env_file",
+      "duplicate stdin_ref+env ref must produce the distinct stdin_ref_in_env_file code",
+    );
+  });
+});
+
+test("POST /v1/run/resolve: stdin_ref with use_as_stdin removed → action_not_allowed", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "local", environment: "development", name: "NO_STDIN", value: "x",
+      allowedActions: ["inject_into_field"], // deliberately excludes use_as_stdin
+    });
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [],
+      env: [],
+      command: "true",
+      args: [],
+      stdin_ref: ref,
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.errorBody as { error_code: string }).error_code, "action_not_allowed");
+  });
+});
+
+test("POST /v1/run/resolve: stdin-only audit emits action=run_stdin (not run)", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "local", environment: "development", name: "AUD", value: "v",
+      allowedActions: ["use_as_stdin"],
+    });
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [],
+      env: [],
+      command: "true",
+      args: [],
+      stdin_ref: ref,
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 200);
+    const auditPath = path.join(ctx.home, "audit.jsonl");
+    const lines = (await readFile(auditPath, "utf8")).split("\n").filter((l) => l.length > 0);
+    const stdinEntries = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.action === "run_stdin" && e.ref === ref);
+    assert.equal(stdinEntries.length, 1, "audit must contain exactly one run_stdin entry");
+    const entry = stdinEntries[0]!;
+    assert.equal(entry.ok, true);
+    assert.equal(entry.ref, ref);
+    assert.equal(entry.environment, "development");
+    // writeDaemonAudit always normalizes value_visible_to_agent to a strict
+    // boolean (audit.ts:59 — `event.value_visible_to_agent === true`), so it
+    // appears as `false` on the wire when the route omits the field. The
+    // daemon never surfaces stdin bytes to the agent: they go directly into
+    // the child's fd 0 and the CLI only sees masked output → `false` is the
+    // correct value here.
+    assert.equal(entry.value_visible_to_agent, false,
+      "run_stdin must record value_visible_to_agent:false (stdin bytes never leave the daemon)");
+    // And we must NOT emit a `run` entry for this stdin-only invocation.
+    const runEntries = lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.action === "run" && e.ref === ref);
+    assert.equal(runEntries.length, 0, "stdin-only run must not emit a `run` audit entry");
+  });
+});

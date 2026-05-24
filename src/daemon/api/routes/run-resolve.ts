@@ -11,6 +11,7 @@ import { createMasker } from "../../run/masker.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { asObject, optBool, optString, reqString } from "../validate.js";
+import { parseSecretRef } from "../../../shared/refs.js";
 import path from "node:path";
 
 interface RunResolveBody {
@@ -22,6 +23,13 @@ interface RunResolveBody {
   approval_id?: string;
   wait_for_approval?: boolean;
   session_id?: string;
+  /**
+   * Plan 4c: optional ss:// ref whose plaintext value is piped to the child's
+   * stdin (fd 0). Must NOT also appear in `refs` (the route rejects that with
+   * stdin_ref_in_env_file before any vault work). The CLI never sees the
+   * value — the daemon resolves and writes it.
+   */
+  stdin_ref?: string;
 }
 
 export function registerRunResolveRoute(
@@ -114,6 +122,37 @@ export function registerRunResolveRoute(
       const waitForApproval = optBool(o, "wait_for_approval");
       const sessionId = optString(o, "session_id");
 
+      // Plan 4c: optional stdin_ref. Validate its ss:// shape NOW (before any
+      // vault work) so a malformed ref surfaces as a clean pre-stream
+      // bad_request, and check for duplication with the env refs.
+      //
+      // parseSecretRef throws ShuttleError("invalid_ref", ...) on malformed
+      // input; we translate that to bad_request to match the plan contract
+      // "stdin_ref malformed → bad_request" — invalid_ref would conflate this
+      // with a separate code path (resolveRefs's own invalid_ref handling).
+      const stdinRefRaw = optString(o, "stdin_ref");
+      if (stdinRefRaw !== undefined) {
+        try {
+          parseSecretRef(stdinRefRaw);
+        } catch {
+          throw new ShuttleError(
+            "bad_request",
+            "stdin_ref must be a valid ss:// reference (ss://source/environment/name).",
+          );
+        }
+        // Duplicate-ref guard: same ref in BOTH env_refs and stdin_ref is
+        // almost certainly a user mistake (env_file and --stdin both pointing
+        // at the same secret). Fail closed with a distinct code so the CLI
+        // can surface a precise hint — and BEFORE the resolve batch so the
+        // user gets a fast 400 with no vault work.
+        if (refs.includes(stdinRefRaw)) {
+          throw new ShuttleError(
+            "stdin_ref_in_env_file",
+            `stdin_ref ${stdinRefRaw} also appears in env refs. Use one mechanism, not both.`,
+          );
+        }
+      }
+
       // cwd is required AND must be absolute. Use optString here (not reqString)
       // so a missing cwd flows into the explicit `missing_param` check below,
       // matching the plan contract for "cwd MUST be absolute. Reject missing_param
@@ -131,6 +170,7 @@ export function registerRunResolveRoute(
         ...(approvalId !== undefined ? { approval_id: approvalId } : {}),
         ...(waitForApproval !== undefined ? { wait_for_approval: waitForApproval } : {}),
         ...(sessionId !== undefined ? { session_id: sessionId } : {}),
+        ...(stdinRefRaw !== undefined ? { stdin_ref: stdinRefRaw } : {}),
       };
     } catch (e) {
       // Validation throws before any side effect — safe to surface as pre-stream JSON.
@@ -155,17 +195,26 @@ export function registerRunResolveRoute(
     // SECURITY: audit pre-spawn failures per ref. Denied use of a real OR
     // fictitious ref is security-relevant (a probe). We don't have full
     // SecretRecords for missing refs, but we DO have the requested ref string.
+    //
+    // Plan 4c: include stdin_ref in the same batch so the route's existing
+    // resolve / assertSecretActionAllowed / markUsed loops naturally cover
+    // it. The duplicate-ref guard above guarantees stdin_ref ∉ body.refs, so
+    // the two are disjoint within the resolved map.
+    const allRefs = body.stdin_ref !== undefined ? [body.stdin_ref, ...body.refs] : body.refs;
     let resolved: Awaited<ReturnType<typeof services.vault.resolveRefs>>;
     try {
-      resolved = await services.vault.resolveRefs(body.refs);
+      resolved = await services.vault.resolveRefs(allRefs);
     } catch (e) {
       const code = e instanceof ShuttleError ? e.code : "unexpected_error";
-      await auditPerRequestedRef(body.refs, false, code, grant?.session_id);
+      await auditPerRequestedRef(allRefs, body.stdin_ref, false, code, grant?.session_id);
       writeJsonError(res, 400, e);
       return;
     }
 
     // Enforce per-secret use_as_stdin action. Fails closed BEFORE the spawner runs.
+    // Both env refs and the optional stdin ref are gated by the SAME action
+    // ("use_as_stdin") — the daemon writes the resolved bytes into the child's
+    // environment or stdin, and either path lets the child observe the value.
     try {
       for (const record of resolved.values()) {
         assertSecretActionAllowed(record, "use_as_stdin");
@@ -173,17 +222,27 @@ export function registerRunResolveRoute(
     } catch (e) {
       const code = e instanceof ShuttleError ? e.code : "unexpected_error";
       // We have full records here, so audit with environment populated.
-      await auditPerRef(body.refs, resolved, false, code, grant?.session_id);
+      await auditPerRef(allRefs, body.stdin_ref, resolved, false, code, grant?.session_id);
       writeJsonError(res, 400, e);
       return;
     }
 
-    // Determine production gating from canonical ref env (ss://source/env/name).
-    const isProduction = Array.from(resolved.values()).some(
-      (r) => r.environment === "production",
+    // Approval gating. Env refs (action="run") and the stdin ref (action="run_stdin")
+    // require SEPARATE approval bindings — different actions imply different UI
+    // copy, different session-matcher behavior, and different audit lines. We
+    // mint up to two approvals here, in this order:
+    //   1. Env refs (if any production env ref is present): one combined `run`
+    //      binding (matches today's behavior; preserves the existing approval
+    //      UI for env-only invocations).
+    //   2. Stdin ref (if it exists and is production): a separate `run_stdin`
+    //      binding. The UI copy this routes through is in hub-ui.html under
+    //      human[].run_stdin (Plan 4c Task B).
+    // Either step can fail; on failure we audit per-ref (with the appropriate
+    // action discriminator) and short-circuit.
+    const envProductionRefs = body.refs.filter(
+      (r) => resolved.get(r)!.environment === "production",
     );
-
-    if (isProduction) {
+    if (envProductionRefs.length > 0) {
       const binding: ApprovalBinding = {
         action: "run",
         ref: null,
@@ -216,7 +275,45 @@ export function registerRunResolveRoute(
         // grant?.session_id is undefined here unless the session fast-path
         // succeeded — for the run binding, the matcher always refuses (run is
         // NOT a SessionAction), so the spread evaluates to nothing.
-        await auditPerRef(body.refs, resolved, false, e instanceof ShuttleError ? e.code : "unexpected_error", grant?.session_id);
+        await auditPerRef(allRefs, body.stdin_ref, resolved, false, e instanceof ShuttleError ? e.code : "unexpected_error", grant?.session_id);
+        writeJsonError(res, 400, e);
+        return;
+      }
+    }
+    if (body.stdin_ref !== undefined && resolved.get(body.stdin_ref)!.environment === "production") {
+      const stdinBinding: ApprovalBinding = {
+        action: "run_stdin",
+        ref: body.stdin_ref,
+        environment: "production",
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: null,
+        template_params: {
+          command: body.command,
+          args: JSON.stringify(body.args),
+          ref: body.stdin_ref,
+        },
+        allowed_domains: [],
+      };
+      try {
+        const stdinGrant = await requireApproval({
+          store: services.approvals,
+          binding: stdinBinding,
+          daemonPort: daemonPortRef(),
+          sessionStore: services.sessionStore,
+          openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
+          ...(body.session_id !== undefined ? { sessionId: body.session_id } : {}),
+          // approval_id only applies to the FIRST approval; for the second
+          // approval the client cannot pre-mint an ID. The Plan 4c CLI in
+          // Task E supplies one approval_id (the env approval gets it).
+          ...(body.wait_for_approval === false ? { waitMs: 0 } : {}),
+        });
+        // Preserve any session_id from the first grant; if there was no first
+        // grant (stdin-only), pick up the stdin one.
+        if (grant === undefined) grant = stdinGrant;
+      } catch (e) {
+        await auditPerRef(allRefs, body.stdin_ref, resolved, false, e instanceof ShuttleError ? e.code : "unexpected_error", grant?.session_id);
         writeJsonError(res, 400, e);
         return;
       }
@@ -229,7 +326,7 @@ export function registerRunResolveRoute(
         const record = resolved.get(entry.value);
         if (record === undefined) {
           // Should not happen — resolveRefs would have thrown — but guard anyway.
-          await auditPerRef(body.refs, resolved, false, "secret_not_found", grant?.session_id);
+          await auditPerRef(allRefs, body.stdin_ref, resolved, false, "secret_not_found", grant?.session_id);
           writeJsonError(res, 400, new ShuttleError("secret_not_found", `Ref ${entry.value} could not be resolved.`));
           return;
         }
@@ -327,6 +424,14 @@ export function registerRunResolveRoute(
     });
 
     let childExitCode = 0;
+    // Plan 4c: thread the resolved stdin value into the spawner via stdinBytes.
+    // The exactOptionalPropertyTypes flag means we can't pass `stdinBytes: undefined`
+    // when the field is optional — use the optional-spread idiom instead.
+    // The bytes themselves are NEVER seen by the CLI; the daemon writes them
+    // directly to the child's fd 0 (see spawner.ts).
+    const stdinBytes = body.stdin_ref !== undefined
+      ? Buffer.from(resolved.get(body.stdin_ref)!.value, "utf8")
+      : undefined;
     await spawnAndStream({
       cmd: body.command,
       args: body.args,
@@ -340,6 +445,7 @@ export function registerRunResolveRoute(
         },
       },
       signal: abortController.signal,
+      ...(stdinBytes !== undefined ? { stdinBytes } : {}),
     });
 
     // markUsed + audit AFTER the child exits. Success criterion: child exit == 0.
@@ -350,7 +456,7 @@ export function registerRunResolveRoute(
     for (const ref of resolved.keys()) {
       await services.vault.markUsed(ref).catch(() => undefined);
     }
-    await auditPerRef(body.refs, resolved, ok, ok ? undefined : "child_exit_nonzero", grant?.session_id);
+    await auditPerRef(allRefs, body.stdin_ref, resolved, ok, ok ? undefined : "child_exit_nonzero", grant?.session_id);
 
     // Close the response only if we still can. On the cancel path, res is
     // already destroyed/ended — writableEnded check prevents the double-end
@@ -360,8 +466,14 @@ export function registerRunResolveRoute(
     }
   });
 
+  /**
+   * Plan 4c: discriminate the audit action per-ref. The stdin ref (if any)
+   * audits as `run_stdin`; all other refs audit as `run`. The shape is
+   * otherwise identical — same fields, same conditional spreads.
+   */
   async function auditPerRef(
     refs: readonly string[],
+    stdinRef: string | undefined,
     resolved: Awaited<ReturnType<typeof services.vault.resolveRefs>>,
     ok: boolean,
     errorCode: string | undefined,
@@ -369,8 +481,9 @@ export function registerRunResolveRoute(
   ): Promise<void> {
     for (const ref of refs) {
       const record = resolved.get(ref);
+      const action = ref === stdinRef ? "run_stdin" : "run";
       await writeDaemonAudit({
-        action: "run",
+        action,
         ok,
         ref,
         ...(record !== undefined ? { environment: record.environment } : {}),
@@ -384,16 +497,22 @@ export function registerRunResolveRoute(
    * Audit per requested-ref WITHOUT a resolved-record map. Used when
    * resolveRefs failed and we have no environment info — we still want to
    * log the attempted use (a denied or non-existent ref is a probe).
+   *
+   * Plan 4c: also discriminates `run_stdin` vs `run` per-ref so a probe of
+   * a non-existent stdin_ref is logged with the action that was actually
+   * requested.
    */
   async function auditPerRequestedRef(
     refs: readonly string[],
+    stdinRef: string | undefined,
     ok: boolean,
     errorCode: string | undefined,
     sessionId: string | undefined,
   ): Promise<void> {
     for (const ref of refs) {
+      const action = ref === stdinRef ? "run_stdin" : "run";
       await writeDaemonAudit({
-        action: "run",
+        action,
         ok,
         ref,
         ...(errorCode !== undefined ? { error_code: errorCode } : {}),
