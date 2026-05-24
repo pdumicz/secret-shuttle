@@ -3,12 +3,13 @@ import { blankAllPages, disableObservationDomains } from "../../chrome/internal-
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
-import { requireApproval } from "../../approvals/require-approval.js";
+import { requireApprovals } from "../../approvals/require-approvals.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
+import { asObject, optApprovalIds } from "../validate.js";
 
 interface StartBody { domain?: string; reason?: string; }
-interface EndBody { approval_id?: string; wait_for_approval?: boolean; session_id?: string; }
+interface EndBody { approval_ids?: string[]; wait_for_approval?: boolean; session_id?: string; }
 
 export function registerBlind(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/blind/start", async (_req, raw) => {
@@ -45,8 +46,10 @@ export function registerBlind(server: DaemonServer, services: DaemonServices, da
     }
   });
   server.addRoute("POST", "/v1/blind/end", async (_req, raw) => {
+    const o = asObject(raw);
+    const approvalIds = optApprovalIds(o);
     const b = (raw ?? {}) as EndBody;
-    const { approval_id, wait_for_approval, session_id } = b;
+    const { wait_for_approval, session_id } = b;
     // Hoisted OUTSIDE the try so the catch-block audit can carry session_id
     // when applicable. blind_end is NOT a SessionAction — re-revealing the
     // page after a blind mask is a destructive privacy boundary — so the
@@ -77,17 +80,18 @@ export function registerBlind(server: DaemonServer, services: DaemonServices, da
         template_id: null,
         template_params: null,
       };
-      grant = await requireApproval({
+      const grants = await requireApprovals({
         store: services.approvals,
-        binding,
+        bindings: [binding],
         daemonPort: daemonPortRef(),
         force: true,
         sessionStore: services.sessionStore,
         openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
         ...(session_id !== undefined ? { sessionId: session_id } : {}),
-        ...(approval_id !== undefined ? { approvalIdFromClient: approval_id } : {}),
+        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
         ...(wait_for_approval === false ? { waitMs: 0 } : {}),
       });
+      grant = grants[0]!
 
       // Approval granted: navigate every visible page to about:blank so any
       // secret on screen is removed BEFORE observation can resume.
