@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomBytes } from "node:crypto";
 import { ShuttleError } from "../../../shared/errors.js";
-import { requireApproval } from "../../approvals/require-approval.js";
+import { requireApprovals } from "../../approvals/require-approvals.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
 import type { DaemonServer } from "../../server.js";
@@ -11,7 +11,7 @@ import type { DaemonServices } from "../../services.js";
 import { parseTemplate } from "../../inject/template.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { writeDaemonAudit } from "../../audit.js";
-import { asObject, optBool, optString, reqString } from "../validate.js";
+import { asObject, optApprovalIds, optBool, optString, reqString } from "../validate.js";
 
 export function registerInjectRenderRoute(
   server: DaemonServer,
@@ -24,7 +24,7 @@ export function registerInjectRenderRoute(
     const o = asObject(raw);
     const template = reqString(o, "template");
     const outputPath = reqString(o, "output_path");
-    const approvalId = optString(o, "approval_id");
+    const approvalIds = optApprovalIds(o);
     const waitForApproval = optBool(o, "wait_for_approval");
     const sessionId = optString(o, "session_id");
 
@@ -77,16 +77,17 @@ export function registerInjectRenderRoute(
           },
           allowed_domains: [],
         };
-        grant = await requireApproval({
+        const grants = await requireApprovals({
           store: services.approvals,
-          binding,
+          bindings: [binding],
           daemonPort: daemonPortRef(),
           sessionStore: services.sessionStore,
           openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
           ...(sessionId !== undefined ? { sessionId } : {}),
-          ...(approvalId !== undefined ? { approvalIdFromClient: approvalId } : {}),
+          ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
           ...(waitForApproval === false ? { waitMs: 0 } : {}),
         });
+        grant = grants[0];
       }
 
       const valuesMap = new Map<string, string>();
