@@ -129,3 +129,15 @@ test("ShuttleError positional-form opts (number) ignores details", () => {
   assert.strictEqual(e.exitCode, 2);
   assert.strictEqual(e.details, undefined);
 });
+
+test("errorToJson omits details when null (treats null same as undefined)", () => {
+  const e = new ShuttleError("bad_request", "msg", { details: null });
+  const j = errorToJson(e);
+  assert.ok(!("details" in j), "details key must NOT appear when null");
+});
+
+test("errorToJson emits details when explicit empty object", () => {
+  const e = new ShuttleError("bad_request", "msg", { details: {} });
+  const j = errorToJson(e);
+  assert.deepStrictEqual(j.details, {});
+});

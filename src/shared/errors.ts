@@ -3,6 +3,12 @@ import { lookupErrorCode } from "./error-codes.js";
 export type ShuttleErrorOpts = {
   exitCode?: number;
   hint?: string | null;
+  /**
+   * Structured side-channel data, serialised to the top-level `details` key in
+   * errorToJson output. Omitted from JSON when undefined OR null — both cases
+   * keep the error shape byte-identical to callers that don't pass details
+   * at all. Used by Plan 4d's approval_required to carry the approvals array.
+   */
   details?: unknown;
 };
 
@@ -10,7 +16,7 @@ export class ShuttleError extends Error {
   readonly code: string;
   readonly exitCode: number;
   readonly hint: string | null;
-  readonly details: unknown | undefined;
+  readonly details: unknown;
 
   constructor(
     code: string,
@@ -64,7 +70,11 @@ export function errorToJson(error: unknown): Record<string, unknown> {
       hint: error.hint,
       exit_code: error.exitCode,
     };
-    if (error.details !== undefined) {
+    // Omit details from JSON when undefined OR null — both should produce
+    // a byte-identical error shape vs. callers that omit the field entirely.
+    // (null is a common footgun: a caller writing { details: null } would
+    // otherwise emit details: null into the wire shape, breaking parity.)
+    if (error.details !== undefined && error.details !== null) {
       base.details = error.details;
     }
     return base;
