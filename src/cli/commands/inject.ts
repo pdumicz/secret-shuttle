@@ -4,17 +4,18 @@ import path from "node:path";
 import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
 import { ShuttleError } from "../../shared/errors.js";
+import { addApprovalIdOption } from "./_approval-id-option.js";
 
 export function injectCommand(): Command {
-  return new Command("inject")
+  const cmd = new Command("inject")
     .description("Render a template with ss:// refs resolved; daemon writes the file at mode 0600 inside $HOME.")
     .requiredOption("-i, --input <path>", "Template file containing ss:// refs.")
     .requiredOption("-o, --output <path>", "Output file path (must resolve inside $HOME), or '-' for stdout.")
-    .option("--approval-id <id>", "Pre-issued approval id.")
     .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
     .option("--no-wait", "Return approval_required without waiting.")
-    .option("--json", "Forward-compat no-op (always emits JSON).", false)
-    .action(async (options) => {
+    .option("--json", "Forward-compat no-op (always emits JSON).", false);
+  addApprovalIdOption(cmd);
+  return cmd.action(async (options) => {
       let template: string;
       try {
         template = await readFile(options.input, "utf8");
@@ -34,7 +35,7 @@ export function injectCommand(): Command {
         template,
         output_path: outputPathForDaemon,
       };
-      if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      if (options.approvalId !== undefined) body.approval_ids = options.approvalId;
       if (options.session !== undefined) body.session_id = options.session;
       if (options.wait === false) body.wait_for_approval = false;
       const r = await daemonRequest("POST", "/v1/inject/render", body);

@@ -4,9 +4,10 @@ import { ok, outputJson } from "../../shared/result.js";
 import { collectRepeated } from "./helpers.js";
 import { ShuttleError } from "../../shared/errors.js";
 import { canonicalEnvironment } from "../../shared/refs.js";
+import { addApprovalIdOption } from "./_approval-id-option.js";
 
 export function revealCaptureCommand(): Command {
-  return new Command("reveal-capture")
+  const cmd = new Command("reveal-capture")
     .description("Daemon-owned: click a marked reveal control, capture the revealed secret (field/container/focused-after-reveal), hide it, and auto-resume only if the secret is proven gone.")
     .requiredOption("--name <name>")
     .requiredOption("--env <environment>")
@@ -20,10 +21,10 @@ export function revealCaptureCommand(): Command {
     .option("--allow-domain <domain>", "Allowed domain (repeatable).", collectRepeated, [])
     .option("--description <description>")
     .option("--force", "Overwrite an existing secret with the same ref.", false)
-    .option("--approval-id <id>")
     .option("--session <id>", "Use a pre-approved session id (see 'internal session create').")
-    .option("--no-wait")
-    .action(async (options) => {
+    .option("--no-wait");
+  addApprovalIdOption(cmd);
+  return cmd.action(async (options) => {
       const domains = options.allowDomain as string[];
       if (canonicalEnvironment(options.env) === "production" && domains.length === 0) {
         throw new ShuttleError(
@@ -46,7 +47,7 @@ export function revealCaptureCommand(): Command {
       if (options.domain !== undefined) bodyObj.domain = options.domain;
       if (domains.length > 0) bodyObj.allowed_domains = domains;
       if (options.description !== undefined) bodyObj.description = options.description;
-      if (options.approvalId !== undefined) bodyObj.approval_id = options.approvalId;
+      if (options.approvalId !== undefined) bodyObj.approval_ids = options.approvalId;
       if (options.session !== undefined) bodyObj.session_id = options.session;
       const r = await daemonRequest("POST", "/v1/secrets/reveal-capture", bodyObj);
       outputJson(ok(r as Record<string, unknown>));

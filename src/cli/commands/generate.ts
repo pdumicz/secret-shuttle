@@ -5,9 +5,10 @@ import { collectRepeated } from "./helpers.js";
 import { ShuttleError } from "../../shared/errors.js";
 import { canonicalEnvironment } from "../../shared/refs.js";
 import { withPendingDeprecationWarning } from "../../shared/deprecation.js";
+import { addApprovalIdOption } from "./_approval-id-option.js";
 
 export function generateCommand(): Command {
-  return new Command("generate")
+  const cmd = new Command("generate")
     .description("(deprecated) Use 'secret-shuttle secrets set' instead.")
     .requiredOption("--name <name>")
     .requiredOption("--env <environment>")
@@ -17,10 +18,10 @@ export function generateCommand(): Command {
     .option("--allow-action <action>", "Allowed secret action (repeatable). Omit to use defaults.", collectRepeated, [])
     .option("--description <description>")
     .option("--force", "Overwrite an existing secret with the same ref.", false)
-    .option("--approval-id <id>", "Pre-issued approval id.")
     .option("--no-wait", "Return approval_required without waiting.")
-    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false)
-    .action(async (options) => {
+    .option("--json", "Emit machine-readable JSON (default — flag is a no-op for forward compatibility).", false);
+  addApprovalIdOption(cmd);
+  return cmd.action(async (options) => {
       withPendingDeprecationWarning("generate", "secrets set");
       const domains = options.allowDomain as string[];
       if (canonicalEnvironment(options.env) === "production" && domains.length === 0) {
@@ -41,7 +42,7 @@ export function generateCommand(): Command {
       const actions = options.allowAction as string[];
       if (actions.length > 0) body.allowed_actions = actions;
       if (options.description !== undefined) body.description = options.description;
-      if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      if (options.approvalId !== undefined) body.approval_ids = options.approvalId;
       const r = await daemonRequest("POST", "/v1/secrets/generate", body);
       outputJson(ok(r as Record<string, unknown>));
     });

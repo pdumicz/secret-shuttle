@@ -4,9 +4,10 @@ import { ok, outputJson } from "../../shared/result.js";
 import { assertCaptureSource, collectRepeated } from "./helpers.js";
 import { ShuttleError } from "../../shared/errors.js";
 import { canonicalEnvironment } from "../../shared/refs.js";
+import { addApprovalIdOption } from "./_approval-id-option.js";
 
 export function captureCommand(): Command {
-  return new Command("capture")
+  const cmd = new Command("capture")
     .description("Capture a secret via the daemon. The raw value is never returned.")
     .requiredOption("--name <name>")
     .requiredOption("--env <environment>")
@@ -15,9 +16,9 @@ export function captureCommand(): Command {
     .option("--allow-domain <domain>", "Allowed domain.", collectRepeated, [])
     .option("--description <description>")
     .option("--force", "Overwrite an existing secret with the same ref.", false)
-    .option("--approval-id <id>")
-    .option("--no-wait")
-    .action(async (options) => {
+    .option("--no-wait");
+  addApprovalIdOption(cmd);
+  return cmd.action(async (options) => {
       assertCaptureSource(options.from);
       const domains = options.allowDomain as string[];
       if (canonicalEnvironment(options.env) === "production" && domains.length === 0) {
@@ -36,7 +37,7 @@ export function captureCommand(): Command {
       };
       if (domains.length > 0) body.allowed_domains = domains;
       if (options.description !== undefined) body.description = options.description;
-      if (options.approvalId !== undefined) body.approval_id = options.approvalId;
+      if (options.approvalId !== undefined) body.approval_ids = options.approvalId;
       const r = await daemonRequest("POST", "/v1/secrets/capture", body);
       outputJson(ok(r as Record<string, unknown>));
     });
