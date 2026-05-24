@@ -37,9 +37,10 @@ export function daemonErrorFromPayload(payload: unknown): ShuttleError {
     "unknown error";
 
   // Daemon-provided fields take precedence over registry defaults.
-  const opts: { exitCode?: number; hint?: string | null } = {};
+  const opts: { exitCode?: number; hint?: string | null; details?: unknown } = {};
   if (typeof p.exit_code === "number") opts.exitCode = p.exit_code;
   if (typeof p.hint === "string" || p.hint === null) opts.hint = p.hint;
+  if ("details" in p) opts.details = p.details;
 
   return new ShuttleError(code, message, opts);
 }

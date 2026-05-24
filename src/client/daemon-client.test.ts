@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { DaemonServer } from "../daemon/server.js";
 import { writeSocketFile } from "../daemon/socket-file.js";
-import { ShuttleError } from "../shared/errors.js";
+import { ShuttleError, errorToJson } from "../shared/errors.js";
 import { daemonErrorFromPayload, daemonRequest } from "./daemon-client.js";
 
 async function withEphemeralDaemon<T>(fn: (ctx: { token: string; port: number }) => Promise<T>): Promise<T> {
@@ -132,4 +132,40 @@ test("daemonErrorFromPayload uses flat error_code/message when nested error bloc
   assert.equal(err.message, "Vault not initialized");
   assert.equal(err.hint, "Run: secret-shuttle init");
   assert.equal(err.exitCode, 3);
+});
+
+test("daemonErrorFromPayload preserves details from payload", () => {
+  const payload = {
+    ok: false,
+    error: { code: "approval_required", message: "m" },
+    error_code: "approval_required",
+    message: "m",
+    hint: "h",
+    exit_code: 3,
+    details: { approvals: [{ approval_id: "a", expires_at: 1, action: "run" }, { approval_id: "b", expires_at: 1, action: "run_stdin" }] },
+  };
+  const e = daemonErrorFromPayload(payload);
+  assert.deepStrictEqual(e.details, { approvals: [{ approval_id: "a", expires_at: 1, action: "run" }, { approval_id: "b", expires_at: 1, action: "run_stdin" }] });
+});
+
+test("daemonErrorFromPayload leaves details undefined when omitted", () => {
+  const payload = {
+    ok: false,
+    error: { code: "bad_request", message: "m" },
+    error_code: "bad_request",
+    message: "m",
+    exit_code: 2,
+  };
+  const e = daemonErrorFromPayload(payload);
+  assert.strictEqual(e.details, undefined);
+});
+
+test("ShuttleError details round-trip via errorToJson + JSON wire + daemonErrorFromPayload", () => {
+  const original = new ShuttleError("approval_required", "msg", { details: { approvals: [{ approval_id: "abc", expires_at: 999, action: "run" }] } });
+  // Simulate the daemon→CLI wire: serialize via errorToJson, parse via daemonErrorFromPayload.
+  const wire = JSON.parse(JSON.stringify(errorToJson(original)));
+  const reconstructed = daemonErrorFromPayload(wire);
+  assert.deepStrictEqual(reconstructed.details, original.details);
+  assert.strictEqual(reconstructed.code, "approval_required");
+  assert.strictEqual(reconstructed.message, "msg");
 });
