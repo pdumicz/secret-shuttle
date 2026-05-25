@@ -158,6 +158,63 @@ test("ApprovalBinding accepts run_stdin action", () => {
 });
 
 // ---------------------------------------------------------------------------
+// invalidate (terminal-state no-op behavior)
+// ---------------------------------------------------------------------------
+
+test("invalidate: denied grant is a no-op (terminal state preserved, no duplicate event)", () => {
+  const events: string[] = [];
+  const store = new ApprovalStore({
+    onEvent: (e) => events.push(e.kind),
+  });
+  const b = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const g = store.create(b);
+  store.deny(g.id);
+  events.length = 0;
+
+  store.invalidate(g.id);
+  // No new event. Terminal state (denied) is preserved — no "cancelled" emitted.
+  assert.strictEqual(events.length, 0);
+  // The grant stays in the store with status=denied (invalidate didn't remove it).
+  assert.strictEqual(store.get(g.id)?.status, "denied");
+});
+
+test("invalidate: used grant is a no-op", () => {
+  const events: string[] = [];
+  const store = new ApprovalStore({
+    onEvent: (e) => events.push(e.kind),
+  });
+  const b = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const g = store.create(b);
+  store.approve(g.id);
+  store.consume(g.id, b);
+  events.length = 0;
+
+  store.invalidate(g.id);
+  assert.strictEqual(events.length, 0);
+  // The grant remains in the store as used (consume doesn't delete; invalidate didn't either).
+  assert.strictEqual(store.get(g.id)?.status, "used");
+});
+
+test("invalidate: expired grant is a no-op", () => {
+  let nowMs = 1000;
+  const events: string[] = [];
+  const store = new ApprovalStore({
+    ttlMs: 100,
+    now: () => nowMs,
+    onEvent: (e) => events.push(e.kind),
+  });
+  const b = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const g = store.create(b);
+  // Don't approve — let it expire.
+  nowMs = 1500;
+  store.get(g.id); // triggers pending → expired transition; fires "expired" event
+  events.length = 0;
+
+  store.invalidate(g.id);
+  assert.strictEqual(events.length, 0);
+});
+
+// ---------------------------------------------------------------------------
 // approvalBindingsMatch (public matcher)
 // ---------------------------------------------------------------------------
 

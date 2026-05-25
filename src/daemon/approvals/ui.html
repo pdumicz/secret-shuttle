@@ -41,7 +41,20 @@
       async function pollForTerminal() {
         try {
           const r = await fetch(`/ui/approvals/${id}?token=${token}`);
-          if (!r.ok) return;
+          if (!r.ok) {
+            // 404 = grant was cancelled (invalidated) after the approval page
+            // was opened. Surface a terminal-cancelled state for the user and
+            // signal operation_done to the hub broker so it drains to the next
+            // queued operation. Without this, a cancelled approval would sit in
+            // the hub iframe forever — the broker would never promote the next
+            // operation because it never received operation_done.
+            if (r.status === 404) {
+              stopPolling();
+              document.getElementById("status").textContent = "Status: cancelled";
+              notifyHubIfFramed();
+            }
+            return;
+          }
           const body = await r.json();
           if (terminalStatuses.has(body.status)) {
             stopPolling();

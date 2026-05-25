@@ -40,9 +40,11 @@ const POLL_MS = 200;
  * just the missing ones and throw approval_required with all of them in
  * `details.approvals`. Supplied IDs are not consumed; sessions are not used.
  *
- * Under waiting flow with mints needed, sequential per-binding: mint, wait,
- * consume one at a time. Earlier non-mint plans are committed only after all
- * mints have been waited on, so a mid-flow denial doesn't burn earlier plans.
+ * Under waiting flow with mints needed, sequential per-binding: mint, surface
+ * to hub, wait for status=granted. The actual consume happens at the end in
+ * a single atomic consumeBatch alongside supplied-ID consumes, so a slow user
+ * approval on one binding cannot leave an earlier-waited mint consumed while
+ * a supplied ID has since expired.
  *
  * Waiting-flow timeout semantics: `waitMs` is the PER-MINT deadline, not
  * the cumulative deadline. With N mint-bindings, the maximum wall-clock

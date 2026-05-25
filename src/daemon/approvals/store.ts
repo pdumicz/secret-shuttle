@@ -146,6 +146,11 @@ export class ApprovalStore {
   invalidate(id: string): void {
     const g = this.grants.get(id);
     if (g === undefined) return;
+    // Status-aware: only cancel grants that are still LIVE (pending or
+    // granted). Terminal states (denied/expired/used) already represent
+    // the grant's final audit story — emitting a duplicate "cancelled"
+    // event for an already-denied grant muddies the lifecycle.
+    if (g.status !== "pending" && g.status !== "granted") return;
     this.grants.delete(id);
     this.onEvent?.({ kind: "cancelled", grant: g });
   }

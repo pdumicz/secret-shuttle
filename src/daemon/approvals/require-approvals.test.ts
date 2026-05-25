@@ -558,7 +558,8 @@ test("requireApprovals: P2 — both supplied IDs already past TTL → Phase 1 th
     }),
     (e: unknown) => e instanceof ShuttleError && e.code === "approval_expired",
   );
-  // Critical: env stays granted (Phase 2 final batch caught the expiry atomically).
+  // Critical: env stays granted. The expiry was caught by waitForGranted
+  // (Phase 1 TTL path) before reaching consumeBatch — no supplied approval burned.
   assert.strictEqual(store.get(envApproval.id)!.status, "granted");
   // Critical: stdin's minted grant — find it — is NOT used.
   // We can't easily enumerate the store, but we can verify the only-known-id
@@ -595,6 +596,7 @@ test("requireApprovals: P1 — waiting-flow denial invalidates earlier-granted s
   // would otherwise remain "granted" in the store, a live reusable auth.
   // After this fix, invalidate() removes it on the throw.
   let runApprovalId: string | undefined;
+  let stdinApprovalId: string | undefined;
 
   const store = new ApprovalStore({
     onEvent: (event) => {
@@ -603,6 +605,7 @@ test("requireApprovals: P1 — waiting-flow denial invalidates earlier-granted s
           runApprovalId = event.grant.id;
           setTimeout(() => store.approve(event.grant.id), 5);
         } else if (event.grant.action === "run_stdin") {
+          stdinApprovalId = event.grant.id;
           setTimeout(() => store.deny(event.grant.id), 5);
         }
       }
@@ -627,6 +630,16 @@ test("requireApprovals: P1 — waiting-flow denial invalidates earlier-granted s
     store.get(runApprovalId!),
     undefined,
     "the earlier-granted run mint must be invalidated (removed from store) after the operation failed",
+  );
+
+  // run_stdin was denied (terminal). invalidate() is status-aware: terminal
+  // grants are no-ops. So run_stdin stays in the store with status="denied"
+  // (its terminal state, preserved for audit).
+  assert.ok(stdinApprovalId, "test must have observed the stdin mint");
+  assert.strictEqual(
+    store.get(stdinApprovalId!)?.status,
+    "denied",
+    "the denied run_stdin mint must NOT be re-cancelled (terminal status preserved)",
   );
 });
 
