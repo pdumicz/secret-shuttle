@@ -312,3 +312,193 @@ test("e2e: production stdin op → hub surface → approve → child reads value
     assert.equal(stdout.includes("prod-secret-value"), false, "raw secret leaked into stdout");
   });
 });
+
+test("hub e2e: combined production env+stdin via FIFO broker queue (Plan 4d)", async () => {
+  await withE2EDaemon(async (ctx) => {
+    // Unlock the vault so run-resolve can resolve production refs.
+    const unlockRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock`, {
+      method: "POST",
+      headers: { Authorization: "Bearer t", "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "p", set_passphrase: true }),
+    });
+    assert.equal(unlockRes.status, 200);
+
+    // Seed two production secrets: one used as an env-file ref, one as stdin.
+    await ctx.services.vault.upsertSecret({
+      source: "local",
+      environment: "production",
+      name: "COMBINED_ENV",
+      value: "combined-env-value",
+      allowedDomains: ["docker.io"],
+      allowedActions: ["use_as_stdin"],
+    });
+    await ctx.services.vault.upsertSecret({
+      source: "local",
+      environment: "production",
+      name: "COMBINED_STDIN",
+      value: "combined-stdin-value",
+      allowedDomains: ["docker.io"],
+      allowedActions: ["use_as_stdin"],
+    });
+
+    const envRef = "ss://local/prod/COMBINED_ENV";
+    const stdinRef = "ss://local/prod/COMBINED_STDIN";
+
+    // Pre-attach a fake subscriber so broker.surface() promotes the first
+    // approval URL directly to activeUrl (instead of enqueueing it detached).
+    // Without this, peekState().activeUrl stays null until attach() drains.
+    const { sub, events } = makeSub();
+    ctx.broker.attach(sub);
+
+    // Fire the run-resolve request without --no-wait (waiting flow) and without
+    // providing approval_ids. requireApprovals will mint both grants and surface
+    // them sequentially via the broker: env first, then stdin after env is
+    // approved and the waitForGrant loop resolves.
+    // Use `sh -c 'echo $COMBINED_ENV; cat'` so both secret values appear in
+    // stdout and the masker replaces each with ***.
+    const responsePromise = fetch(`http://127.0.0.1:${ctx.port}/v1/run/resolve`, {
+      method: "POST",
+      headers: { Authorization: "Bearer t", "content-type": "application/json" },
+      body: JSON.stringify({
+        refs: [envRef],
+        env: [{ key: "COMBINED_ENV", value: envRef, isRef: true }],
+        command: "sh",
+        args: ["-c", "echo $COMBINED_ENV; cat"],
+        cwd: process.cwd(),
+        stdin_ref: stdinRef,
+      }),
+    });
+
+    // ── First approval (env, action=run) ──────────────────────────────────────
+
+    // Poll for the env approval URL. requireApprovals calls open(envUrl) which
+    // calls broker.surface(); since we pre-attached above, activeUrl is set
+    // immediately (subscriber attached + idle).
+    let first: { url: string; seq: number } | undefined;
+    const deadline1 = Date.now() + 2000;
+    while (Date.now() < deadline1 && first === undefined) {
+      const state = ctx.broker.peekState();
+      if (state.activeUrl !== null && state.activeSeq !== null) {
+        first = { url: state.activeUrl, seq: state.activeSeq };
+      } else {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    assert.ok(first, "expected the env approval URL to surface in the hub broker");
+
+    // The first navigate event must carry the env approval URL.
+    assert.equal(events.length >= 1, true);
+    const nav1 = events.find(
+      (e) => e.type === "navigate" && (e as Extract<HubEvent, { type: "navigate" }>).seq === first!.seq,
+    ) as Extract<HubEvent, { type: "navigate" }> | undefined;
+    assert.ok(nav1, "subscriber must have received the first navigate event");
+
+    // Approve the env grant via the UI route. This flips status:pending →
+    // status:granted, unblocking requireApprovals' waitForGrant poll loop.
+    const url1 = new URL(first.url);
+    const id1 = url1.searchParams.get("id");
+    const token1 = url1.searchParams.get("token");
+    assert.ok(id1 && token1, "first approval URL must carry id + token");
+    const approveRes1 = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/approvals/${id1}/approve?token=${encodeURIComponent(token1!)}`,
+      { method: "POST" },
+    );
+    assert.equal(approveRes1.status, 200);
+
+    // Mark the first slot done. This clears activeUrl in the broker.
+    // Once waitForGrant resolves, requireApprovals calls open(stdinUrl);
+    // broker.surface will either:
+    //   (a) enqueue it (if markDone hasn't cleared activeUrl yet), or
+    //   (b) set activeUrl directly (if activeUrl is already null).
+    // Either way, after markDone the broker will have stdinUrl as activeUrl.
+    const doneRes1 = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ seq: first.seq }),
+      },
+    );
+    assert.equal(doneRes1.status, 200);
+
+    // ── Second approval (stdin, action=run_stdin) ─────────────────────────────
+
+    // Poll for the stdin approval URL. requireApprovals' waitForGrant polls
+    // every 200ms; once it sees status:granted it consumes the env grant and
+    // calls open(stdinUrl) → broker.surface(stdinUrl). Combined with the
+    // markDone above (which cleared activeUrl), stdinUrl becomes the new active.
+    let second: { url: string; seq: number } | undefined;
+    const deadline2 = Date.now() + 3000;
+    while (Date.now() < deadline2 && second === undefined) {
+      const state = ctx.broker.peekState();
+      if (state.activeUrl !== null && state.activeSeq !== null && state.activeSeq !== first.seq) {
+        second = { url: state.activeUrl, seq: state.activeSeq };
+      } else {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    assert.ok(second, "expected the stdin approval URL to surface after env was approved");
+
+    // Approve the stdin grant via the UI route.
+    const url2 = new URL(second.url);
+    const id2 = url2.searchParams.get("id");
+    const token2 = url2.searchParams.get("token");
+    assert.ok(id2 && token2, "second approval URL must carry id + token");
+    const approveRes2 = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/approvals/${id2}/approve?token=${encodeURIComponent(token2!)}`,
+      { method: "POST" },
+    );
+    assert.equal(approveRes2.status, 200);
+
+    // Mark the second slot done.
+    const doneRes2 = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ seq: second.seq }),
+      },
+    );
+    assert.equal(doneRes2.status, 200);
+
+    // ── Drain the streamed response ───────────────────────────────────────────
+
+    // Now await the streamed response. Both grants are consumed; requireApprovals
+    // returns → route spawns sh, injects env + stdin → masker replaces both
+    // secret values with *** before relay.
+    const res = await responsePromise;
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /ndjson/);
+
+    const lines: Record<string, unknown>[] = [];
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const nl = buffer.indexOf("\n");
+        if (nl === -1) break;
+        const raw = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (raw.trim().length === 0) continue;
+        lines.push(JSON.parse(raw) as Record<string, unknown>);
+      }
+    }
+
+    const exitLine = lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 0, "combined env+stdin run must exit 0");
+
+    // The masker must have replaced both secret values with ***.
+    // Neither raw plaintext should appear on the wire.
+    const stdout = lines
+      .filter((l) => "stream" in l && (l as { stream: string }).stream === "stdout")
+      .map((l) => Buffer.from((l as { data: string }).data, "base64").toString("utf8"))
+      .join("");
+    assert.equal(stdout.includes("combined-env-value"), false, "env secret must not appear in stdout");
+    assert.equal(stdout.includes("combined-stdin-value"), false, "stdin secret must not appear in stdout");
+    assert.match(stdout, /\*\*\*/, "masked placeholder *** must appear in stdout");
+  });
+});
