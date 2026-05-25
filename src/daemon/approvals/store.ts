@@ -155,7 +155,7 @@ export class ApprovalStore {
     }
     if (session.status !== "granted") {
       throw new ShuttleError(
-        "session_not_pending",
+        "session_unauthorized",
         `Session is not granted (status: ${session.status}).`,
       );
     }

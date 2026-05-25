@@ -281,7 +281,7 @@ test("canMatchSession: expired → throws session_expired", () => {
   assert.throws(() => approvals.canMatchSession(session.id, binding, sessionStore), (e: unknown) => e instanceof ShuttleError && e.code === "session_expired");
 });
 
-test("canMatchSession: pending (not yet approved) → throws session_not_pending (matches incrementUses)", () => {
+test("canMatchSession: pending (not yet approved) → throws session_unauthorized (matches pre-4d findOrMintFromSession + spec)", () => {
   const sessionStore = new SessionStore({ now: () => 1000 });
   // Create session but DO NOT approve — status stays "pending".
   const session = sessionStore.create({
@@ -295,7 +295,7 @@ test("canMatchSession: pending (not yet approved) → throws session_not_pending
   const binding = makeBindingFor("inject_submit", { destination_domain: "example.com", allowed_domains: ["example.com"] });
   assert.throws(
     () => approvals.canMatchSession(session.id, binding, sessionStore),
-    (e: unknown) => e instanceof ShuttleError && e.code === "session_not_pending",
+    (e: unknown) => e instanceof ShuttleError && e.code === "session_unauthorized",
   );
 });
 

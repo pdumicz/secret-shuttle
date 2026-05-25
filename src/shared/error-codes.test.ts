@@ -85,7 +85,7 @@ test("approval_required → permission with workflow hint", () => {
   assert.equal(entry.exitCode, EXIT_CODE_PERMISSION);
   assert.equal(
     entry.hint("any"),
-    "Open the printed URL to approve. For multiple approvals listed under details.approvals, repeat --approval-id <id> for each.",
+    "Approve in the opened hub, then retry with --approval-id <id> (repeatable for each id listed under details.approvals).",
   );
 });
 

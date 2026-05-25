@@ -150,7 +150,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     // Single-approval ops: read approval_id from the message JSON.
     // Multi-approval ops: read details.approvals (array of {approval_id, expires_at, action}).
     // Either way, retry with --approval-id <id> (repeatable for each pending approval).
-    hint: () => "Open the printed URL to approve. For multiple approvals listed under details.approvals, repeat --approval-id <id> for each.",
+    hint: () => "Approve in the opened hub, then retry with --approval-id <id> (repeatable for each id listed under details.approvals).",
   },
   blind_mode_domain_mismatch: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   blind_mode_required: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
