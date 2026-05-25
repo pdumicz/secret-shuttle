@@ -37,10 +37,9 @@ test("getKeychainAdapter respects platform override", () => {
   assert.ok(wk instanceof WindowsKeychain);
 });
 
-// Stub-behavior assertions: every Plan-1 platform adapter MUST report
-// not-available and throw keychain_not_implemented on every operation.
+// Note: darwin is no longer a stub (A2/commit 529df3f) — its tests live in darwin.test.ts.
+// Linux and Windows remain stubs until tasks A3 and A4.
 for (const [name, platform] of [
-  ["darwin", "darwin"],
   ["linux", "linux"],
   ["win32", "win32"],
 ] as const) {
