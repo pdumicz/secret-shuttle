@@ -210,6 +210,18 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     hint: () => "Fall back to passphrase unlock; verify your OS keyring is reachable.",
     nextAction: () => "secret-shuttle unlock",
   },
+  keychain_key_invalid: {
+    exitCode: EXIT_CODE_PERMISSION,
+    hint: () => "Cached keychain entry doesn't unlock the vault. Run: secret-shuttle unlock",
+    nextAction: () => "secret-shuttle unlock",
+  },
+
+  // ── Daemon init ─────────────────────────────────────────────────────────────
+  daemon_start_failed: {
+    exitCode: EXIT_CODE_TRANSIENT,
+    hint: () => "Daemon failed to start. Try: secret-shuttle daemon status",
+    nextAction: () => "secret-shuttle daemon status",
+  },
 };
 
 export function lookupErrorCode(code: string): ErrorCodeEntry | null {
