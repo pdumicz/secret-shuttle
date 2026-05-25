@@ -139,3 +139,33 @@
 - **`combined_no_wait_unsupported` error code** (added in Plan 4c post-ship `460e750`). The multi-approval continuation path replaces the fail-fast.
 
 - **`src/daemon/approvals/require-approval.ts`** and its test file, once all callers were migrated to `require-approvals.ts`.
+
+### Plan 5b + 5f-impl — Real init + working OS keychain unlock
+
+**Added:**
+
+- `secret-shuttle init` is now a real first-run command. Starts the daemon if not running, opens the passphrase UI to create the vault if needed, enrolls the OS keychain (Touch ID on macOS) for passwordless subsequent unlocks, and installs Secret Shuttle skill files into every detected agent runtime (`.claude/`, `AGENTS.md`, `.cursor/`, `.github/copilot-instructions.md`). Flags: `--no-keychain`, `--no-agent-install`. Idempotent — re-running on a fully set-up project is a fast no-op.
+
+- Real OS keychain integration via `@napi-rs/keyring` AsyncEntry: macOS Keychain Services (Touch ID), Linux libsecret (Secret Service / gnome-keyring), Windows Credential Manager (DPAPI). Previous Plan 1 stubs replaced with working implementations.
+
+- `secret-shuttle keychain enable / disable / status` — explicit control over keychain enrollment for users who want to opt in/out outside the init flow.
+
+- Daemon routes: `POST /v1/keychain/enable`, `POST /v1/keychain/disable`, `GET /v1/keychain/status`.
+
+- Envelope file gains a stable `id` field (UUID). Used as the keychain account key (`("secret-shuttle", <vault_id>)`), so multiple Secret Shuttle vaults can coexist on one machine via different `SHUTTLE_HOME` dirs without collision. Legacy envelopes are transparently upgraded on first read.
+
+- Error codes: `keychain_key_invalid` (cached key didn't unlock the vault — falls back to passphrase) and `daemon_start_failed` (spawn timeout during init). Both include `next_action` (Plan 5d pattern).
+
+**Changed:**
+
+- `POST /v1/unlock/start` tries the OS keychain before the passphrase UI. On macOS this fires Touch ID. On any keychain failure (no entry, cancelled, invalid key, unavailable), falls through to the existing passphrase UI seamlessly.
+
+- After a successful passphrase unlock, the daemon opportunistically writes the master key to the keychain — handles device-migration and keychain-corruption recovery without explicit user action.
+
+- `agent install` flow extracted: `readBundledSkill()` (and `agentInstallTarget` if you extracted it) is now exported from `src/cli/commands/agent.ts` so `init` can reuse the same skill-install logic.
+
+**Internal:**
+
+- `DaemonServices` gains an optional `keychain?: KeychainAdapter` field for test injection. Production uses the platform-detected adapter via `getKeychainAdapter()`.
+
+- The keychain fast-path's catch block is narrowed: only `vault_decryption_failed` and `invalid_master_key` are treated as expected key-validation failures. Other errors (filesystem, audit-write) are audited then re-thrown so they surface to the caller instead of silently routing to the passphrase UI.

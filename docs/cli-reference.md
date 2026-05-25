@@ -261,3 +261,66 @@ The skill content is the bundled `skills/secret-shuttle/SKILL.md` shipped with t
 ## `secret-shuttle agent print-skill-url`
 
 Prints the raw GitHub URL of the canonical SKILL.md on one line of stdout, suitable for pasting into any agent that supports a remote skill URL. The URL is derived from the `repository` field in the shipped `package.json` (no hardcoded URLs — defense against fork/rename drift). Override the default `main` branch with `--branch <name>` or `--ref <name>`.
+
+## `secret-shuttle init`
+
+First-run setup. Idempotent.
+
+```bash
+secret-shuttle init [--no-keychain] [--no-agent-install]
+```
+
+Steps:
+1. Ensures the daemon is running (spawns if absent, 5 s timeout).
+2. Ensures a vault exists. If not, opens a browser passphrase UI for the user to set one.
+3. Enrolls the OS keychain (Touch ID on macOS, libsecret on Linux, DPAPI on Windows) so subsequent unlocks skip the passphrase prompt. Skip with `--no-keychain`.
+4. Detects agent runtimes in the current directory (`.claude/`, `AGENTS.md`, `.cursor/`, `.github/copilot-instructions.md`) and writes the Secret Shuttle skill files into each. Skip with `--no-agent-install`.
+
+Output (enum):
+```json
+{
+  "ok": true,
+  "daemon_running": true,
+  "daemon_port": 9876,
+  "daemon_spawned": true,
+  "vault_initialized": true,
+  "vault_just_created": true,
+  "keychain_enrolled": true,
+  "agent_runtimes_detected": ["claude", "codex"],
+  "next_action": "secret-shuttle import --env-file .env  # optional: migrate existing secrets"
+}
+```
+
+Examples:
+```bash
+# Cold install (vault doesn't exist):
+secret-shuttle init
+
+# Skip keychain (passphrase unlock only):
+secret-shuttle init --no-keychain
+
+# Skip agent skill install:
+secret-shuttle init --no-agent-install
+```
+
+## `secret-shuttle keychain`
+
+Manage OS keychain enrollment for passwordless unlock.
+
+**Sub-commands:**
+
+- `secret-shuttle keychain enable` — stores the master key in the OS keychain (requires an unlocked vault). Fires Touch ID on macOS, libsecret prompt on Linux, transparent on Windows. Subsequent unlocks skip the passphrase UI.
+- `secret-shuttle keychain disable` — removes the keychain entry. Idempotent. Subsequent unlocks fall back to the passphrase UI.
+- `secret-shuttle keychain status` — reports `{ available, enrolled, vault_id }`.
+
+Examples:
+```bash
+secret-shuttle keychain status
+# → { ok: true, available: true, enrolled: true, vault_id: "..." }
+
+secret-shuttle keychain enable
+# → { ok: true, enrolled: true }
+
+secret-shuttle keychain disable
+# → { ok: true, removed: true }
+```

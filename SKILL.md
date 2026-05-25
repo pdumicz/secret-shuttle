@@ -73,6 +73,8 @@ Every error JSON now includes a `next_action` field. When it is a non-null strin
 | `secret_not_found` | null | Ref doesn't exist in the vault. | `secret-shuttle secrets list --env <env>` to see what's available. |
 | `bad_request` / `missing_param` | null | Wrong input shape. | Read `message`; usually a missing or malformed flag. |
 | `secret_exists` | null | Ref already exists. | Re-run with `--force` to overwrite. |
+| `keychain_key_invalid` | `secret-shuttle unlock` | Cached key didn't decrypt the vault (device-migration, corruption). | Daemon already falls back to passphrase UI automatically; run `unlock` if the browser window didn't open. |
+| `daemon_start_failed` | `secret-shuttle daemon status` | `init` spawned the daemon but it didn't respond within 5 s. | Run the next_action to check daemon logs, then retry `init`. |
 
 ## Tell the developer before approval-gated ops
 
@@ -82,7 +84,7 @@ If `error_code` isn't in the table above, surface it verbatim — do not paraphr
 
 ## Low-level surface (rare)
 
-`daemon start/stop/status`, `unlock`, `init`, `migrate secure-vault`, `secrets delete`, `secrets rotate`, `compare`, `inject`, `inject-submit`, `reveal-capture`, `capture`, `blind start/end`, `browser start/mark/marks`, `template list`, `internal session create/list/revoke`. Run `secret-shuttle <cmd> --help` for details.
+`daemon start/stop/status`, `unlock`, `init`, `keychain enable/disable/status`, `migrate secure-vault`, `secrets delete`, `secrets rotate`, `compare`, `inject`, `inject-submit`, `reveal-capture`, `capture`, `blind start/end`, `browser start/mark/marks`, `template list`, `internal session create/list/revoke`. Run `secret-shuttle <cmd> --help` for details.
 
 ## Install this skill into a project
 
