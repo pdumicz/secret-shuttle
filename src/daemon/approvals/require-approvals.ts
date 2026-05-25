@@ -55,6 +55,22 @@ export async function requireApprovals(
 ): Promise<ApprovalGrant[]> {
   if (opts.bindings.length === 0) return [];
 
+  // Pre-scan: would every binding be planned as synth? (dev/non-force).
+  // The old singular requireApproval returned synthesizeGrant for dev-env
+  // without ever looking at approvalIdFromClient. Preserve that
+  // back-compat: all-synth calls skip Step 0's ID resolution entirely, so a
+  // stale --approval-id (e.g., daemon restart between --no-wait calls) is
+  // silently ignored on dev calls instead of throwing approval_not_found.
+  // The mixed dev+prod case still goes through Step 0 (a prod binding might
+  // need the supplied ID, and an unknown ID supplied for a prod call is a
+  // legitimate approval_not_found).
+  const allSynth =
+    opts.force !== true &&
+    opts.bindings.every((b) => b.environment !== "production");
+  if (allSynth) {
+    return opts.bindings.map((b) => synthesizeGrant(b));
+  }
+
   // Phase 1 Step 0: resolve every supplied ID. Unknown IDs are approval_not_found.
   const suppliedIds = [...(opts.approvalIdsFromClient ?? [])];
   for (const id of suppliedIds) {

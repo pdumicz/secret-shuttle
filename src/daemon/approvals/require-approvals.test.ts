@@ -399,6 +399,38 @@ test("requireApprovals: mixed dev+prod + bad ID → throws approval_mismatch AND
   assert.strictEqual(store.get(wrongGrant.id)!.status, "granted");
 });
 
+test("requireApprovals: P2 — all-synth call with stale (unknown) --approval-id ignores the ID (matches pre-4d behavior)", async () => {
+  const store = new ApprovalStore();
+  // No grant in the store with this ID — simulates daemon restart between
+  // --no-wait round-trip and the retry.
+  const staleId = "00000000-0000-0000-0000-000000000000";
+  const dev = devBinding();
+
+  // Old behavior: dev call ignores stale --approval-id, returns synthesized grant.
+  const grants = await requireApprovals({
+    store, bindings: [dev], daemonPort: 1234,
+    approvalIdsFromClient: [staleId],
+  });
+  assert.strictEqual(grants.length, 1);
+  assert.strictEqual(grants[0]!.id, "no-approval-required");
+  assert.strictEqual(grants[0]!.status, "used");
+});
+
+test("requireApprovals: mixed dev+prod with unknown --approval-id still throws approval_not_found (no regression)", async () => {
+  const store = new ApprovalStore();
+  const dev = devBinding();
+  const prod = envBinding();
+
+  await assert.rejects(
+    requireApprovals({
+      store, bindings: [dev, prod], daemonPort: 1234, waitMs: 0,
+      approvalIdsFromClient: ["does-not-exist"],
+      openUrlImpl: () => {},
+    }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_not_found",
+  );
+});
+
 test("requireApprovals: P1 — granted-but-TTL-expired ID is caught in Phase 1 (no partial Phase 2 commit)", async () => {
   // Two approvals: both granted, one with TTL elapsed by call time.
   // Phase 2 consume() would catch the expiry — but only AFTER consuming the
