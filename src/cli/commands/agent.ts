@@ -30,7 +30,7 @@ const TARGETS: Record<AgentTarget, TargetSpec> = {
  * dist/cli/commands/agent.js, the package root is two levels up.
  * Falls back to walking up four levels for source-mode invocation.
  */
-async function readBundledSkill(): Promise<string> {
+export async function readBundledSkill(): Promise<string> {
   const here = fileURLToPath(import.meta.url);
   // .../dist/cli/commands/agent.js → walk up to package root then into skills/
   const candidates = [
