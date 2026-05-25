@@ -9,6 +9,7 @@ export type ApprovalLifecycleEvent =
   | { kind: "denied"; grant: ApprovalGrant }
   | { kind: "expired"; grant: ApprovalGrant }
   | { kind: "used"; grant: ApprovalGrant }
+  | { kind: "cancelled"; grant: ApprovalGrant }
   | { kind: "mismatch"; binding: ApprovalBinding; existingGrant: ApprovalGrant };
 
 export interface ApprovalBinding {
@@ -125,6 +126,28 @@ export class ApprovalStore {
     g.status = "used";
     this.onEvent?.({ kind: "used", grant: g });
     return g;
+  }
+
+  /**
+   * Forcibly invalidate a grant — used by requireApprovals when a waiting-flow
+   * operation fails (e.g., one mint approved, a later mint denied) and any
+   * already-granted siblings would otherwise remain reusable.
+   *
+   * Behavior:
+   *   - Unknown id → no-op (idempotent; safe to call in catch blocks).
+   *   - Grant present → remove from store, fire `cancelled` event for audit.
+   *
+   * This is intentionally NOT for Phase 1 / Phase 2 in-call control flow.
+   * Phase 1's status checks already short-circuit before any commit; Phase 2's
+   * consumeBatch is atomic. invalidate is only called when an exception is
+   * already propagating out of requireApprovals AND there are waiting-flow
+   * mints that would otherwise leak.
+   */
+  invalidate(id: string): void {
+    const g = this.grants.get(id);
+    if (g === undefined) return;
+    this.grants.delete(id);
+    this.onEvent?.({ kind: "cancelled", grant: g });
   }
 
   /**

@@ -68,6 +68,7 @@ export class DaemonServices {
           e.kind === "denied" ? "approval_denied" :
           e.kind === "expired" ? "approval_expired" :
           e.kind === "used" ? "approval_used" :
+          e.kind === "cancelled" ? "approval_cancelled" :
           "approval_mismatch",
         ok: e.kind === "granted" || e.kind === "used" || e.kind === "created",
         approval_id: e.kind === "mismatch" ? e.existingGrant.id : e.grant.id,

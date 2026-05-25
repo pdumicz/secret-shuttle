@@ -497,13 +497,22 @@ test("requireApprovals: P2 TOCTOU — clock crosses second approval's TTL during
   assert.strictEqual(store.get(stdinApproval.id)!.status, "granted");
 });
 
-test("requireApprovals: P1 waiting-flow + supplied ID — mint waited+approved but supplied ID expires before final batch → neither committed", async () => {
-  // Reproducer for the bug: env supplied ID is granted at Phase 1, stdin needs
-  // mint. Waiting flow: mint stdin, surface, user-wait (during which env's TTL
-  // elapses), user approves stdin, waitForGranted returns. Then the final
-  // consumeBatch validates env → expired → throw. With the fix, stdin's mint
-  // is NOT consumed inside waitForGranted; the consumeBatch over [env, stdin]
-  // atomically refuses since env is expired.
+test("requireApprovals: P2 — both supplied IDs already past TTL → Phase 1 throws approval_expired before any commit", async () => {
+  // The original test description claimed to cover the bug where a supplied ID
+  // expires DURING the waiting window (i.e., waitForGranted returns, then
+  // consumeBatch sees env expired). That path is impossible to exercise in a
+  // synchronous test: Node's event loop doesn't interleave between
+  // waitForGranted's return and the final consumeBatch.
+  //
+  // What the body actually verifies: the store clock (nowMs) jumps to 5000
+  // immediately when stdin is minted — BEFORE waitForGranted is polled. The
+  // stdin grant's expires_at=1100 is already past, so waitForGranted throws
+  // approval_expired. Both grants remain unburned. This is Phase 1 / TTL-pre-
+  // check behavior, not the "TOCTOU during commit" path.
+  //
+  // The TOCTOU-during-commit path is covered by store.consumeBatch's clock-
+  // advance unit test (the dedicated consumeBatch test that pins expires_at
+  // between validation and mutation). That test lives in store.test.ts.
   let nowMs = 1000;
   const store = new ApprovalStore({
     ttlMs: 100,
@@ -517,9 +526,7 @@ test("requireApprovals: P1 waiting-flow + supplied ID — mint waited+approved b
       // Because nowMs jumps to 5000 before store.create() returns, the stdin
       // grant's expires_at=1100 is already past by the time waitForGranted
       // polls it — so waitForGranted throws approval_expired immediately (the
-      // grant never reaches "granted"), which is the same terminal outcome as
-      // the narrative: final consumeBatch atomically refuses because env is
-      // expired. Both paths prove no supplied approval is burned.
+      // grant never reaches "granted"). No supplied approval is burned.
       if (event.kind === "created" && event.grant.action === "run_stdin") {
         nowMs = 5000; // env (created at 1000, ttl 100) is now expired
         // Guard: only approve if still pending. The grant may already be
@@ -580,4 +587,82 @@ test("requireApprovals: waiting flow sequential — all granted → returns both
   assert.strictEqual(grants[1]!.status, "used");
   assert.strictEqual(grants[0]!.action, "run");
   assert.strictEqual(grants[1]!.action, "run_stdin");
+});
+
+test("requireApprovals: P1 — waiting-flow denial invalidates earlier-granted siblings (no orphan grants)", async () => {
+  // Repro for the bug: [run, run_stdin], waiting mode, auto-approve run,
+  // auto-deny run_stdin. waitForGranted throws on stdin → the run grant
+  // would otherwise remain "granted" in the store, a live reusable auth.
+  // After this fix, invalidate() removes it on the throw.
+  let runApprovalId: string | undefined;
+
+  const store = new ApprovalStore({
+    onEvent: (event) => {
+      if (event.kind === "created") {
+        if (event.grant.action === "run") {
+          runApprovalId = event.grant.id;
+          setTimeout(() => store.approve(event.grant.id), 5);
+        } else if (event.grant.action === "run_stdin") {
+          setTimeout(() => store.deny(event.grant.id), 5);
+        }
+      }
+    },
+  });
+
+  const eb = envBinding();
+  const sb = stdinBinding();
+
+  await assert.rejects(
+    requireApprovals({
+      store, bindings: [eb, sb], daemonPort: 1234, waitMs: 1000,
+      openUrlImpl: () => {},
+    }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_denied",
+  );
+
+  // Critical: run was granted, then run_stdin was denied. The run grant
+  // must NOT remain reusable.
+  assert.ok(runApprovalId, "test must have observed the run mint");
+  assert.strictEqual(
+    store.get(runApprovalId!),
+    undefined,
+    "the earlier-granted run mint must be invalidated (removed from store) after the operation failed",
+  );
+});
+
+test("requireApprovals: P1 — waiting-flow success path does NOT invalidate mints (no false positives)", async () => {
+  // Symmetric: the invalidate fallback should only fire on throws.
+  // A successful waiting-flow call should leave all minted approvals
+  // in "used" state (via the final consumeBatch), not removed from the store.
+  let runApprovalId: string | undefined;
+  let stdinApprovalId: string | undefined;
+
+  const store = new ApprovalStore({
+    now: () => 1000,
+    onEvent: (event) => {
+      if (event.kind === "created") {
+        if (event.grant.action === "run") {
+          runApprovalId = event.grant.id;
+          setTimeout(() => store.approve(event.grant.id), 5);
+        } else if (event.grant.action === "run_stdin") {
+          stdinApprovalId = event.grant.id;
+          setTimeout(() => store.approve(event.grant.id), 5);
+        }
+      }
+    },
+  });
+
+  const eb = envBinding();
+  const sb = stdinBinding();
+  const grants = await requireApprovals({
+    store, bindings: [eb, sb], daemonPort: 1234, waitMs: 1000,
+    openUrlImpl: () => {},
+  });
+
+  assert.strictEqual(grants.length, 2);
+  assert.strictEqual(grants[0]!.status, "used");
+  assert.strictEqual(grants[1]!.status, "used");
+  // The mints should still be in the store with status="used", not invalidated.
+  assert.strictEqual(store.get(runApprovalId!)?.status, "used");
+  assert.strictEqual(store.get(stdinApprovalId!)?.status, "used");
 });

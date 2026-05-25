@@ -226,103 +226,127 @@ export async function requireApprovals(
     );
   }
 
-  // Case C: waiting flow + mints needed. Per-binding sequence:
-  //   1. store.create — mint a pending approval.
-  //   2. openUrlImpl — surface to the hub.
-  //   3. waitForGranted — poll until status=granted (no consume).
-  //   4. Convert plan to "consume" with the new id. The actual consume
-  //      happens later in the final atomic batch alongside supplied-ID
-  //      consumes, so a slow user wait on one binding can't leave a
-  //      previously-waited mint consumed while a supplied ID has
-  //      since expired.
-  if (mintPlans.length > 0) {
-    const waitBudget = opts.waitMs ?? DEFAULT_WAIT_MS;
-    for (let i = 0; i < plans.length; i++) {
-      const p = plans[i];
-      if (p === undefined || p.kind !== "mint") continue;
-      const g = opts.store.create(p.binding);
-      const url = `http://127.0.0.1:${opts.daemonPort}/ui/approve?id=${g.id}&token=${g.ui_token}`;
-      open(url);
-      await waitForGranted(opts.store, g.id, waitBudget);
-      plans[i] = { kind: "consume", binding: p.binding, id: g.id };
-    }
-  }
-
-  // Final commit ordering — closes both the Phase 2 internal TOCTOU window
-  // (consumes burning before later commits fail) AND the session+consume
-  // partial-commit race:
-  //   1. Validate ALL consume preconditions (no mutation). Captures one
-  //      timestamp shared with the eventual consumeBatch — within a single
-  //      sync execution, both calls see the same this.now().
-  //   2. Re-peek every session via canMatchSession (no mutation). This is
-  //      pure; throws bubble out and bypass any commits.
-  //   3. Commit sessions sequentially via mintFromSession (each call bumps
-  //      incrementUses). If a concurrent request burned a use between
-  //      Phase 1 and now, mintFromSession throws — but NO consume has been
-  //      committed yet, so no supplied approval is burned. Worst-case
-  //      partial commit at this point is "first N sessions bumped, session
-  //      N+1 racing throws" — bounded blast radius, no permanently-used approvals.
-  //   4. Commit consumes atomically via consumeBatch. Cannot fail (step 1
-  //      already validated against the same sync timestamp).
-
-  // Gather consume items (includes supplied-ID consumes AND waited mints
-  // from Case C — both have plan.kind === "consume" by this point).
-  const consumeItems: Array<{ id: string; binding: ApprovalBinding }> = [];
-  for (const p of plans) {
-    if (p.kind === "consume") {
-      consumeItems.push({ id: p.id, binding: p.binding });
-    }
-  }
-
-  // Step 1: validate consumes.
-  opts.store.validateConsumeBatch(consumeItems);
-
-  // Step 2: re-peek sessions. canMatchSession is pure; it throws on
-  // session_not_found/expired/unauthorized/max_uses_exceeded and returns
-  // a boolean for pattern-match. Phase 1 already established pattern-match,
-  // so a fresh `false` here would indicate state drift between Phase 1 and
-  // Phase 2 (extremely unlikely in single-tick Node; defensive guard).
-  for (const p of plans) {
-    if (p.kind === "session") {
-      const ok = opts.store.canMatchSession(opts.sessionId!, p.binding, opts.sessionStore!);
-      if (!ok) {
-        throw new ShuttleError(
-          "session_pattern_no_match",
-          "Session pattern stopped matching between Phase 1 and Phase 2 (concurrent state change?).",
-        );
+  // Track waiting-flow mints so we can invalidate them if anything fails
+  // before the final consumeBatch. Without this, a partially-approved waiting
+  // flow (e.g., mint A approved, mint B denied) would leave A in "granted"
+  // state — a live reusable authorization for an operation that just failed.
+  // Case B (--no-wait) mints are intentionally NOT tracked here — the client
+  // needs them to approve in the hub and retry.
+  const waitingFlowMintedIds: string[] = [];
+  try {
+    // Case C: waiting flow + mints needed. Per-binding sequence:
+    //   1. store.create — mint a pending approval.
+    //   2. openUrlImpl — surface to the hub.
+    //   3. waitForGranted — poll until status=granted (no consume).
+    //   4. Convert plan to "consume" with the new id. The actual consume
+    //      happens later in the final atomic batch alongside supplied-ID
+    //      consumes, so a slow user wait on one binding can't leave a
+    //      previously-waited mint consumed while a supplied ID has
+    //      since expired.
+    if (mintPlans.length > 0) {
+      const waitBudget = opts.waitMs ?? DEFAULT_WAIT_MS;
+      for (let i = 0; i < plans.length; i++) {
+        const p = plans[i];
+        if (p === undefined || p.kind !== "mint") continue;
+        const g = opts.store.create(p.binding);
+        waitingFlowMintedIds.push(g.id);
+        const url = `http://127.0.0.1:${opts.daemonPort}/ui/approve?id=${g.id}&token=${g.ui_token}`;
+        open(url);
+        await waitForGranted(opts.store, g.id, waitBudget);
+        plans[i] = { kind: "consume", binding: p.binding, id: g.id };
       }
     }
-  }
 
-  // Step 3: commit sessions.
-  const sessionGrants = new Map<number, ApprovalGrant>(); // plan index → grant
-  for (let i = 0; i < plans.length; i++) {
-    const p = plans[i]!;
-    if (p.kind === "session") {
-      sessionGrants.set(i, opts.store.mintFromSession(opts.sessionId!, p.binding, opts.sessionStore!));
+    // Final commit ordering — closes both the Phase 2 internal TOCTOU window
+    // (consumes burning before later commits fail) AND the session+consume
+    // partial-commit race:
+    //   1. Validate ALL consume preconditions (no mutation). Captures one
+    //      timestamp shared with the eventual consumeBatch — within a single
+    //      sync execution, both calls see the same this.now().
+    //   2. Re-peek every session via canMatchSession (no mutation). This is
+    //      pure; throws bubble out and bypass any commits.
+    //   3. Commit sessions sequentially via mintFromSession (each call bumps
+    //      incrementUses). If a concurrent request burned a use between
+    //      Phase 1 and now, mintFromSession throws — but NO consume has been
+    //      committed yet, so no supplied approval is burned. Worst-case
+    //      partial commit at this point is "first N sessions bumped, session
+    //      N+1 racing throws" — bounded blast radius, no permanently-used approvals.
+    //   4. Commit consumes atomically via consumeBatch. Cannot fail (step 1
+    //      already validated against the same sync timestamp).
+
+    // Gather consume items (includes supplied-ID consumes AND waited mints
+    // from Case C — both have plan.kind === "consume" by this point).
+    const consumeItems: Array<{ id: string; binding: ApprovalBinding }> = [];
+    for (const p of plans) {
+      if (p.kind === "consume") {
+        consumeItems.push({ id: p.id, binding: p.binding });
+      }
     }
-  }
 
-  // Step 4: commit consumes atomically.
-  const consumed = consumeItems.length > 0 ? opts.store.consumeBatch(consumeItems) : [];
+    // Step 1: validate consumes.
+    opts.store.validateConsumeBatch(consumeItems);
 
-  // Build results in plan order.
-  const result: ApprovalGrant[] = new Array(plans.length);
-  let consumedIdx = 0;
-  for (let i = 0; i < plans.length; i++) {
-    const p = plans[i]!;
-    if (p.kind === "synth") {
-      result[i] = synthesizeGrant(p.binding);
-    } else if (p.kind === "consume") {
-      result[i] = consumed[consumedIdx++]!;
-    } else if (p.kind === "session") {
-      result[i] = sessionGrants.get(i)!;
-    } else {
-      // p.kind === "mint" — unreachable, all mints became "consume" in Case C.
-      throw new ShuttleError("unexpected_error", `unreachable plan kind at commit: ${(p as Plan).kind}`);
+    // Step 2: re-peek sessions. canMatchSession is pure; it throws on
+    // session_not_found/expired/unauthorized/max_uses_exceeded and returns
+    // a boolean for pattern-match. Phase 1 already established pattern-match,
+    // so a fresh `false` here would indicate state drift between Phase 1 and
+    // Phase 2 (extremely unlikely in single-tick Node; defensive guard).
+    for (const p of plans) {
+      if (p.kind === "session") {
+        const ok = opts.store.canMatchSession(opts.sessionId!, p.binding, opts.sessionStore!);
+        if (!ok) {
+          throw new ShuttleError(
+            "session_pattern_no_match",
+            "Session pattern stopped matching between Phase 1 and Phase 2 (concurrent state change?).",
+          );
+        }
+      }
     }
+
+    // Step 3: commit sessions.
+    const sessionGrants = new Map<number, ApprovalGrant>(); // plan index → grant
+    for (let i = 0; i < plans.length; i++) {
+      const p = plans[i]!;
+      if (p.kind === "session") {
+        sessionGrants.set(i, opts.store.mintFromSession(opts.sessionId!, p.binding, opts.sessionStore!));
+      }
+    }
+
+    // Step 4: commit consumes atomically.
+    const consumed = consumeItems.length > 0 ? opts.store.consumeBatch(consumeItems) : [];
+
+    // Build results in plan order.
+    const result: ApprovalGrant[] = new Array(plans.length);
+    let consumedIdx = 0;
+    for (let i = 0; i < plans.length; i++) {
+      const p = plans[i]!;
+      if (p.kind === "synth") {
+        result[i] = synthesizeGrant(p.binding);
+      } else if (p.kind === "consume") {
+        result[i] = consumed[consumedIdx++]!;
+      } else if (p.kind === "session") {
+        result[i] = sessionGrants.get(i)!;
+      } else {
+        // p.kind === "mint" — unreachable, all mints became "consume" in Case C.
+        throw new ShuttleError("unexpected_error", `unreachable plan kind at commit: ${(p as Plan).kind}`);
+      }
+    }
+    return result;
+  } catch (e) {
+    // Any throw from Case C's mint+wait, the validate phase, the session
+    // re-peek, mintFromSession, or consumeBatch — invalidate the waiting-flow
+    // mints. invalidate is idempotent (no-op for unknown / already-consumed
+    // ids) and safe in a catch block. Re-throw the original error.
+    for (const id of waitingFlowMintedIds) {
+      try {
+        opts.store.invalidate(id);
+      } catch {
+        // Swallow — invalidate should never throw, but if a custom subclass
+        // does, we still need to surface the ORIGINAL error.
+      }
+    }
+    throw e;
   }
-  return result;
 }
 
 /**
