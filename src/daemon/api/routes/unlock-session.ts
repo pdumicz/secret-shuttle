@@ -121,17 +121,37 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
     try {
       const existing = await readEnvelope();
       let masterKey: Buffer;
+      let enrollEnvelopeId: string | null = null;
       if (existing === null) {
         if (set_passphrase !== true) throw new ShuttleError("envelope_missing", "No vault exists.");
         masterKey = randomBytes(32);
-        await writeEnvelope(await encryptEnvelope(masterKey, passphrase));
+        const newEnvelope = await encryptEnvelope(masterKey, passphrase);
+        await writeEnvelope(newEnvelope);
+        enrollEnvelopeId = newEnvelope.id;
       } else {
         masterKey = await decryptEnvelope(existing, passphrase);
+        enrollEnvelopeId = existing.id;
       }
       services.lock.unlock(masterKey);
       await services.vault.ensureInitialized();
       session.status = "unlocked";
       await writeDaemonAudit({ action: "unlock", ok: true });
+
+      // Plan 5b/5f-impl C2: opportunistic keychain enrollment. If keychain is
+      // available, cache the master key so the next unlock can skip the
+      // passphrase UI. Failures are swallowed — unlock has already succeeded;
+      // this is best-effort caching, not a hard requirement.
+      if (enrollEnvelopeId !== null) {
+        const keychain = services.keychain ?? getKeychainAdapter();
+        if (await keychain.isAvailable()) {
+          try {
+            await keychain.set("secret-shuttle", enrollEnvelopeId, masterKey);
+          } catch {
+            // Best-effort; do not surface to caller.
+          }
+        }
+      }
+
       res.statusCode = 200;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ ok: true }));

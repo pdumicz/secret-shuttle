@@ -153,7 +153,10 @@ test("unlock-session: no keychain entry → falls through to passphrase UI", asy
 
   await withUnlockUiDaemon(async (ctx) => {
     // Bootstrap to create an envelope on disk (so it's not a create=1 flow).
+    // C2 enrollment now writes a keychain entry during bootstrap; clear it so
+    // the subsequent /v1/unlock/start sees an empty keychain.
     await bootstrapVaultWithPassphrase(ctx.port, ctx.services);
+    keychain.entries.clear();
 
     // POST /v1/unlock/start with empty keychain.
     const res = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
@@ -276,5 +279,134 @@ test("unlock-session: keychain unavailable → falls through to passphrase UI", 
       ctx.services.unlockSessions.get(body.session_id as string) !== undefined,
       "unlock session must exist in store",
     );
+  }, { keychain });
+});
+
+// ── C2: opportunistic keychain enrollment after passphrase unlock ────────────
+
+test("unlock-session: successful passphrase unlock writes master key to keychain", async () => {
+  const keychain = new MockKeychain(); // empty — no cached entry
+
+  await withUnlockUiDaemon(async (ctx) => {
+    // Start a session (no envelope exists yet → create=1 flow).
+    const startRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(startRes.status, 200);
+    const startBody = await startRes.json() as { session_id: string };
+    const { session_id } = startBody;
+    const session = ctx.services.unlockSessions.get(session_id);
+    assert.ok(session, "session must exist");
+
+    // Submit the passphrase via the UI route (set_passphrase=true → creates vault).
+    const submitUrl = `http://127.0.0.1:${ctx.port}/ui/unlock/${session_id}?token=${session.ui_token}`;
+    const submitRes = await fetch(submitUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "correct-passphrase", set_passphrase: true }),
+    });
+    assert.equal(submitRes.status, 200, "passphrase submit must succeed");
+
+    // Vault must be unlocked.
+    assert.equal(ctx.services.lock.isUnlocked(), true, "lock must be open after passphrase unlock");
+
+    // Read the envelope to find its id.
+    const { readEnvelope: readEnv } = await import("../../../vault/envelope.js");
+    const env = await readEnv();
+    assert.ok(env !== null, "envelope must exist");
+
+    // Keychain must now hold an entry for this envelope.
+    const cached = await keychain.get("secret-shuttle", env.id);
+    assert.ok(cached !== null, "keychain must have been populated");
+
+    // The cached value must match the actual master key.
+    const masterKey = ctx.services.lock.requireKey();
+    assert.deepEqual(cached, masterKey, "cached key must match the master key");
+  }, { keychain });
+});
+
+test("unlock-session: keychain.set failure does NOT block unlock", async () => {
+  // Wrap MockKeychain so set() always throws.
+  const base = new MockKeychain();
+  let setCalled = 0;
+  const throwingKeychain: KeychainAdapter = {
+    async isAvailable() { return base.isAvailable(); },
+    async set(_svc, _acct, _val) {
+      setCalled++;
+      throw new Error("simulated keychain.set failure");
+    },
+    async get(svc, acct) { return base.get(svc, acct); },
+    async delete(svc, acct) { return base.delete(svc, acct); },
+  };
+
+  await withUnlockUiDaemon(async (ctx) => {
+    const startRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(startRes.status, 200);
+    const startBody = await startRes.json() as { session_id: string };
+    const { session_id } = startBody;
+    const session = ctx.services.unlockSessions.get(session_id);
+    assert.ok(session, "session must exist");
+
+    const submitUrl = `http://127.0.0.1:${ctx.port}/ui/unlock/${session_id}?token=${session.ui_token}`;
+    const submitRes = await fetch(submitUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "correct-passphrase", set_passphrase: true }),
+    });
+
+    // Unlock must succeed even though keychain.set threw.
+    assert.equal(submitRes.status, 200, "unlock must succeed despite keychain.set failure");
+    const body = await submitRes.json() as Record<string, unknown>;
+    assert.equal(body.ok, true, "response ok must be true");
+
+    // Vault must be unlocked.
+    assert.equal(ctx.services.lock.isUnlocked(), true, "lock must be open despite keychain.set failure");
+
+    // set was attempted (confirming the enrollment code ran).
+    assert.ok(setCalled > 0, "keychain.set must have been called");
+  }, { keychain: throwingKeychain });
+});
+
+test("unlock-session: keychain unavailable → no enrollment, no error", async () => {
+  const keychain = new MockKeychain();
+  keychain.available = false;
+  let setCalled = 0;
+  const original = keychain.set.bind(keychain);
+  keychain.set = async (svc, acct, val) => {
+    setCalled++;
+    return original(svc, acct, val);
+  };
+
+  await withUnlockUiDaemon(async (ctx) => {
+    const startRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(startRes.status, 200);
+    const startBody = await startRes.json() as { session_id: string };
+    const { session_id } = startBody;
+    const session = ctx.services.unlockSessions.get(session_id);
+    assert.ok(session, "session must exist");
+
+    const submitUrl = `http://127.0.0.1:${ctx.port}/ui/unlock/${session_id}?token=${session.ui_token}`;
+    const submitRes = await fetch(submitUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "correct-passphrase", set_passphrase: true }),
+    });
+    assert.equal(submitRes.status, 200, "unlock must succeed when keychain is unavailable");
+
+    // Vault is unlocked.
+    assert.equal(ctx.services.lock.isUnlocked(), true, "lock must be open");
+
+    // keychain.set must NOT have been called (enrollment skipped when unavailable).
+    assert.equal(setCalled, 0, "keychain.set must NOT be called when keychain is unavailable");
   }, { keychain });
 });
