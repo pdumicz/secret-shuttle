@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID, scrypt } from "node:crypto";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { ShuttleError } from "../shared/errors.js";
@@ -19,6 +19,13 @@ const MAXMEM = 64 * 1024 * 1024;
 
 export interface EnvelopeFile {
   version: 2;
+  /**
+   * Stable UUID. Used as the keychain account key when caching the master
+   * key for Touch ID / libsecret / DPAPI unlock. Generated on first write;
+   * legacy envelopes lacking this field get one minted transparently by
+   * readEnvelope.
+   */
+  id: string;
   kdf: "scrypt";
   kdfParams: { N: number; r: number; p: number };
   salt: string;
@@ -32,6 +39,8 @@ export interface EnvelopeFile {
 export async function encryptEnvelope(
   masterKey: Buffer,
   passphrase: string,
+  /** Optional id — if omitted, a fresh UUID is minted. Used internally for re-encrypt-with-new-passphrase flows that preserve the original id. */
+  id?: string,
 ): Promise<EnvelopeFile> {
   if (masterKey.byteLength !== 32) {
     throw new ShuttleError("invalid_master_key", "Master key must be 32 bytes.");
@@ -51,6 +60,7 @@ export async function encryptEnvelope(
 
   return {
     version: 2,
+    id: id ?? randomUUID(),
     kdf: "scrypt",
     kdfParams: { N: KDF_N, r: KDF_R, p: KDF_P },
     salt: salt.toString("base64url"),
@@ -66,11 +76,17 @@ export async function readEnvelope(): Promise<EnvelopeFile | null> {
   const paths = getShuttlePaths();
   if (!(await fileExists(paths.envelopePath))) return null;
   const raw = await readFile(paths.envelopePath, "utf8");
-  const parsed = JSON.parse(raw) as EnvelopeFile;
+  const parsed = JSON.parse(raw) as Partial<EnvelopeFile>;
   if (parsed.version !== 2) {
     throw new ShuttleError("unsupported_envelope", "Envelope file version is not 2.");
   }
-  return parsed;
+  if (typeof parsed.id !== "string") {
+    // Legacy envelope without id — mint one and persist transparently.
+    const upgraded: EnvelopeFile = { ...(parsed as EnvelopeFile), id: randomUUID() };
+    await writeEnvelope(upgraded);
+    return upgraded;
+  }
+  return parsed as EnvelopeFile;
 }
 
 export async function writeEnvelope(envelope: EnvelopeFile): Promise<void> {
