@@ -318,6 +318,200 @@ test("e2e: production stdin op → hub surface → approve → child reads value
 // activeUrl is cleared between the two surfaces. This proves env-first/stdin-second
 // ORDER, not pre-queued FIFO. The pre-queued path (where multiple URLs are
 // surfaced before any subscriber attaches) is exercised by other hub-broker unit tests.
+
+test("hub e2e: combined production env+stdin --no-wait path surfaces both URLs (Plan 4d)", async () => {
+  await withE2EDaemon(async (ctx) => {
+    // Unlock the vault so run-resolve can resolve production refs.
+    const unlockRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock`, {
+      method: "POST",
+      headers: { Authorization: "Bearer t", "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "p", set_passphrase: true }),
+    });
+    assert.equal(unlockRes.status, 200);
+
+    // Seed two production secrets: one env ref, one stdin ref.
+    await ctx.services.vault.upsertSecret({
+      source: "local",
+      environment: "production",
+      name: "NW_ENV",
+      value: "nw-env-value",
+      allowedDomains: ["docker.io"],
+      allowedActions: ["use_as_stdin"],
+    });
+    await ctx.services.vault.upsertSecret({
+      source: "local",
+      environment: "production",
+      name: "NW_STDIN",
+      value: "nw-stdin-value",
+      allowedDomains: ["docker.io"],
+      allowedActions: ["use_as_stdin"],
+    });
+
+    const envRef = "ss://local/prod/NW_ENV";
+    const stdinRef = "ss://local/prod/NW_STDIN";
+
+    // Pre-attach a fake subscriber so broker.surface() promotes the first
+    // URL directly to activeUrl (instead of keeping it detached-queued).
+    const { sub } = makeSub();
+    ctx.broker.attach(sub);
+
+    // ── First POST: --no-wait (wait_for_approval: false) ─────────────────────
+    // requireApprovals Case B: atomically mints BOTH approvals, surfaces BOTH
+    // URLs via openUrlImpl, then throws approval_required with details.approvals
+    // length 2. The broker receives both surface() calls in one synchronous burst.
+
+    const firstRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/run/resolve`, {
+      method: "POST",
+      headers: { Authorization: "Bearer t", "content-type": "application/json" },
+      body: JSON.stringify({
+        refs: [envRef],
+        env: [{ key: "NW_ENV", value: envRef, isRef: true }],
+        command: "sh",
+        args: ["-c", "echo $NW_ENV; cat"],
+        cwd: process.cwd(),
+        stdin_ref: stdinRef,
+        wait_for_approval: false,
+      }),
+    });
+    assert.equal(firstRes.status, 400, "first POST must return 400 approval_required");
+
+    const firstBody = await firstRes.json() as Record<string, unknown>;
+    assert.equal(firstBody["error_code"], "approval_required");
+    const details = firstBody["details"] as { approvals: Array<{ approval_id: string; expires_at: number; action: string }> };
+    assert.ok(Array.isArray(details?.approvals), "details.approvals must be an array");
+    assert.equal(details.approvals.length, 2, "details.approvals must have 2 entries (env + stdin)");
+    assert.equal(details.approvals[0]!.action, "run", "first approval must be env binding (action=run)");
+    assert.equal(details.approvals[1]!.action, "run_stdin", "second approval must be stdin binding (action=run_stdin)");
+
+    const envId = details.approvals[0]!.approval_id;
+    const stdinId = details.approvals[1]!.approval_id;
+
+    // ── Verify broker received BOTH surface() calls ───────────────────────────
+    // Case B surfaces all URLs atomically (both in one synchronous burst before
+    // throwing). With a subscriber attached, the first goes to activeUrl and the
+    // second is queued. After the burst: queueLength >= 1 OR both are already
+    // accounted for in the active+queue state.
+    const stateAfterFirst = ctx.broker.peekState();
+    assert.ok(
+      stateAfterFirst.activeUrl !== null || stateAfterFirst.queueLength > 0,
+      "broker must have at least one URL surfaced after the --no-wait call",
+    );
+    // Total surfaced (active=1 + queued) should be 2.
+    const totalSurfaced = (stateAfterFirst.activeUrl !== null ? 1 : 0) + stateAfterFirst.queueLength;
+    assert.equal(totalSurfaced, 2, "broker must have received exactly 2 surface() calls (one per approval)");
+
+    // ── Approve env (first, active URL) via UI route ─────────────────────────
+    // The env approval is the active one (first surface() call wins the slot).
+    let activeState = ctx.broker.peekState();
+    assert.ok(activeState.activeUrl !== null && activeState.activeSeq !== null);
+    const activeUrl = new URL(activeState.activeUrl!);
+    const activeId = activeUrl.searchParams.get("id")!;
+    const activeToken = activeUrl.searchParams.get("token")!;
+    assert.equal(activeId, envId, "active URL must be the env approval");
+
+    const approveEnvRes = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/approvals/${activeId}/approve?token=${encodeURIComponent(activeToken)}`,
+      { method: "POST" },
+    );
+    assert.equal(approveEnvRes.status, 200);
+
+    // Mark env done — clears activeUrl, promotes queued stdin URL to active.
+    const doneEnvRes = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ seq: activeState.activeSeq! }),
+      },
+    );
+    assert.equal(doneEnvRes.status, 200);
+
+    // ── Verify stdin URL promoted to active ────────────────────────────────────
+    // After markDone, the queued stdin URL should become the new activeUrl.
+    let stdinState = ctx.broker.peekState();
+    // Short poll to let the broker state settle (synchronous state machine — should be immediate).
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && stdinState.activeUrl === null) {
+      await new Promise((r) => setTimeout(r, 10));
+      stdinState = ctx.broker.peekState();
+    }
+    assert.ok(stdinState.activeUrl !== null && stdinState.activeSeq !== null, "stdin URL must become active after env markDone");
+
+    const stdinActiveUrl = new URL(stdinState.activeUrl!);
+    const stdinActiveId = stdinActiveUrl.searchParams.get("id")!;
+    const stdinActiveToken = stdinActiveUrl.searchParams.get("token")!;
+    assert.equal(stdinActiveId, stdinId, "active URL after env done must be the stdin approval");
+
+    // ── Approve stdin via UI route ─────────────────────────────────────────────
+    const approveStdinRes = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/approvals/${stdinActiveId}/approve?token=${encodeURIComponent(stdinActiveToken)}`,
+      { method: "POST" },
+    );
+    assert.equal(approveStdinRes.status, 200);
+
+    // Mark stdin done.
+    const doneStdinRes = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/hub/done?token=${encodeURIComponent(ctx.broker.hubToken())}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ seq: stdinState.activeSeq! }),
+      },
+    );
+    assert.equal(doneStdinRes.status, 200);
+
+    // ── Second POST: retry with approval_ids ──────────────────────────────────
+    // Both approvals are now status:granted. Retry with approval_ids: [envId, stdinId].
+    // requireApprovals Case A: no mints needed, both consumed → command runs.
+    const retryRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/run/resolve`, {
+      method: "POST",
+      headers: { Authorization: "Bearer t", "content-type": "application/json" },
+      body: JSON.stringify({
+        refs: [envRef],
+        env: [{ key: "NW_ENV", value: envRef, isRef: true }],
+        command: "sh",
+        args: ["-c", "echo $NW_ENV; cat"],
+        cwd: process.cwd(),
+        stdin_ref: stdinRef,
+        approval_ids: [envId, stdinId],
+      }),
+    });
+    assert.equal(retryRes.status, 200, "retry with both approval IDs must succeed");
+    assert.match(retryRes.headers.get("content-type") ?? "", /ndjson/);
+
+    // Drain the ndjson stream.
+    const lines: Record<string, unknown>[] = [];
+    const reader = retryRes.body!.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const nl = buffer.indexOf("\n");
+        if (nl === -1) break;
+        const raw = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (raw.trim().length === 0) continue;
+        lines.push(JSON.parse(raw) as Record<string, unknown>);
+      }
+    }
+
+    const exitLine = lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 0, "--no-wait retry must exit 0");
+
+    // Masker must have replaced both secret values with ***.
+    const stdout = lines
+      .filter((l) => "stream" in l && (l as { stream: string }).stream === "stdout")
+      .map((l) => Buffer.from((l as { data: string }).data, "base64").toString("utf8"))
+      .join("");
+    assert.equal(stdout.includes("nw-env-value"), false, "env secret must not leak into stdout");
+    assert.equal(stdout.includes("nw-stdin-value"), false, "stdin secret must not leak into stdout");
+    assert.match(stdout, /\*\*\*/, "masked placeholder *** must appear in stdout");
+  });
+});
+
 test("hub e2e: combined production env+stdin via sequential hub promotion (Plan 4d)", async () => {
   await withE2EDaemon(async (ctx) => {
     // Unlock the vault so run-resolve can resolve production refs.
