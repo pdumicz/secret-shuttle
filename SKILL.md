@@ -42,7 +42,7 @@ secret-shuttle status --json
 - **You see**: refs (`ss://source/env/NAME`), metadata, fingerprints, status, error codes.
 - **You never see**: raw secret values, vault keys, browser CDP URL, OS credentials.
 - **Every production-environment operation requires human approval** (one click in a browser window the daemon opens automatically). Dev/local ops auto-approve.
-- **Responses are JSON**. Errors are `{"ok": false, "error_code": "...", "message": "...", "hint": "...", "exit_code": N}`. Always read `error_code` first.
+- **Responses are JSON**. Errors are `{"ok": false, "error_code": "...", "message": "...", "hint": "...", "exit_code": N, "next_action": "<command or null>"}`. Always read `error_code` first. When `next_action` is a non-null string, run it for automatic recovery. When `next_action` is null, human intervention is required.
 
 ## When NOT to use these commands
 
@@ -52,19 +52,23 @@ secret-shuttle status --json
 
 ## Recovery (error_code → next action)
 
-| error_code | Cause | What to do |
-|---|---|---|
-| `daemon_not_running` | Daemon is not started. | `secret-shuttle daemon start` |
-| `vault_not_initialized` | No vault exists yet. | `secret-shuttle init` |
-| `legacy_key_present` | V0 vault present; must migrate. | `secret-shuttle migrate secure-vault` |
-| `vault_locked` | Daemon running but vault is locked. | `secret-shuttle unlock` (browser window for passphrase) |
-| `approval_required` | Production-gated op needs developer approval. | Hub window opens automatically. Wait, or use `--no-wait` to get an `approval_id` and retry with `--approval-id <id>` after approving. For combined env+stdin ops, `details.approvals` lists each `approval_id`. |
-| `approval_expired` | The approval id aged out (2 min window). | Re-run without `--approval-id`; daemon mints a fresh one. |
-| `approval_denied` | Developer clicked Deny. | Explain what was denied; ask for guidance. |
-| `secret_not_found` | Ref doesn't exist in the vault. | `secret-shuttle secrets list --env <env>` to see what's available. |
-| `browser_not_started` | Browser flows need the daemon's browser. | `secret-shuttle browser start` |
-| `bad_request` / `missing_param` | Wrong input shape. | Read `message`; usually a missing or malformed flag. |
-| `secret_exists` | Ref already exists. | Re-run with `--force` to overwrite. |
+Every error JSON now includes a `next_action` field. When it is a non-null string, run that command for automatic recovery. When it is null, human intervention is required.
+
+| error_code | `next_action` | Cause | What to do |
+|---|---|---|---|
+| `daemon_not_running` | `secret-shuttle daemon start` | Daemon is not started. | Run the next_action. |
+| `vault_not_initialized` | `secret-shuttle init` | No vault exists yet. | Run the next_action. |
+| `legacy_key_present` | `secret-shuttle migrate secure-vault` | V0 vault present; must migrate. | Run the next_action. |
+| `vault_locked` | `secret-shuttle unlock` | Daemon running but vault is locked. | Run the next_action (opens browser window for passphrase). |
+| `browser_not_started` | `secret-shuttle browser start` | Browser flows need the daemon's browser. | Run the next_action. |
+| `daemon_invalid_response` | `secret-shuttle daemon status` | Daemon returned a malformed response. | Run the next_action, then retry. |
+| `daemon_start_timeout` | `secret-shuttle daemon status` | Daemon did not start in time. | Run the next_action, then retry. |
+| `approval_required` | null (human required) | Production-gated op needs developer approval. | Hub window opens automatically. Wait, or use `--no-wait` to get an `approval_id` and retry with `--approval-id <id>` after approving. For combined env+stdin ops, `details.approvals` lists each `approval_id`. |
+| `approval_expired` | null | The approval id aged out (2 min window). | Re-run without `--approval-id`; daemon mints a fresh one. |
+| `approval_denied` | null (human required) | Developer clicked Deny. | Explain what was denied; ask for guidance. |
+| `secret_not_found` | null | Ref doesn't exist in the vault. | `secret-shuttle secrets list --env <env>` to see what's available. |
+| `bad_request` / `missing_param` | null | Wrong input shape. | Read `message`; usually a missing or malformed flag. |
+| `secret_exists` | null | Ref already exists. | Re-run with `--force` to overwrite. |
 
 ## Tell the developer before approval-gated ops
 

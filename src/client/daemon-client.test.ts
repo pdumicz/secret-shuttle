@@ -210,3 +210,26 @@ test("daemonErrorFromPayload preserves array-shaped details", () => {
   const e = daemonErrorFromPayload(payload);
   assert.deepStrictEqual(e.details, [1, 2, "three"]);
 });
+
+test("daemonErrorFromPayload reconstructs next_action from payload", () => {
+  const e = daemonErrorFromPayload({ error_code: "daemon_not_running", message: "m", next_action: "secret-shuttle daemon start" });
+  assert.strictEqual(e.nextAction, "secret-shuttle daemon start");
+});
+
+test("daemonErrorFromPayload preserves null next_action", () => {
+  const e = daemonErrorFromPayload({ error_code: "approval_denied", message: "m", next_action: null });
+  assert.strictEqual(e.nextAction, null);
+});
+
+test("daemonErrorFromPayload falls back to registry nextAction when payload omits next_action", () => {
+  // daemon_not_running registry has nextAction = "secret-shuttle daemon start"
+  const e = daemonErrorFromPayload({ error_code: "daemon_not_running", message: "m" });
+  assert.strictEqual(e.nextAction, "secret-shuttle daemon start");
+});
+
+test("daemonErrorFromPayload next_action round-trips through errorToJson wire", () => {
+  const original = new ShuttleError("daemon_not_running", "msg");
+  const wire = JSON.parse(JSON.stringify(errorToJson(original)));
+  const reconstructed = daemonErrorFromPayload(wire);
+  assert.strictEqual(reconstructed.nextAction, "secret-shuttle daemon start");
+});

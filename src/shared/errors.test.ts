@@ -141,3 +141,50 @@ test("errorToJson emits details when explicit empty object", () => {
   const j = errorToJson(e);
   assert.deepStrictEqual(j.details, {});
 });
+
+test("ShuttleError populates nextAction from registry", () => {
+  const e = new ShuttleError("daemon_not_running", "msg");
+  assert.strictEqual(e.nextAction, "secret-shuttle daemon start");
+});
+
+test("ShuttleError nextAction is null for human-required errors", () => {
+  const e = new ShuttleError("approval_denied", "msg");
+  assert.strictEqual(e.nextAction, null);
+});
+
+test("errorToJson always includes next_action (null when none)", () => {
+  const e1 = new ShuttleError("daemon_not_running", "msg");
+  assert.strictEqual(errorToJson(e1).next_action, "secret-shuttle daemon start");
+  const e2 = new ShuttleError("approval_denied", "msg");
+  assert.strictEqual(errorToJson(e2).next_action, null);
+});
+
+test("ShuttleError opts.nextAction overrides registry", () => {
+  const e = new ShuttleError("daemon_not_running", "msg", { nextAction: "custom action" });
+  assert.strictEqual(e.nextAction, "custom action");
+});
+
+test("ShuttleError opts.nextAction: null explicitly overrides registry to null", () => {
+  const e = new ShuttleError("daemon_not_running", "msg", { nextAction: null });
+  assert.strictEqual(e.nextAction, null);
+});
+
+test("ShuttleError nextAction is null for unknown code", () => {
+  const e = new ShuttleError("totally_unknown", "msg");
+  assert.strictEqual(e.nextAction, null);
+});
+
+test("ShuttleError positional-form (number exitCode) still gets nextAction from registry", () => {
+  const e = new ShuttleError("daemon_not_running", "msg", 1);
+  assert.strictEqual(e.nextAction, "secret-shuttle daemon start");
+});
+
+test("errorToJson on plain Error includes next_action: null", () => {
+  const j = errorToJson(new Error("oh no"));
+  assert.strictEqual(j.next_action, null);
+});
+
+test("errorToJson on non-Error includes next_action: null", () => {
+  const j = errorToJson("string thrown");
+  assert.strictEqual(j.next_action, null);
+});

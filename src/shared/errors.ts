@@ -4,6 +4,12 @@ export type ShuttleErrorOpts = {
   exitCode?: number;
   hint?: string | null;
   /**
+   * Literal shell command an agent can run for automatic recovery, or null
+   * when human intervention is required. When present, overrides the registry
+   * default. Pass null to explicitly suppress the registry's nextAction.
+   */
+  nextAction?: string | null;
+  /**
    * Structured side-channel data, serialised to the top-level `details` key in
    * errorToJson output. Omitted from JSON when undefined OR null — both cases
    * keep the error shape byte-identical to callers that don't pass details
@@ -16,6 +22,8 @@ export class ShuttleError extends Error {
   readonly code: string;
   readonly exitCode: number;
   readonly hint: string | null;
+  /** Literal shell command an agent can run for automatic recovery, or null. */
+  readonly nextAction: string | null;
   readonly details: unknown;
 
   constructor(
@@ -30,11 +38,13 @@ export class ShuttleError extends Error {
     const registry = lookupErrorCode(code);
     const registryExitCode = registry?.exitCode ?? 1;
     const registryHint = registry?.hint(message) ?? null;
+    const registryNextAction = registry?.nextAction?.(message) ?? null;
 
     if (typeof optsOrExitCode === "number") {
-      // Backward-compat positional form: explicit exitCode wins; hint from registry; no details.
+      // Backward-compat positional form: explicit exitCode wins; hint/nextAction from registry; no details.
       this.exitCode = optsOrExitCode;
       this.hint = registryHint;
+      this.nextAction = registryNextAction;
       this.details = undefined;
     } else {
       this.exitCode = "exitCode" in optsOrExitCode && optsOrExitCode.exitCode !== undefined
@@ -43,6 +53,9 @@ export class ShuttleError extends Error {
       this.hint = "hint" in optsOrExitCode
         ? (optsOrExitCode.hint ?? null)
         : registryHint;
+      this.nextAction = "nextAction" in optsOrExitCode
+        ? (optsOrExitCode.nextAction ?? null)
+        : registryNextAction;
       this.details = optsOrExitCode.details;
     }
   }
@@ -69,6 +82,9 @@ export function errorToJson(error: unknown): Record<string, unknown> {
       message: error.message,
       hint: error.hint,
       exit_code: error.exitCode,
+      // Structured agent-actionable recovery: literal shell command or null.
+      // Always present so agents can branch on a single field.
+      next_action: error.nextAction,
     };
     // Omit details from JSON when undefined OR null — both should produce
     // a byte-identical error shape vs. callers that omit the field entirely.
@@ -88,6 +104,7 @@ export function errorToJson(error: unknown): Record<string, unknown> {
       message: error.message,
       hint: null,
       exit_code: 1,
+      next_action: null,
     };
   }
 
@@ -98,5 +115,6 @@ export function errorToJson(error: unknown): Record<string, unknown> {
     message: "Unknown error",
     hint: null,
     exit_code: 1,
+    next_action: null,
   };
 }

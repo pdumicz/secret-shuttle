@@ -13,6 +13,13 @@ export type ErrorCodeEntry = {
    * actionable recovery command exists (the human has to intervene).
    */
   hint: (message: string) => string | null;
+  /**
+   * Return a literal shell command an agent can run for automatic recovery,
+   * or null when the error requires human intervention. Always a concrete
+   * command string (no prose, no placeholders). Omit the key entirely OR
+   * return null for human-required / ambiguous errors.
+   */
+  nextAction?: (message: string) => string | null;
 };
 
 // Seeded with real codes confirmed via grep of src/ for new ShuttleError("...").
@@ -22,14 +29,17 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   daemon_not_running: {
     exitCode: EXIT_CODE_TRANSIENT,
     hint: () => "Run: secret-shuttle daemon start",
+    nextAction: () => "secret-shuttle daemon start",
   },
   daemon_invalid_response: {
     exitCode: EXIT_CODE_TRANSIENT,
     hint: () => "Run: secret-shuttle daemon status (then retry)",
+    nextAction: () => "secret-shuttle daemon status",
   },
   daemon_start_timeout: {
     exitCode: EXIT_CODE_TRANSIENT,
     hint: () => "Run: secret-shuttle daemon start (verify with: secret-shuttle daemon status)",
+    nextAction: () => "secret-shuttle daemon status",
   },
   approval_timeout: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
   unlock_timeout: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
@@ -41,6 +51,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   browser_not_started: {
     exitCode: EXIT_CODE_TRANSIENT,
     hint: () => "Run: secret-shuttle browser start",
+    nextAction: () => "secret-shuttle browser start",
   },
   auto_resume_precondition: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
   blank_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
@@ -101,10 +112,12 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   vault_not_initialized: {
     exitCode: EXIT_CODE_NOT_FOUND,
     hint: () => "Run: secret-shuttle init",
+    nextAction: () => "secret-shuttle init",
   },
   envelope_missing: {
     exitCode: EXIT_CODE_NOT_FOUND,
     hint: () => "Run: secret-shuttle init",
+    nextAction: () => "secret-shuttle init",
   },
   mark_focused_unavailable: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   mark_pick_no_actionable: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -113,6 +126,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   legacy_key_present: {
     exitCode: EXIT_CODE_NOT_FOUND,
     hint: () => "Run: secret-shuttle migrate secure-vault",
+    nextAction: () => "secret-shuttle migrate secure-vault",
   },
   package_json_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   repository_field_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -161,6 +175,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   vault_locked: {
     exitCode: EXIT_CODE_PERMISSION,
     hint: () => "Run: secret-shuttle unlock",
+    nextAction: () => "secret-shuttle unlock",
   },
   inject_output_path_unsafe: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   inject_output_write_failed: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
@@ -188,10 +203,12 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   keychain_not_implemented: {
     exitCode: EXIT_CODE_TRANSIENT,
     hint: () => "Fall back to passphrase unlock until Plan 5a wires the native keychain adapter.",
+    nextAction: () => "secret-shuttle unlock",
   },
   keychain_unavailable: {
     exitCode: EXIT_CODE_TRANSIENT,
     hint: () => "Fall back to passphrase unlock; verify your OS keyring is reachable.",
+    nextAction: () => "secret-shuttle unlock",
   },
 };
 

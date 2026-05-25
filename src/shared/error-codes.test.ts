@@ -177,3 +177,45 @@ test("error-codes: stdin_ref_in_env_file registered with USAGE exit code", () =>
   assert.equal(entry.hint(""), null);
 });
 
+test("error-codes: daemon_not_running has nextAction (mechanical recovery)", () => {
+  const entry = lookupErrorCode("daemon_not_running");
+  assert.ok(entry?.nextAction);
+  assert.strictEqual(entry!.nextAction!(""), "secret-shuttle daemon start");
+});
+
+test("error-codes: vault_locked has nextAction (mechanical recovery)", () => {
+  const entry = lookupErrorCode("vault_locked");
+  assert.ok(entry?.nextAction);
+  assert.strictEqual(entry!.nextAction!(""), "secret-shuttle unlock");
+});
+
+test("error-codes: vault_not_initialized has nextAction (mechanical recovery)", () => {
+  const entry = lookupErrorCode("vault_not_initialized");
+  assert.ok(entry?.nextAction);
+  assert.strictEqual(entry!.nextAction!(""), "secret-shuttle init");
+});
+
+test("error-codes: approval_denied has no automatic nextAction (human required)", () => {
+  const entry = lookupErrorCode("approval_denied");
+  const result = entry?.nextAction ? entry.nextAction("") : null;
+  assert.strictEqual(result, null);
+});
+
+test("error-codes: approval_required has no automatic nextAction (human required)", () => {
+  const entry = lookupErrorCode("approval_required");
+  const result = entry?.nextAction ? entry.nextAction("") : null;
+  assert.strictEqual(result, null);
+});
+
+test("error-codes: browser_not_started has nextAction (mechanical recovery)", () => {
+  const entry = lookupErrorCode("browser_not_started");
+  assert.ok(entry?.nextAction);
+  assert.strictEqual(entry!.nextAction!(""), "secret-shuttle browser start");
+});
+
+test("error-codes: legacy_key_present has nextAction (mechanical recovery)", () => {
+  const entry = lookupErrorCode("legacy_key_present");
+  assert.ok(entry?.nextAction);
+  assert.strictEqual(entry!.nextAction!(""), "secret-shuttle migrate secure-vault");
+});
+
