@@ -62,10 +62,35 @@ test("ui.html: success-only gate — notifyHubIfFramed reachable only under r.ok
   assert.match(html, okPattern, "expected an `if (r.ok)` guard around the notify call");
 });
 
-test("ui.html: polling handles approval_not_found error_code (hub-drain on cancellation)", async () => {
+test("ui.html: error_code=approval_not_found branch — comparison, cancellation render, and hub drain", async () => {
   const html = await loadHtml();
-  assert.ok(
-    html.includes("approval_not_found"),
-    "ui.html must check for error_code=approval_not_found in non-ok responses to drain the hub iframe when a grant is invalidated",
+
+  // 1. The handler must compare error_code === "approval_not_found" (not just
+  //    include the string in a comment or dead code).
+  assert.match(
+    html,
+    /errBody\.error_code\s*===\s*["']approval_not_found["']/,
+    "ui.html must compare errBody.error_code === 'approval_not_found' in the polling handler",
+  );
+
+  // 2. The branch must call stopPolling() to exit the polling loop.
+  assert.match(
+    html,
+    /error_code\s*===\s*["']approval_not_found["'][^}]*stopPolling\s*\(\s*\)/s,
+    "ui.html must call stopPolling() within the approval_not_found branch",
+  );
+
+  // 3. The branch must render a visible cancellation status.
+  assert.match(
+    html,
+    /Status:\s*cancelled/i,
+    "ui.html must set a 'Status: cancelled' text when error_code=approval_not_found",
+  );
+
+  // 4. The branch must drain the hub by calling notifyHubIfFramed().
+  assert.match(
+    html,
+    /error_code\s*===\s*["']approval_not_found["'][^}]*notifyHubIfFramed\s*\(\s*\)/s,
+    "ui.html must call notifyHubIfFramed() within the approval_not_found branch to drain the hub broker",
   );
 });
