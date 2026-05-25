@@ -311,7 +311,7 @@ Server normalizes `approval_id` → `approval_ids: [approval_id]` via `optApprov
   },
   "error_code": "approval_required",
   "message": "{\"approval_id\":\"abc-first-mint\",\"expires_at\":1716595200000}",
-  "hint": "Open the printed URL to approve. For multiple approvals listed under details.approvals, repeat --approval-id <id> for each.",
+  "hint": "Approve in the opened hub, then retry with --approval-id <id> (repeatable for each id listed under details.approvals).",
   "exit_code": 3,
   "details": {
     "approvals": [
@@ -426,7 +426,7 @@ The fail-fast block is the current safety net. It is deleted **only after** the 
 
 **Modified:**
 - `approval_required` hint string updated to:
-  > `"Open the printed URL to approve. For multiple approvals listed under details.approvals, repeat --approval-id <id> for each."`
+  > `"Approve in the opened hub, then retry with --approval-id <id> (repeatable for each id listed under details.approvals)."`
 
 **Removed:**
 - `combined_no_wait_unsupported` (added in Plan 4c post-ship `460e750`). Replaced by the working continuation path. Count goes 120 → 119.
