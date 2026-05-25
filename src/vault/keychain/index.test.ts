@@ -38,9 +38,9 @@ test("getKeychainAdapter respects platform override", () => {
 });
 
 // Note: darwin is no longer a stub (A2/commit 529df3f) — its tests live in darwin.test.ts.
-// Linux and Windows remain stubs until tasks A3 and A4.
+// Note: linux is no longer a stub (A3) — its tests live in linux.test.ts.
+// Windows remains a stub until task A4.
 for (const [name, platform] of [
-  ["linux", "linux"],
   ["win32", "win32"],
 ] as const) {
   test(`${name} stub: isAvailable() returns false`, async () => {
