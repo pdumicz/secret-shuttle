@@ -14,6 +14,7 @@ import { writeDaemonAudit } from "./audit.js";
 import { getShuttlePaths } from "../shared/config.js";
 import { HubBroker } from "./hub/hub-broker.js";
 import { openUrl } from "./approvals/open-url.js";
+import type { KeychainAdapter } from "../vault/keychain/types.js";
 
 export interface UnlockSession {
   id: string;
@@ -95,6 +96,12 @@ export class DaemonServices {
   cdp: CdpClient | null = null;
   cdpProxy: ProxyServer | null = null;
   readonly hubBroker: HubBroker;
+  /**
+   * Test-only override for the OS keychain adapter.
+   * Production leaves this undefined and unlock-session.ts falls back to
+   * `getKeychainAdapter()` (the platform-detected real adapter).
+   */
+  keychain?: KeychainAdapter;
 
   constructor(opts: DaemonServicesOptions = {}) {
     // Production: real openUrl (which honors SECRET_SHUTTLE_NO_OPEN_URL=1

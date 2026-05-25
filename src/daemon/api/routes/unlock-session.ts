@@ -7,6 +7,7 @@ import { decryptEnvelope, encryptEnvelope, readEnvelope, writeEnvelope } from ".
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
+import { getKeychainAdapter } from "../../../vault/keychain/index.js";
 
 const HTML_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -16,6 +17,40 @@ const HTML_PATH = path.resolve(
 export function registerUnlockSession(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/unlock/start", async () => {
     const envelope = await readEnvelope();
+
+    // Plan 5b/5f: try the OS keychain first. On macOS this fires Touch ID
+    // synchronously. On Linux libsecret prompts (or silently returns null).
+    // On Windows DPAPI unlocks transparently.
+    //
+    // The keychain is a cache — the passphrase remains the canonical recovery
+    // credential. On any failure (no entry, cancelled, invalid cached key,
+    // unavailable), fall through to the existing passphrase UI flow unchanged.
+    if (envelope !== null) {
+      const keychain = services.keychain ?? getKeychainAdapter();
+      if (await keychain.isAvailable()) {
+        const cached = await keychain.get("secret-shuttle", envelope.id);
+        if (cached !== null) {
+          try {
+            services.lock.unlock(cached);
+            await services.vault.ensureInitialized(); // throws vault_decryption_failed if key is wrong
+            await writeDaemonAudit({ action: "unlock", ok: true, source: "keychain" });
+            return { unlocked: true, source: "keychain" };
+          } catch {
+            // Cached key didn't decrypt the vault — stale or tampered. Re-lock
+            // to clear the bad key and fall through to the passphrase UI.
+            services.lock.lock();
+            await writeDaemonAudit({
+              action: "unlock",
+              ok: false,
+              error_code: "keychain_key_invalid",
+              source: "keychain",
+            });
+            // Fall through to passphrase UI below.
+          }
+        }
+      }
+    }
+
     const session = services.unlockSessions.create();
     // Open the UI window from the daemon process itself, so the CLI/agent never
     // sees the per-session ui_token. Capture port once so the URL and the

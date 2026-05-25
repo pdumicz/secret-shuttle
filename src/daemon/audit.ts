@@ -32,6 +32,8 @@ export interface DaemonAuditEvent {
   session_id?: string;
   error_code?: string;
   message?: string;
+  /** Discriminates the unlock source: "keychain" when the cached master key was used, absent for passphrase UI. */
+  source?: string;
   submitted?: boolean | "unknown";
   captured?: boolean | "unknown";
   success_signal?: string;
