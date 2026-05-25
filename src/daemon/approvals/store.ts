@@ -129,19 +129,28 @@ export class ApprovalStore {
   }
 
   /**
-   * Forcibly invalidate a grant — used by requireApprovals when a waiting-flow
-   * operation fails (e.g., one mint approved, a later mint denied) and any
-   * already-granted siblings would otherwise remain reusable.
+   * Forcibly invalidate a LIVE grant — used by requireApprovals when a
+   * waiting-flow operation fails (e.g., one mint approved, a later mint
+   * denied) and any already-granted siblings would otherwise remain
+   * reusable.
    *
-   * Behavior:
+   * Behavior (status-aware):
    *   - Unknown id → no-op (idempotent; safe to call in catch blocks).
-   *   - Grant present → remove from store, fire `cancelled` event for audit.
+   *   - Pending or granted grant → remove from store, fire `cancelled`
+   *     event for audit. The HTTP `/ui/approvals/:id` route returns
+   *     `approval_not_found` afterward; ui.html treats that as a
+   *     terminal hub-drain signal (parses error_code from the body).
+   *   - Terminal grant (denied / expired / used) → no-op. The grant's
+   *     existing terminal status already represents its final audit
+   *     story; emitting a duplicate `cancelled` event would muddy the
+   *     lifecycle log.
    *
-   * This is intentionally NOT for Phase 1 / Phase 2 in-call control flow.
-   * Phase 1's status checks already short-circuit before any commit; Phase 2's
-   * consumeBatch is atomic. invalidate is only called when an exception is
-   * already propagating out of requireApprovals AND there are waiting-flow
-   * mints that would otherwise leak.
+   * This is intentionally NOT for Phase 1 / Phase 2 in-call control
+   * flow. Phase 1's status checks already short-circuit before any
+   * commit; Phase 2's consumeBatch is atomic. invalidate is only
+   * called when an exception is already propagating out of
+   * requireApprovals AND there are waiting-flow mints that would
+   * otherwise leak.
    */
   invalidate(id: string): void {
     const g = this.grants.get(id);

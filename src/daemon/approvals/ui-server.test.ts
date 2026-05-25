@@ -105,6 +105,26 @@ test("GET /ui/approvals/:id includes template_params in JSON", async () => {
   });
 });
 
+test("ui-server: invalidated approval returns 400 + error_code=approval_not_found (cancelled hub-drain signal)", async () => {
+  await withServer(async ({ store, port }) => {
+    const g = store.create(SAMPLE);
+
+    // Pre-invalidation: route returns the grant fine.
+    const before = await fetch(`http://127.0.0.1:${port}/ui/approvals/${g.id}?token=${g.ui_token}`);
+    assert.equal(before.status, 200);
+
+    // Invalidate — analogous to requireApprovals catch-block invalidation.
+    store.invalidate(g.id);
+
+    // Post-invalidation: route returns HTTP 400 with error_code=approval_not_found.
+    // The UI client (ui.html) reads this body and treats it as cancelled.
+    const after = await fetch(`http://127.0.0.1:${port}/ui/approvals/${g.id}?token=${g.ui_token}`);
+    assert.equal(after.status, 400);
+    const body = await after.json() as { error_code: string };
+    assert.equal(body.error_code, "approval_not_found");
+  });
+});
+
 test("GET /ui/approve sets CSP with frame-ancestors 'self'", async () => {
   await withServer(async ({ port }) => {
     const res = await fetch(`http://127.0.0.1:${port}/ui/approve`);

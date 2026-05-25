@@ -61,3 +61,11 @@ test("ui.html: success-only gate — notifyHubIfFramed reachable only under r.ok
   const okPattern = /if\s*\(\s*r\.ok\s*\)/;
   assert.match(html, okPattern, "expected an `if (r.ok)` guard around the notify call");
 });
+
+test("ui.html: polling handles approval_not_found error_code (hub-drain on cancellation)", async () => {
+  const html = await loadHtml();
+  assert.ok(
+    html.includes("approval_not_found"),
+    "ui.html must check for error_code=approval_not_found in non-ok responses to drain the hub iframe when a grant is invalidated",
+  );
+});

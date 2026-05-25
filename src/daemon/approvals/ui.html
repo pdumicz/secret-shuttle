@@ -42,12 +42,24 @@
         try {
           const r = await fetch(`/ui/approvals/${id}?token=${token}`);
           if (!r.ok) {
-            // 404 = grant was cancelled (invalidated) after the approval page
-            // was opened. Surface a terminal-cancelled state for the user and
-            // signal operation_done to the hub broker so it drains to the next
-            // queued operation. Without this, a cancelled approval would sit in
-            // the hub iframe forever — the broker would never promote the next
-            // operation because it never received operation_done.
+            // The daemon serializes ShuttleError as HTTP 400 with error_code in
+            // the JSON body (server.ts writeError). For invalidated grants,
+            // error_code is "approval_not_found". Parse the body and treat that
+            // as a terminal-cancelled state so the hub broker drains to the next
+            // queued operation. Without this, an invalidated approval would sit
+            // in the hub iframe forever — the broker would never receive
+            // operation_done and the queue would stall.
+            try {
+              const errBody = await r.json();
+              if (errBody && errBody.error_code === "approval_not_found") {
+                stopPolling();
+                document.getElementById("status").textContent = "Status: cancelled";
+                notifyHubIfFramed();
+                return;
+              }
+            } catch { /* body parse failed — fall through to retry */ }
+            // Defensive: treat 404 as cancelled too in case the route's status
+            // code mapping ever changes.
             if (r.status === 404) {
               stopPolling();
               document.getElementById("status").textContent = "Status: cancelled";
