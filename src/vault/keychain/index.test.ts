@@ -39,39 +39,9 @@ test("getKeychainAdapter respects platform override", () => {
 
 // Note: darwin is no longer a stub (A2/commit 529df3f) — its tests live in darwin.test.ts.
 // Note: linux is no longer a stub (A3) — its tests live in linux.test.ts.
-// Windows remains a stub until task A4.
-for (const [name, platform] of [
-  ["win32", "win32"],
-] as const) {
-  test(`${name} stub: isAvailable() returns false`, async () => {
-    const adapter = getKeychainAdapter({ platformOverride: platform });
-    assert.equal(await adapter.isAvailable(), false);
-  });
-
-  test(`${name} stub: set() throws keychain_not_implemented`, async () => {
-    const adapter = getKeychainAdapter({ platformOverride: platform });
-    await assert.rejects(
-      () => adapter.set("svc", "acct", Buffer.from("x")),
-      (err) => err instanceof ShuttleError && err.code === "keychain_not_implemented",
-    );
-  });
-
-  test(`${name} stub: get() throws keychain_not_implemented`, async () => {
-    const adapter = getKeychainAdapter({ platformOverride: platform });
-    await assert.rejects(
-      () => adapter.get("svc", "acct"),
-      (err) => err instanceof ShuttleError && err.code === "keychain_not_implemented",
-    );
-  });
-
-  test(`${name} stub: delete() throws keychain_not_implemented`, async () => {
-    const adapter = getKeychainAdapter({ platformOverride: platform });
-    await assert.rejects(
-      () => adapter.delete("svc", "acct"),
-      (err) => err instanceof ShuttleError && err.code === "keychain_not_implemented",
-    );
-  });
-}
+// Note: win32 is no longer a stub (A4) — its tests live in windows.test.ts.
+// All three platforms now have real adapters; only UnsupportedKeychain (unknown platforms)
+// remains as a stub — tested in the block below.
 
 test("getKeychainAdapter on unsupported platform: stub-shaped + refuses operations", async () => {
   const adapter = getKeychainAdapter({ platformOverride: "freebsd" as NodeJS.Platform });
