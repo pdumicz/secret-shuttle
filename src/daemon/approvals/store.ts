@@ -187,6 +187,44 @@ export class ApprovalStore {
   }
 
   /**
+   * Pure precheck mirroring consumeBatch's validation phase. Captures
+   * this.now() once, validates all items (existence, status, TTL,
+   * binding match). Throws on the first failure. No mutations.
+   *
+   * Used by requireApprovals Phase 2 to verify all consume preconditions
+   * BEFORE committing other mutations (session mintFromSession), so a
+   * later consume failure can't leave session-counter changes orphaned.
+   *
+   * Within a single sync execution, validateConsumeBatch followed by
+   * consumeBatch will see the same this.now() (Node's single-threaded
+   * event loop). The atomic-batch invariant is preserved.
+   */
+  validateConsumeBatch(items: Array<{ id: string; binding: ApprovalBinding }>): void {
+    if (items.length === 0) return;
+
+    const seen = new Set<string>();
+    for (const { id } of items) {
+      if (seen.has(id)) {
+        throw new ShuttleError("bad_request", `validateConsumeBatch: duplicate id ${id}`);
+      }
+      seen.add(id);
+    }
+
+    const now = this.now();
+    for (const { id, binding } of items) {
+      const g = this.grants.get(id);
+      if (g === undefined) throw new ShuttleError("approval_not_found", "Unknown approval id.");
+      if (g.status === "used") throw new ShuttleError("approval_already_used", "Approval was already used.");
+      if (g.status !== "granted") throw new ShuttleError("approval_not_granted", "Approval not granted.");
+      if (now > g.expires_at) throw new ShuttleError("approval_expired", "Approval expired.");
+      if (!approvalBindingsMatch(g, binding)) {
+        this.onEvent?.({ kind: "mismatch", binding, existingGrant: g });
+        throw new ShuttleError("approval_mismatch", "Approval does not match the requested action.");
+      }
+    }
+  }
+
+  /**
    * Exposed for Phase 1 of requireApprovals: callers use this to check
    * whether a `granted` approval's TTL has elapsed before planning a
    * consume. Without this, an expired-but-status-granted approval would

@@ -470,6 +470,47 @@ test("consumeBatch: one mismatch → throws approval_mismatch with NEITHER consu
   assert.strictEqual(store.get(g2.id)!.status, "granted");
 });
 
+// ---------------------------------------------------------------------------
+// validateConsumeBatch
+// ---------------------------------------------------------------------------
+
+test("validateConsumeBatch: passes when all granted + within TTL, no mutations", () => {
+  const store = new ApprovalStore();
+  const b = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const g = store.create(b);
+  store.approve(g.id);
+  // Should not throw, should not mutate.
+  store.validateConsumeBatch([{ id: g.id, binding: b }]);
+  assert.strictEqual(store.get(g.id)!.status, "granted");
+});
+
+test("validateConsumeBatch: throws approval_expired when past TTL, no mutations", () => {
+  let nowMs = 1000;
+  const store = new ApprovalStore({ ttlMs: 100, now: () => nowMs });
+  const b = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const g = store.create(b);
+  store.approve(g.id);
+  nowMs = 1500;
+  assert.throws(
+    () => store.validateConsumeBatch([{ id: g.id, binding: b }]),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_expired",
+  );
+  assert.strictEqual(store.get(g.id)!.status, "granted");
+});
+
+test("validateConsumeBatch: throws approval_mismatch but does NOT consume", () => {
+  const store = new ApprovalStore();
+  const b1 = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const b2 = makeBindingFor("inject_submit", { destination_domain: "b.com", allowed_domains: ["b.com"] });
+  const g = store.create(b1);
+  store.approve(g.id);
+  assert.throws(
+    () => store.validateConsumeBatch([{ id: g.id, binding: b2 }]),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_mismatch",
+  );
+  assert.strictEqual(store.get(g.id)!.status, "granted");
+});
+
 test("mintFromSession: session_expired race (TTL elapses between peek and commit) → throws session_expired", () => {
   let nowMs = 1000;
   const sessionStore = new SessionStore({ now: () => nowMs });

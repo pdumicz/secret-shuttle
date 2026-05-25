@@ -25,8 +25,7 @@ type Plan =
   | { kind: "synth"; binding: ApprovalBinding }
   | { kind: "session"; binding: ApprovalBinding }
   | { kind: "consume"; binding: ApprovalBinding; id: string }
-  | { kind: "mint"; binding: ApprovalBinding }
-  | { kind: "waited"; binding: ApprovalBinding; grant: ApprovalGrant };
+  | { kind: "mint"; binding: ApprovalBinding };
 
 const DEFAULT_WAIT_MS = 2 * 60 * 1000;
 const POLL_MS = 200;
@@ -227,7 +226,15 @@ export async function requireApprovals(
     );
   }
 
-  // Case C: waiting flow + mints needed → sequential mint+wait, per binding.
+  // Case C: waiting flow + mints needed. Per-binding sequence:
+  //   1. store.create — mint a pending approval.
+  //   2. openUrlImpl — surface to the hub.
+  //   3. waitForGranted — poll until status=granted (no consume).
+  //   4. Convert plan to "consume" with the new id. The actual consume
+  //      happens later in the final atomic batch alongside supplied-ID
+  //      consumes, so a slow user wait on one binding can't leave a
+  //      previously-waited mint consumed while a supplied ID has
+  //      since expired.
   if (mintPlans.length > 0) {
     const waitBudget = opts.waitMs ?? DEFAULT_WAIT_MS;
     for (let i = 0; i < plans.length; i++) {
@@ -236,32 +243,70 @@ export async function requireApprovals(
       const g = opts.store.create(p.binding);
       const url = `http://127.0.0.1:${opts.daemonPort}/ui/approve?id=${g.id}&token=${g.ui_token}`;
       open(url);
-      const granted = await waitForGrant(opts.store, g.id, waitBudget, p.binding);
-      plans[i] = { kind: "waited", binding: p.binding, grant: granted };
+      await waitForGranted(opts.store, g.id, waitBudget);
+      plans[i] = { kind: "consume", binding: p.binding, id: g.id };
     }
   }
 
-  // Case A (and tail of Case C): commit all consume plans atomically (one
-  // timestamp covers the whole batch — closes Phase 1→Phase 2 TTL TOCTOU
-  // where the clock could cross a later approval's expires_at after an
-  // earlier consume already committed). Synth/session/waited plans are
-  // executed individually in plan order — they don't share the consume
-  // race window because synth has no side effects, mintFromSession has
-  // its own (separate) race semantics, and waited grants are already
-  // consumed.
-  const consumeIndices: number[] = [];
+  // Final commit ordering — closes both the Phase 2 internal TOCTOU window
+  // (consumes burning before later commits fail) AND the session+consume
+  // partial-commit race:
+  //   1. Validate ALL consume preconditions (no mutation). Captures one
+  //      timestamp shared with the eventual consumeBatch — within a single
+  //      sync execution, both calls see the same this.now().
+  //   2. Re-peek every session via canMatchSession (no mutation). This is
+  //      pure; throws bubble out and bypass any commits.
+  //   3. Commit sessions sequentially via mintFromSession (each call bumps
+  //      incrementUses). If a concurrent request burned a use between
+  //      Phase 1 and now, mintFromSession throws — but NO consume has been
+  //      committed yet, so no supplied approval is burned. Worst-case
+  //      partial commit at this point is "first N sessions bumped, session
+  //      N+1 racing throws" — bounded blast radius, no permanently-used approvals.
+  //   4. Commit consumes atomically via consumeBatch. Cannot fail (step 1
+  //      already validated against the same sync timestamp).
+
+  // Gather consume items (includes supplied-ID consumes AND waited mints
+  // from Case C — both have plan.kind === "consume" by this point).
   const consumeItems: Array<{ id: string; binding: ApprovalBinding }> = [];
-  for (let i = 0; i < plans.length; i++) {
-    const p = plans[i]!;
+  for (const p of plans) {
     if (p.kind === "consume") {
-      consumeIndices.push(i);
       consumeItems.push({ id: p.id, binding: p.binding });
     }
   }
-  const consumed = consumeItems.length > 0
-    ? opts.store.consumeBatch(consumeItems)
-    : [];
 
+  // Step 1: validate consumes.
+  opts.store.validateConsumeBatch(consumeItems);
+
+  // Step 2: re-peek sessions. canMatchSession is pure; it throws on
+  // session_not_found/expired/unauthorized/max_uses_exceeded and returns
+  // a boolean for pattern-match. Phase 1 already established pattern-match,
+  // so a fresh `false` here would indicate state drift between Phase 1 and
+  // Phase 2 (extremely unlikely in single-tick Node; defensive guard).
+  for (const p of plans) {
+    if (p.kind === "session") {
+      const ok = opts.store.canMatchSession(opts.sessionId!, p.binding, opts.sessionStore!);
+      if (!ok) {
+        throw new ShuttleError(
+          "session_pattern_no_match",
+          "Session pattern stopped matching between Phase 1 and Phase 2 (concurrent state change?).",
+        );
+      }
+    }
+  }
+
+  // Step 3: commit sessions.
+  const sessionGrants = new Map<number, ApprovalGrant>(); // plan index → grant
+  for (let i = 0; i < plans.length; i++) {
+    const p = plans[i]!;
+    if (p.kind === "session") {
+      sessionGrants.set(i, opts.store.mintFromSession(opts.sessionId!, p.binding, opts.sessionStore!));
+    }
+  }
+
+  // Step 4: commit consumes atomically.
+  const consumed = consumeItems.length > 0 ? opts.store.consumeBatch(consumeItems) : [];
+
+  // Build results in plan order.
   const result: ApprovalGrant[] = new Array(plans.length);
   let consumedIdx = 0;
   for (let i = 0; i < plans.length; i++) {
@@ -271,33 +316,34 @@ export async function requireApprovals(
     } else if (p.kind === "consume") {
       result[i] = consumed[consumedIdx++]!;
     } else if (p.kind === "session") {
-      result[i] = opts.store.mintFromSession(opts.sessionId!, p.binding, opts.sessionStore!);
-    } else if (p.kind === "waited") {
-      result[i] = (p as Extract<Plan, { kind: "waited" }>).grant;
+      result[i] = sessionGrants.get(i)!;
     } else {
-      // Should be unreachable: "mint" plans only exist in --no-wait flow which already threw.
-      throw new ShuttleError("unexpected_error", `unreachable plan kind: ${(p as Plan).kind}`);
+      // p.kind === "mint" — unreachable, all mints became "consume" in Case C.
+      throw new ShuttleError("unexpected_error", `unreachable plan kind at commit: ${(p as Plan).kind}`);
     }
   }
   return result;
 }
 
-async function waitForGrant(
+/**
+ * Wait for an approval to reach status="granted". Does NOT consume — that
+ * happens later in the unified Phase 2 commit, batched with supplied-ID
+ * consumes for atomicity.
+ *
+ * Throws if status transitions to denied/expired/used during the wait,
+ * or if the grant disappears, or if the deadline passes.
+ */
+async function waitForGranted(
   store: ApprovalStore,
   id: string,
   timeoutMs: number,
-  binding: ApprovalBinding,
-): Promise<ApprovalGrant> {
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const g = store.get(id);
     if (g === undefined) throw new ShuttleError("approval_not_found", "Approval vanished.");
-    // Defensive: if a grant we just minted was somehow consumed externally,
-    // surface that immediately rather than spinning to timeout.
     if (g.status === "used") throw new ShuttleError("approval_already_used", "Approval was already used.");
-    if (g.status === "granted") {
-      return store.consume(id, binding);
-    }
+    if (g.status === "granted") return;
     if (g.status === "denied") throw new ShuttleError("approval_denied", "Approval denied.");
     if (g.status === "expired") throw new ShuttleError("approval_expired", "Approval expired.");
     await new Promise((r) => setTimeout(r, POLL_MS));
