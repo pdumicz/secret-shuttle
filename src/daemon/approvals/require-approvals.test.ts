@@ -399,6 +399,35 @@ test("requireApprovals: mixed dev+prod + bad ID → throws approval_mismatch AND
   assert.strictEqual(store.get(wrongGrant.id)!.status, "granted");
 });
 
+test("requireApprovals: P1 — granted-but-TTL-expired ID is caught in Phase 1 (no partial Phase 2 commit)", async () => {
+  // Two approvals: both granted, one with TTL elapsed by call time.
+  // Phase 2 consume() would catch the expiry — but only AFTER consuming the
+  // first one. Phase 1 must catch it first.
+  let nowMs = 1000;
+  const store = new ApprovalStore({ ttlMs: 100, now: () => nowMs });
+  const eb = envBinding();
+  const sb = stdinBinding();
+
+  const envApproval = store.create(eb);
+  store.approve(envApproval.id);
+  const stdinApproval = store.create(sb);
+  store.approve(stdinApproval.id);
+
+  // Advance clock past TTL for BOTH approvals.
+  nowMs = 5000;
+
+  await assert.rejects(
+    requireApprovals({
+      store, bindings: [eb, sb], daemonPort: 1234,
+      approvalIdsFromClient: [envApproval.id, stdinApproval.id],
+    }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_expired",
+  );
+  // CRITICAL: env approval is still "granted" (NOT consumed in mid-Phase-2).
+  assert.strictEqual(store.get(envApproval.id)!.status, "granted");
+  assert.strictEqual(store.get(stdinApproval.id)!.status, "granted");
+});
+
 test("requireApprovals: waiting flow sequential — all granted → returns both", async () => {
   const store = new ApprovalStore({
     now: () => 1000,

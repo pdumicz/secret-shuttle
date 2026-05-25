@@ -128,6 +128,19 @@ export class ApprovalStore {
   }
 
   /**
+   * Exposed for Phase 1 of requireApprovals: callers use this to check
+   * whether a `granted` approval's TTL has elapsed before planning a
+   * consume. Without this, an expired-but-status-granted approval would
+   * pass Phase 1 and fail mid-Phase 2 (after earlier consumes have
+   * already committed — breaking the two-phase invariant).
+   *
+   * Wraps `this.now()` (the test-injectable clock).
+   */
+  nowMs(): number {
+    return this.now();
+  }
+
+  /**
    * Pure peek: does this session permit `binding`?
    * Returns true on match; false on pattern no-match. Throws on hard-fail
    * session states (revoked / expired / denied / not-pending). Mirrors EVERY

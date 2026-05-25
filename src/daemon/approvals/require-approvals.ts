@@ -141,6 +141,13 @@ export async function requireApprovals(
         // pending or anything else non-terminal: client supplied an unapproved id.
         throw new ShuttleError("approval_not_granted", "Approval not granted.");
       }
+      // Phase 1 TTL check: ApprovalStore.get() only expires pending grants, not
+      // granted ones. A granted-but-past-TTL grant would pass Phase 1 here, get
+      // planned as consume, then fail mid-Phase 2 — burning any earlier consumes.
+      // Catch the expiry here so Phase 1 short-circuits cleanly.
+      if (opts.store.nowMs() > peek.expires_at) {
+        throw new ShuttleError("approval_expired", "Approval expired.");
+      }
       unusedIds.delete(matchedId);
       plans.push({ kind: "consume", binding, id: matchedId });
       continue;
