@@ -12,50 +12,13 @@ Let AI agents use secrets without seeing them.
 
 Secret Shuttle is a local bridge that lets coding agents — Claude Code, Codex, Cursor, browser-using agents — capture, generate, store, compare, and inject secrets through browser and CLI workflows. The agent sees only refs like `ss://stripe/prod/STRIPE_WEBHOOK_SECRET`, fingerprints, field metadata, and status — never the raw value.
 
-## How Secure Mode Works
-
-```text
-Agent CLI (untrusted client)
-        |
-        | localhost HTTP, bearer token from ~/.secret-shuttle/daemon-socket.json
-        v
-Secret Shuttle daemon
-  - vault key (in memory only, after passphrase unlock through web UI)
-  - approval grants (single-use, 2-min TTL, bound to action/ref/domain/target/field/template)
-  - browser owner — talks raw CDP over a pipe
-  - filtered CDP WebSocket proxy exposed to the agent
-  - safe command-template runner (no shell, no arbitrary commands)
-```
-
-The daemon owns every secret moment. The agent sees refs and status, never raw values, never the raw Chrome CDP URL, never the vault key.
-
-## Install (from source)
+## 30-Second Install
 
 ```bash
-npm install
-npm run build
-npm link
-secret-shuttle daemon start
-secret-shuttle unlock
+npx secret-shuttle init
 ```
 
-`unlock` opens a local web window — you enter the passphrase there. The CLI never reads it.
-
-## Quickstart
-
-```bash
-secret-shuttle generate \
-  --name INTERNAL_CRON_SECRET \
-  --env production \
-  --kind random_32_bytes \
-  --allow-domain vercel.com
-# (production secret — approve in the window the daemon opens)
-
-secret-shuttle list --env production
-secret-shuttle inspect ss://local/prod/INTERNAL_CRON_SECRET
-```
-
-For the full browser walkthrough see [examples/stripe-to-vercel/walkthrough.md](examples/stripe-to-vercel/walkthrough.md).
+This starts the local daemon and walks you through setting a vault passphrase. You will see a Touch ID prompt (macOS) or a passphrase entry window. The CLI never reads the passphrase — it is entered through a local web window that only the daemon owns. After `init` completes the daemon is running and you are ready to use the CLI or hand it to an agent.
 
 ## For Agents
 
@@ -76,6 +39,39 @@ secret-shuttle agent print-skill-url   # → the raw URL (one line, paste it)
 ```
 
 Snippet targets (AGENTS.md, .github/copilot-instructions.md) wrap the Secret Shuttle block in `<!-- secret-shuttle:begin -->` / `<!-- secret-shuttle:end -->` markers — re-running `agent install` only replaces the marked block, never the surrounding content.
+
+## How Secure Mode Works
+
+```text
+Agent CLI (untrusted client)
+        |
+        | localhost HTTP, bearer token from ~/.secret-shuttle/daemon-socket.json
+        v
+Secret Shuttle daemon
+  - vault key (in memory only, after passphrase unlock through web UI)
+  - approval grants (single-use, 2-min TTL, bound to action/ref/domain/target/field/template)
+  - browser owner — talks raw CDP over a pipe
+  - filtered CDP WebSocket proxy exposed to the agent
+  - safe command-template runner (no shell, no arbitrary commands)
+```
+
+The daemon owns every secret moment. The agent sees refs and status, never raw values, never the raw Chrome CDP URL, never the vault key.
+
+## Quickstart
+
+```bash
+secret-shuttle generate \
+  --name INTERNAL_CRON_SECRET \
+  --env production \
+  --kind random_32_bytes \
+  --allow-domain vercel.com
+# (production secret — approve in the window the daemon opens)
+
+secret-shuttle list --env production
+secret-shuttle inspect ss://local/prod/INTERNAL_CRON_SECRET
+```
+
+For the full browser walkthrough see [examples/stripe-to-vercel/walkthrough.md](examples/stripe-to-vercel/walkthrough.md).
 
 ## Templates Instead of Arbitrary Commands
 
@@ -131,6 +127,22 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 - [docs/cli-reference.md](docs/cli-reference.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/roadmap.md](docs/roadmap.md)
+
+## Build from Source
+
+For contributors and anyone who wants to hack on the code:
+
+```bash
+git clone https://github.com/pdumicz/secret-shuttle.git
+cd secret-shuttle
+npm install
+npm run build
+npm link
+secret-shuttle daemon start
+secret-shuttle unlock
+```
+
+`unlock` opens a local web window — you enter the passphrase there. The CLI never reads it.
 
 ## License
 
