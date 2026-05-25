@@ -35,16 +35,31 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
             await services.vault.ensureInitialized(); // throws vault_decryption_failed if key is wrong
             await writeDaemonAudit({ action: "unlock", ok: true, source: "keychain" });
             return { unlocked: true, source: "keychain" };
-          } catch {
-            // Cached key didn't decrypt the vault — stale or tampered. Re-lock
-            // to clear the bad key and fall through to the passphrase UI.
+          } catch (err) {
+            // Re-lock unconditionally so a partial unlock can't leak a bad key.
             services.lock.lock();
+            // Determine whether this is an expected key-validation failure
+            // (wrong cached key) or something unexpected (I/O error, audit
+            // failure, etc.). Only the former should fall through silently.
+            const isKeyValidationFailure =
+              err instanceof ShuttleError &&
+              (err.code === "vault_decryption_failed" || err.code === "invalid_master_key");
             await writeDaemonAudit({
               action: "unlock",
               ok: false,
-              error_code: "keychain_key_invalid",
+              error_code: isKeyValidationFailure
+                ? "keychain_key_invalid"
+                : err instanceof ShuttleError
+                  ? err.code
+                  : "unexpected_error",
               source: "keychain",
             });
+            if (!isKeyValidationFailure) {
+              // Unexpected error — rethrow so the caller sees the real problem
+              // instead of being silently routed to a passphrase UI that may
+              // also fail with no forensic trail.
+              throw err;
+            }
             // Fall through to passphrase UI below.
           }
         }

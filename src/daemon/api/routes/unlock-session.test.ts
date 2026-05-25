@@ -211,6 +211,46 @@ test("unlock-session: keychain returns invalid key → falls through to passphra
   }, { keychain });
 });
 
+test("unlock-session: keychain fast-path rethrows unexpected errors instead of silently falling through", async () => {
+  const keychain = new MockKeychain();
+
+  await withUnlockUiDaemon(async (ctx) => {
+    // Bootstrap: create vault + envelope via passphrase, capture master key.
+    const { masterKey, envelopeId } = await bootstrapVaultWithPassphrase(ctx.port, ctx.services);
+
+    // Pre-load the real master key so the fast-path is entered.
+    await keychain.set("secret-shuttle", envelopeId, masterKey);
+
+    // Stub ensureInitialized to throw a non-validation error (simulated I/O failure).
+    const originalEnsure = ctx.services.vault.ensureInitialized.bind(ctx.services.vault);
+    ctx.services.vault.ensureInitialized = async () => {
+      throw new Error("simulated I/O failure");
+    };
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+        method: "POST",
+        headers: { authorization: "Bearer t", "content-type": "application/json" },
+        body: "{}",
+      });
+
+      // Must NOT silently fall through to a passphrase UI response.
+      assert.notEqual(res.status, 200, "unexpected error must not return 200");
+
+      // The body must NOT look like a successful passphrase-UI start.
+      const body = await res.json() as Record<string, unknown>;
+      assert.equal(body.unlocked, undefined, "unlocked must NOT be present");
+      assert.equal(body.session_id, undefined, "session_id must NOT be present (not silently routed to passphrase UI)");
+    } finally {
+      // Restore — always, even if assertions throw.
+      ctx.services.vault.ensureInitialized = originalEnsure;
+    }
+
+    // services.lock must be re-locked (no stray unlocked state after unexpected failure).
+    assert.equal(ctx.services.lock.isUnlocked(), false, "lock must be closed after unexpected error");
+  }, { keychain });
+});
+
 test("unlock-session: keychain unavailable → falls through to passphrase UI", async () => {
   const keychain = new MockKeychain();
   keychain.available = false;
