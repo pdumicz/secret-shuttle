@@ -20,6 +20,7 @@ import { registerHealth } from "./routes/health.js";
 import { registerRunResolveRoute } from "./routes/run-resolve.js";
 import { registerInjectRenderRoute } from "./routes/inject-render.js";
 import { registerSecretsImportRoute } from "./routes/secrets-import.js";
+import { registerKeychainRoutes } from "./routes/keychain.js";
 import { registerHubRoutes } from "../hub/hub-server.js";
 
 export function registerRoutes(
@@ -47,4 +48,5 @@ export function registerRoutes(
   registerRunResolveRoute(server, services, daemonPortRef);
   registerInjectRenderRoute(server, services, daemonPortRef);
   registerSecretsImportRoute(server, services, daemonPortRef);
+  registerKeychainRoutes(server, services);
 }
