@@ -313,7 +313,12 @@ test("e2e: production stdin op → hub surface → approve → child reads value
   });
 });
 
-test("hub e2e: combined production env+stdin via FIFO broker queue (Plan 4d)", async () => {
+// Note: waiting-flow path surfaces approvals sequentially. requireApprovals (Case C)
+// awaits the first grant before calling open() on the second URL — so the broker's
+// activeUrl is cleared between the two surfaces. This proves env-first/stdin-second
+// ORDER, not pre-queued FIFO. The pre-queued path (where multiple URLs are
+// surfaced before any subscriber attaches) is exercised by other hub-broker unit tests.
+test("hub e2e: combined production env+stdin via sequential hub promotion (Plan 4d)", async () => {
   await withE2EDaemon(async (ctx) => {
     // Unlock the vault so run-resolve can resolve production refs.
     const unlockRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock`, {
@@ -399,6 +404,20 @@ test("hub e2e: combined production env+stdin via FIFO broker queue (Plan 4d)", a
     const id1 = url1.searchParams.get("id");
     const token1 = url1.searchParams.get("token");
     assert.ok(id1 && token1, "first approval URL must carry id + token");
+
+    // Assert that the first approval is the env binding (action=run), not stdin.
+    // If run-resolve reverses the binding order (stdin first, env second), this
+    // assertion catches it: the first approval would have action="run_stdin".
+    // The env binding has ref=null and carries refs via template_params.refs.
+    const firstApproval = ctx.services.approvals.get(id1!);
+    assert.ok(firstApproval, "first approval must exist in store");
+    assert.strictEqual(firstApproval.action, "run", "first approval must be the env binding (action=run)");
+    assert.strictEqual(firstApproval.ref, null, "env binding carries ref=null (refs are in template_params.refs)");
+    assert.ok(
+      (firstApproval.template_params?.["refs"] as string | undefined)?.includes(envRef),
+      "env binding template_params.refs must include the env secret ref",
+    );
+
     const approveRes1 = await fetch(
       `http://127.0.0.1:${ctx.port}/ui/approvals/${id1}/approve?token=${encodeURIComponent(token1!)}`,
       { method: "POST" },
@@ -444,6 +463,16 @@ test("hub e2e: combined production env+stdin via FIFO broker queue (Plan 4d)", a
     const id2 = url2.searchParams.get("id");
     const token2 = url2.searchParams.get("token");
     assert.ok(id2 && token2, "second approval URL must carry id + token");
+
+    // Assert that the second approval is the stdin binding (action=run_stdin), not env.
+    // If run-resolve reverses the binding order, the second approval would have
+    // action="run" and this assertion would fail.
+    // The stdin binding has ref=stdinRef (single canonical ref).
+    const secondApproval = ctx.services.approvals.get(id2!);
+    assert.ok(secondApproval, "second approval must exist in store");
+    assert.strictEqual(secondApproval.action, "run_stdin", "second approval must be the stdin binding (action=run_stdin)");
+    assert.strictEqual(secondApproval.ref, stdinRef, "stdin binding ref must match the stdin secret ref");
+
     const approveRes2 = await fetch(
       `http://127.0.0.1:${ctx.port}/ui/approvals/${id2}/approve?token=${encodeURIComponent(token2!)}`,
       { method: "POST" },
