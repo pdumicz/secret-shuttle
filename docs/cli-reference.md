@@ -76,6 +76,41 @@ secret-shuttle inject-submit \
 
 Before blind mode, mark the field and submit control with `secret-shuttle browser mark focused|pick --as <label>`; the daemon then owns the whole transaction (the agent's browser access is severed while the secret is on the page). The daemon injects the stored secret into the marked field, clicks the marked submit control, waits for the approved success marker, and proves the raw secret is absent from every daemon-observable surface. It always requires human approval through the daemon UI (it authorizes auto-resume; `--approval-id` / `--no-wait` work as elsewhere); the approval UI shows the field/submit labels, the success marker, and an explicit auto-resume disclosure. Observation auto-resumes only if the success marker was observed and the absence proof passed; otherwise blind mode stays active and the response is `next: "manual_recovery_required"`, which the agent must surface to the human to run `secret-shuttle blind end` — the agent must not resume itself. The handles are revalidated and the submit handle must be on the same page/target + domain as the field handle (fail-closed), and the secret's `allowed_actions` must include `inject_submit` (no implicit grant from `inject_into_field`). Responses are enum-only and never contain the raw secret or any observed page text. Whether auto-resume succeeds in practice on a given provider's pages is best-effort; if a site forces manual recovery the secret was still written safely under blind mode and `secret-shuttle blind end` is the recovery. Unlike `inject`, which only writes the secret into the focused field and leaves a human to save and end blind manually, `inject-submit` also clicks submit, verifies success, and auto-resumes only if the secret is proven gone.
 
+## `secret-shuttle import`
+
+```bash
+# Import .env into the vault as development secrets (default):
+secret-shuttle import --env-file .env
+
+# Import as production (requires one batch approval):
+secret-shuttle import --env-file .env.production --env production
+
+# Skip entries that already exist instead of erroring:
+secret-shuttle import --env-file .env --skip-existing
+
+# Overwrite entries that already exist:
+secret-shuttle import --env-file .env --force
+
+# Custom source name:
+secret-shuttle import --env-file .env --source stripe --env production
+```
+
+Reads a `.env` file, parses it, and stores each plaintext entry as a vault secret. Entries whose value is already a vault ref (`ss://...`) are skipped automatically (reported in `skipped_already_refs`). Returns enum JSON: `{ imported, skipped, refs, skipped_existing, skipped_already_refs }`.
+
+Key flags:
+
+```
+--env-file <path>       Path to the .env file (required).
+--env <name>            Target environment (default: development).
+--source <name>         Vault source namespace (default: local).
+--force                 Overwrite refs that already exist.
+--skip-existing         Skip existing refs silently instead of erroring.
+--session <id>          Pre-approved session id.
+--approval-id <id>      Pre-issued approval id (repeatable).
+```
+
+Production env requires a single batch approval covering the whole import (one click for N entries). Use `--no-wait` is not needed — just supply `--approval-id` after approving in the hub.
+
 ## `secret-shuttle run`
 
 ```bash

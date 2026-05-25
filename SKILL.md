@@ -23,6 +23,10 @@ secret-shuttle secrets list
 secret-shuttle secrets list --env production
 secret-shuttle secrets get-ref ss://stripe/prod/STRIPE_KEY
 
+# Import an existing .env file into the vault (one command, no manual per-key set):
+secret-shuttle import --env-file .env
+secret-shuttle import --env-file .env.production --env production
+
 # Store a new secret (returns a ref; value is never returned):
 secret-shuttle secrets set --name STRIPE_KEY --env production --source stripe
 
