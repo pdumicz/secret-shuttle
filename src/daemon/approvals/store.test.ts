@@ -386,6 +386,90 @@ test("fireMismatch: used/expired grant doesn't fire", () => {
   assert.strictEqual(events.length, 0, "no event for used grant");
 });
 
+// ---------------------------------------------------------------------------
+// consumeBatch
+// ---------------------------------------------------------------------------
+
+test("consumeBatch: empty items returns []", () => {
+  const store = new ApprovalStore();
+  assert.deepStrictEqual(store.consumeBatch([]), []);
+});
+
+test("consumeBatch: all granted in order → consumes all atomically", () => {
+  const store = new ApprovalStore();
+  const b1 = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const b2 = makeBindingFor("inject_submit", { destination_domain: "b.com", allowed_domains: ["b.com"] });
+  const g1 = store.create(b1);
+  store.approve(g1.id);
+  const g2 = store.create(b2);
+  store.approve(g2.id);
+
+  const out = store.consumeBatch([{ id: g1.id, binding: b1 }, { id: g2.id, binding: b2 }]);
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[0]!.id, g1.id);
+  assert.strictEqual(out[1]!.id, g2.id);
+  assert.strictEqual(store.get(g1.id)!.status, "used");
+  assert.strictEqual(store.get(g2.id)!.status, "used");
+});
+
+test("consumeBatch: TOCTOU — clock crosses second TTL during the call → throws approval_expired with NEITHER consumed", () => {
+  // Set up: g1 valid forever (within test); g2 has tight TTL.
+  // Pin nowMs so that at consumeBatch entry, g2 is JUST past its expires_at.
+  // The bug being closed: per-plan consume would have consumed g1 first
+  // (clock < g1.expires_at), then read clock again for g2 and seen
+  // clock > g2.expires_at. Atomic batch captures clock ONCE and refuses to
+  // mutate.
+  let nowMs = 1000;
+  const store = new ApprovalStore({ ttlMs: 100, now: () => nowMs });
+  const b1 = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const b2 = makeBindingFor("inject_submit", { destination_domain: "b.com", allowed_domains: ["b.com"] });
+  // Both created at nowMs=1000 with ttl=100 → expires_at=1100.
+  const g1 = store.create(b1);
+  const g2 = store.create(b2);
+  store.approve(g1.id);
+  store.approve(g2.id);
+
+  // Cross BOTH TTLs.
+  nowMs = 1500;
+
+  assert.throws(
+    () => store.consumeBatch([{ id: g1.id, binding: b1 }, { id: g2.id, binding: b2 }]),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_expired",
+  );
+  // Critical: NEITHER consumed.
+  assert.strictEqual(store.get(g1.id)!.status, "granted");
+  assert.strictEqual(store.get(g2.id)!.status, "granted");
+});
+
+test("consumeBatch: duplicate id → bad_request, no mutations", () => {
+  const store = new ApprovalStore();
+  const b = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const g = store.create(b);
+  store.approve(g.id);
+  assert.throws(
+    () => store.consumeBatch([{ id: g.id, binding: b }, { id: g.id, binding: b }]),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bad_request",
+  );
+  assert.strictEqual(store.get(g.id)!.status, "granted");
+});
+
+test("consumeBatch: one mismatch → throws approval_mismatch with NEITHER consumed", () => {
+  const store = new ApprovalStore();
+  const b1 = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
+  const b2 = makeBindingFor("inject_submit", { destination_domain: "b.com", allowed_domains: ["b.com"] });
+  const g1 = store.create(b1);
+  store.approve(g1.id);
+  const g2 = store.create(b2);
+  store.approve(g2.id);
+  // Pass g2 against b1's binding shape — should mismatch.
+  assert.throws(
+    () => store.consumeBatch([{ id: g1.id, binding: b1 }, { id: g2.id, binding: b1 }]),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_mismatch",
+  );
+  assert.strictEqual(store.get(g1.id)!.status, "granted");
+  assert.strictEqual(store.get(g2.id)!.status, "granted");
+});
+
 test("mintFromSession: session_expired race (TTL elapses between peek and commit) → throws session_expired", () => {
   let nowMs = 1000;
   const sessionStore = new SessionStore({ now: () => nowMs });

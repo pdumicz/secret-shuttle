@@ -128,6 +128,65 @@ export class ApprovalStore {
   }
 
   /**
+   * Atomic multi-consume. Mirrors consume(id, binding) but validates ALL
+   * items against a SINGLE timestamp before any mutation. Closes the
+   * Phase 1→Phase 2 TOCTOU window in requireApprovals: per-plan consume()
+   * re-reads this.now() per call, so an approval whose expires_at falls
+   * between consume(A) and consume(B) yields a partial commit (A used,
+   * B failed).
+   *
+   * Semantics:
+   *   - Empty items: return [].
+   *   - Duplicate ids in items: throw bad_request (caller bug — Phase 1
+   *     should have deduped via the unusedIds Set).
+   *   - Any item fails precondition (not found / not granted / expired /
+   *     mismatch): throw IMMEDIATELY, no mutations performed.
+   *   - All items pass: mark each used in input order, fire "used" events,
+   *     return grants in input order.
+   *
+   * The timestamp is captured once at the start of validation. The mutation
+   * pass cannot fail (every check already passed against that timestamp).
+   */
+  consumeBatch(items: Array<{ id: string; binding: ApprovalBinding }>): ApprovalGrant[] {
+    if (items.length === 0) return [];
+
+    // Detect duplicate IDs upfront.
+    const seen = new Set<string>();
+    for (const { id } of items) {
+      if (seen.has(id)) {
+        throw new ShuttleError("bad_request", `consumeBatch: duplicate id ${id}`);
+      }
+      seen.add(id);
+    }
+
+    // Capture clock ONCE for the whole batch.
+    const now = this.now();
+
+    // Phase A: validate all preconditions. No mutations.
+    for (const { id, binding } of items) {
+      const g = this.grants.get(id);
+      if (g === undefined) throw new ShuttleError("approval_not_found", "Unknown approval id.");
+      if (g.status === "used") throw new ShuttleError("approval_already_used", "Approval was already used.");
+      if (g.status !== "granted") throw new ShuttleError("approval_not_granted", "Approval not granted.");
+      if (now > g.expires_at) throw new ShuttleError("approval_expired", "Approval expired.");
+      if (!approvalBindingsMatch(g, binding)) {
+        this.onEvent?.({ kind: "mismatch", binding, existingGrant: g });
+        throw new ShuttleError("approval_mismatch", "Approval does not match the requested action.");
+      }
+    }
+
+    // Phase B: all preconditions pass — mutate in order.
+    const results: ApprovalGrant[] = [];
+    for (const { id } of items) {
+      const g = this.grants.get(id)!;
+      g.status = "used";
+      this.onEvent?.({ kind: "used", grant: g });
+      results.push(g);
+    }
+    return results;
+  }
+
+  /**
    * Exposed for Phase 1 of requireApprovals: callers use this to check
    * whether a `granted` approval's TTL has elapsed before planning a
    * consume. Without this, an expired-but-status-granted approval would

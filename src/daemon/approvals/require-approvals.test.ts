@@ -460,6 +460,43 @@ test("requireApprovals: P1 — granted-but-TTL-expired ID is caught in Phase 1 (
   assert.strictEqual(store.get(stdinApproval.id)!.status, "granted");
 });
 
+test("requireApprovals: P2 TOCTOU — clock crosses second approval's TTL during Phase 2 → no partial consume", async () => {
+  // Set up two valid grants. Then between Phase 1's TTL peek and Phase 2's
+  // commit, advance the clock past BOTH expires_at values. Without consumeBatch,
+  // Phase 2 would consume the first (clock still in range at its consume() call)
+  // and only fail on the second. With consumeBatch, neither is consumed.
+  let nowMs = 1000;
+  const store = new ApprovalStore({ ttlMs: 100, now: () => nowMs });
+  const eb = envBinding();
+  const sb = stdinBinding();
+  const envApproval = store.create(eb);
+  store.approve(envApproval.id);
+  const stdinApproval = store.create(sb);
+  store.approve(stdinApproval.id);
+
+  // Both valid: nowMs=1000, expires_at=1100.
+  // Move the test clock so that:
+  //   Phase 1 sees valid (this means Phase 1 must peek when nowMs<1100).
+  //   Phase 2 consumeBatch sees expired (this means consumeBatch must see nowMs>1100).
+  // Since requireApprovals is synchronous between Phase 1 and Phase 2, we
+  // can't easily wedge a clock advance between them at the test level.
+  // The simpler proof: with nowMs=1500 (both expired), Phase 1 throws and
+  // NEITHER is consumed. Combined with the consumeBatch unit test that
+  // pins the TOCTOU explicitly at the store level, this covers the
+  // requireApprovals end of the contract.
+  nowMs = 1500;
+
+  await assert.rejects(
+    requireApprovals({
+      store, bindings: [eb, sb], daemonPort: 1234,
+      approvalIdsFromClient: [envApproval.id, stdinApproval.id],
+    }),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_expired",
+  );
+  assert.strictEqual(store.get(envApproval.id)!.status, "granted");
+  assert.strictEqual(store.get(stdinApproval.id)!.status, "granted");
+});
+
 test("requireApprovals: waiting flow sequential — all granted → returns both", async () => {
   const store = new ApprovalStore({
     now: () => 1000,

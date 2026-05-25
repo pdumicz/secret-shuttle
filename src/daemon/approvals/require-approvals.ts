@@ -241,17 +241,39 @@ export async function requireApprovals(
     }
   }
 
-  // Case A (and tail of Case C): commit non-mint plans + collect grants in order.
-  const result: ApprovalGrant[] = [];
-  for (const p of plans) {
+  // Case A (and tail of Case C): commit all consume plans atomically (one
+  // timestamp covers the whole batch — closes Phase 1→Phase 2 TTL TOCTOU
+  // where the clock could cross a later approval's expires_at after an
+  // earlier consume already committed). Synth/session/waited plans are
+  // executed individually in plan order — they don't share the consume
+  // race window because synth has no side effects, mintFromSession has
+  // its own (separate) race semantics, and waited grants are already
+  // consumed.
+  const consumeIndices: number[] = [];
+  const consumeItems: Array<{ id: string; binding: ApprovalBinding }> = [];
+  for (let i = 0; i < plans.length; i++) {
+    const p = plans[i]!;
+    if (p.kind === "consume") {
+      consumeIndices.push(i);
+      consumeItems.push({ id: p.id, binding: p.binding });
+    }
+  }
+  const consumed = consumeItems.length > 0
+    ? opts.store.consumeBatch(consumeItems)
+    : [];
+
+  const result: ApprovalGrant[] = new Array(plans.length);
+  let consumedIdx = 0;
+  for (let i = 0; i < plans.length; i++) {
+    const p = plans[i]!;
     if (p.kind === "synth") {
-      result.push(synthesizeGrant(p.binding));
+      result[i] = synthesizeGrant(p.binding);
     } else if (p.kind === "consume") {
-      result.push(opts.store.consume(p.id, p.binding));
+      result[i] = consumed[consumedIdx++]!;
     } else if (p.kind === "session") {
-      result.push(opts.store.mintFromSession(opts.sessionId!, p.binding, opts.sessionStore!));
+      result[i] = opts.store.mintFromSession(opts.sessionId!, p.binding, opts.sessionStore!);
     } else if (p.kind === "waited") {
-      result.push(p.grant);
+      result[i] = (p as Extract<Plan, { kind: "waited" }>).grant;
     } else {
       // Should be unreachable: "mint" plans only exist in --no-wait flow which already threw.
       throw new ShuttleError("unexpected_error", `unreachable plan kind: ${(p as Plan).kind}`);
