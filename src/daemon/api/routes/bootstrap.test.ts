@@ -1121,3 +1121,248 @@ secrets:
     assert.deepEqual(planSummary[0]!.destinations, ["vercel:production"]);
   });
 });
+
+// ── R12: environment alias canonicalization before approval gate (P0 security fix) ─
+// The gate previously compared the raw request value to the literal "production".
+// Aliases like "prod", "PROD", "Production", " production " canonicalize to
+// "production" via canonicalEnvironment() for ref construction, but the raw compare
+// returned false → dev-synth path → auto-approved with no human click while the
+// ss:// ref was stored as ss://local/prod/... (production).
+
+test("POST /v1/bootstrap/plan: environment='prod' alias + non-prod destinations MUST require approval (alias canonicalization)", async () => {
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  ALIAS_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    // environment:"prod" canonicalizes to "production" → must require approval.
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "prod",
+    });
+
+    assert.equal(
+      r.status,
+      400,
+      `P0 ALIAS BUG: expected 400 approval_required for environment="prod", got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(
+      error.code,
+      "approval_required",
+      `expected approval_required, got: ${error.code}`,
+    );
+
+    const details = r.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string } | undefined;
+    assert.ok(details !== undefined, `expected details in response: ${JSON.stringify(r.body)}`);
+    assert.ok(
+      typeof details!.batch_id === "string" && details!.batch_id.startsWith("bootstrap-"),
+      `expected batch_id starting with "bootstrap-" in details`,
+    );
+
+    const state = await ctx.services.bootstrapStore.get(details!.batch_id);
+    assert.ok(state !== null, "batch state must be persisted");
+    assert.equal(
+      state!.status,
+      "pending",
+      `batch must remain "pending" after /plan with prod alias: executor must not have run`,
+    );
+  });
+});
+
+test("POST /v1/bootstrap/plan: environment='PROD' uppercase + non-prod destinations MUST require approval", async () => {
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  UPPERCASE_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "PROD",
+    });
+
+    assert.equal(
+      r.status,
+      400,
+      `P0 ALIAS BUG: expected 400 approval_required for environment="PROD", got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(error.code, "approval_required", `expected approval_required, got: ${error.code}`);
+
+    const details = r.body.details as { batch_id: string } | undefined;
+    assert.ok(details !== undefined && typeof details.batch_id === "string", "expected batch_id in details");
+    const state = await ctx.services.bootstrapStore.get(details!.batch_id);
+    assert.ok(state !== null, "batch state must be persisted");
+    assert.equal(state!.status, "pending", `batch must remain "pending", got: ${state!.status}`);
+  });
+});
+
+test("POST /v1/bootstrap/plan: environment='Production' mixed-case + non-prod destinations MUST require approval", async () => {
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  MIXEDCASE_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "Production",
+    });
+
+    assert.equal(
+      r.status,
+      400,
+      `P0 ALIAS BUG: expected 400 approval_required for environment="Production", got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(error.code, "approval_required", `expected approval_required, got: ${error.code}`);
+
+    const details = r.body.details as { batch_id: string } | undefined;
+    assert.ok(details !== undefined && typeof details.batch_id === "string", "expected batch_id in details");
+    const state = await ctx.services.bootstrapStore.get(details!.batch_id);
+    assert.ok(state !== null, "batch state must be persisted");
+    assert.equal(state!.status, "pending", `batch must remain "pending", got: ${state!.status}`);
+  });
+});
+
+test("POST /v1/bootstrap/plan: environment=' production ' with whitespace + non-prod destinations MUST require approval", async () => {
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  WHITESPACE_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    // canonicalEnvironment trims and lowercases → "production".
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: " production ",
+    });
+
+    assert.equal(
+      r.status,
+      400,
+      `P0 ALIAS BUG: expected 400 approval_required for environment=" production " (whitespace), got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(error.code, "approval_required", `expected approval_required, got: ${error.code}`);
+
+    const details = r.body.details as { batch_id: string } | undefined;
+    assert.ok(details !== undefined && typeof details.batch_id === "string", "expected batch_id in details");
+    const state = await ctx.services.bootstrapStore.get(details!.batch_id);
+    assert.ok(state !== null, "batch state must be persisted");
+    assert.equal(state!.status, "pending", `batch must remain "pending", got: ${state!.status}`);
+  });
+});
+
+test("POST /v1/bootstrap/plan: environment='dev' alias + non-prod destinations still synth-executes (no approval)", async () => {
+  // Regression guard: dev aliases stay on the synth path.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  DEV_ALIAS_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "dev",
+    });
+
+    // Must succeed (200) — "dev" → "development" → non-production → synth path.
+    assert.equal(r.status, 200, `expected 200 inline-execute for environment="dev", got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as { ok: boolean; batch_id?: string; completed: number; failed: number };
+    assert.equal(body.ok, true);
+    assert.ok(
+      typeof body.batch_id === "string" && body.batch_id.startsWith("bootstrap-"),
+      `expected batch_id in response, got: ${JSON.stringify(body.batch_id)}`,
+    );
+    assert.ok(
+      body.completed + body.failed >= 1,
+      `expected executor to have run (completed+failed >= 1), got completed=${body.completed} failed=${body.failed}`,
+    );
+  });
+});
+
+test("POST /v1/bootstrap/plan: environment='development' literal + non-prod destinations still synth-executes", async () => {
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  DEV_LITERAL_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    assert.equal(r.status, 200, `expected 200 inline-execute for environment="development", got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as { ok: boolean; batch_id?: string; completed: number; failed: number };
+    assert.equal(body.ok, true);
+    assert.ok(
+      typeof body.batch_id === "string" && body.batch_id.startsWith("bootstrap-"),
+      `expected batch_id in response, got: ${JSON.stringify(body.batch_id)}`,
+    );
+    assert.ok(
+      body.completed + body.failed >= 1,
+      `expected executor to have run, got completed=${body.completed} failed=${body.failed}`,
+    );
+  });
+});
+
+test("POST /v1/bootstrap/plan: environment='staging' (non-canonical) + non-prod destinations still synth-executes (treated as non-production)", async () => {
+  // canonicalEnvironment returns "staging" unchanged → not "production" → no gate from env side.
+  // Documents that custom envs are treated as non-production for the env-side gate.
+  // (Destinations still apply if any are prod-class, but this test uses non-prod dests.)
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  STAGING_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "staging",
+    });
+
+    assert.equal(r.status, 200, `expected 200 inline-execute for environment="staging", got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as { ok: boolean; batch_id?: string; completed: number; failed: number };
+    assert.equal(body.ok, true);
+    assert.ok(
+      typeof body.batch_id === "string" && body.batch_id.startsWith("bootstrap-"),
+      `expected batch_id in response, got: ${JSON.stringify(body.batch_id)}`,
+    );
+    assert.ok(
+      body.completed + body.failed >= 1,
+      `expected executor to have run, got completed=${body.completed} failed=${body.failed}`,
+    );
+  });
+});

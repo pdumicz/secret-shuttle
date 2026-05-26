@@ -17,6 +17,7 @@ import { generateSecretCore } from "./secrets.js";
 import { revealCaptureCore } from "./reveal-capture.js";
 import { runTemplateCore } from "./templates.js";
 import { planHasProductionDestination } from "../../bootstrap/destination-policy.js";
+import { canonicalEnvironment } from "../../../shared/refs.js";
 
 export function registerBootstrapRoutes(
   server: DaemonServer,
@@ -75,7 +76,7 @@ export function registerBootstrapRoutes(
     // template approval. The user would see no human-clicked approval for a write
     // to vercel.com/<team>/production.
     const requiresProductionGate =
-      environment === "production" || planHasProductionDestination(plan);
+      canonicalEnvironment(environment) === "production" || planHasProductionDestination(plan);
     const bindingEnvironment = requiresProductionGate ? "production" : "development";
 
     const binding: ApprovalBinding = {
