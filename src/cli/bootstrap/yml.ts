@@ -83,14 +83,21 @@ function parseSource(secretName: string, raw: unknown): BootstrapSource {
     // pass the .startsWith("ss://") check, flow through to plan construction,
     // trigger planHasProductionSource's fail-closed branch (which mints an
     // approval), and only fail at executor time with no actionable recovery.
+    // Store the CANONICAL ref so downstream code (planHasProductionSource,
+    // executor.runSourceStep → vault.getSecret) operates on the same key shape
+    // the vault uses. Without canonicalization, a user typing
+    // "ss://local/production/X" (long-form env) or "ss://LOCAL/prod/X"
+    // (uppercase host) would pass yml validation, pass the approval gate, then
+    // fail at /continue with secret_not_found because vault lookups are exact-match.
+    let parsed;
     try {
-      parseSecretRef(s.ref);
+      parsed = parseSecretRef(s.ref);
     } catch (e) {
       fail(
         `secrets.${secretName}.source.ref ${JSON.stringify(s.ref)} is not a valid ss:// ref: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
-    return { kind: "existing", ref: s.ref };
+    return { kind: "existing", ref: parsed.ref };
   }
   fail(
     `secrets.${secretName}.source.kind: unknown "${String(kind)}" (allowed: capture, random_32_bytes, random_64_bytes, existing)`,

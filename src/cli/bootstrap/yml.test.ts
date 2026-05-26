@@ -202,3 +202,98 @@ secrets:
   assert.strictEqual(result.secrets[0]!.source.kind, "existing");
   assert.strictEqual((result.secrets[0]!.source as { ref: string }).ref, "ss://local/prod/EXISTING_PROD");
 });
+
+test("parseBootstrapYml: existing source — long-form environment 'production' canonicalizes to 'prod' in ref", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://local/production/EXISTING_PROD"
+    destinations:
+      - "vercel:development"
+`;
+  const result = parseBootstrapYml(yml);
+  assert.strictEqual(result.secrets[0]!.name, "FOO");
+  const source = result.secrets[0]!.source;
+  assert.strictEqual(source.kind, "existing");
+  assert.strictEqual(
+    (source as { ref: string }).ref,
+    "ss://local/prod/EXISTING_PROD",
+    "long-form 'production' must canonicalize to 'prod' in the ss:// ref",
+  );
+});
+
+test("parseBootstrapYml: existing source — short-form environment 'prod' stays 'prod' (regression guard)", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://local/prod/EXISTING_PROD"
+    destinations:
+      - "vercel:development"
+`;
+  const result = parseBootstrapYml(yml);
+  assert.strictEqual(
+    (result.secrets[0]!.source as { ref: string }).ref,
+    "ss://local/prod/EXISTING_PROD",
+  );
+});
+
+test("parseBootstrapYml: existing source — long-form 'development' canonicalizes to 'dev'", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://local/development/EXISTING_DEV"
+    destinations:
+      - "vercel:development"
+`;
+  const result = parseBootstrapYml(yml);
+  assert.strictEqual(
+    (result.secrets[0]!.source as { ref: string }).ref,
+    "ss://local/dev/EXISTING_DEV",
+  );
+});
+
+test("parseBootstrapYml: existing source — uppercase source host lowercases", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://LOCAL/prod/EXISTING_PROD"
+    destinations:
+      - "vercel:development"
+`;
+  const result = parseBootstrapYml(yml);
+  assert.strictEqual(
+    (result.secrets[0]!.source as { ref: string }).ref,
+    "ss://local/prod/EXISTING_PROD",
+  );
+});
+
+test("parseBootstrapYml: existing source — custom env (e.g., 'staging') stays as-is", () => {
+  // canonicalEnvironment passes through unrecognized env names verbatim.
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://local/staging/X"
+    destinations:
+      - "vercel:development"
+`;
+  const result = parseBootstrapYml(yml);
+  assert.strictEqual(
+    (result.secrets[0]!.source as { ref: string }).ref,
+    "ss://local/staging/X",
+  );
+});
