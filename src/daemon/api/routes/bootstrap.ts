@@ -33,19 +33,9 @@ export function registerBootstrapRoutes(
     const force = optBool(o, "force") ?? false;
     const environment = optString(o, "environment") ?? "production";
 
-    // Parse yml — throws bootstrap_plan_invalid on schema errors.
+    // Parse yml — throws bootstrap_plan_invalid on schema errors and
+    // bootstrap_capture_url_invalid on capture-URL-specific failures.
     const parsed = parseBootstrapYml(planYml);
-
-    // Reject capture sources explicitly. Bootstrap v1 cannot drive
-    // reveal-capture (which requires a live browser handle marked by the user).
-    // Capture support is deferred to a future plan.
-    const captureSecrets = parsed.secrets.filter((s) => s.source.kind === "capture");
-    if (captureSecrets.length > 0) {
-      throw new ShuttleError(
-        "bootstrap_plan_invalid",
-        `bootstrap v1 does not support source.kind=capture. Affected secrets: ${captureSecrets.map((s) => s.name).join(", ")}. Use 'secret-shuttle reveal-capture' for these secrets manually, then reference them via source.kind=existing in secret-shuttle.yml.`,
-      );
-    }
 
     // Pre-fetch all non-deleted vault refs for a synchronous has() check.
     // Default list() excludes deleted secrets, matching upsertSecret's force check semantics.

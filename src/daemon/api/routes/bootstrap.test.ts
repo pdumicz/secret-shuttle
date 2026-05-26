@@ -63,7 +63,12 @@ async function unlockVault(ctx: { port: number; token: string }): Promise<void> 
 
 // ── tests ───────────────────────────────────────────────────────────────────
 
-test("POST /v1/bootstrap/plan: rejects capture source with clear error", async () => {
+test("POST /v1/bootstrap/plan: capture source with non-https URL → bootstrap_capture_url_invalid", async () => {
+  // C1: capture is now a first-class source kind (no longer rejected at /plan).
+  // Invalid capture URLs surface bootstrap_capture_url_invalid during yml parse,
+  // which the daemon router maps to a 400 with that code. C9 will add the
+  // capture-always-requires-approval gate at /plan; for now, well-formed
+  // https URLs flow through to the normal approval pipeline.
   await withDaemon(async (ctx) => {
     await unlockVault(ctx);
 
@@ -71,20 +76,20 @@ test("POST /v1/bootstrap/plan: rejects capture source with clear error", async (
 version: 1
 secrets:
   STRIPE_KEY:
-    source: { kind: capture, url: "https://stripe.com/dashboard" }
+    source: { kind: capture, url: "http://stripe.com/dashboard" }
     destinations: ["vercel:production:STRIPE_KEY"]
 `;
     const r = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml });
     assert.equal(r.status, 400, `expected 400, got ${r.status} body=${JSON.stringify(r.body)}`);
     const error = (r.body as { error: { code: string; message: string } }).error;
-    assert.equal(error.code, "bootstrap_plan_invalid");
-    assert.ok(
-      error.message.includes("does not support"),
-      `expected "does not support" in message, got: ${error.message}`,
-    );
+    assert.equal(error.code, "bootstrap_capture_url_invalid");
     assert.ok(
       error.message.includes("STRIPE_KEY"),
       `expected secret name in message, got: ${error.message}`,
+    );
+    assert.ok(
+      error.message.includes("https"),
+      `expected "https" in message, got: ${error.message}`,
     );
   });
 });

@@ -110,6 +110,12 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     hint: () => "Edit secret-shuttle.yml to fix the schema error, then re-run.",
     nextAction: () => "secret-shuttle bootstrap",
   },
+  bootstrap_capture_url_invalid: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () =>
+      "source.url for kind=capture must be https, must not embed credentials, must not be an IP literal or localhost. Edit secret-shuttle.yml and re-run.",
+    nextAction: () => "secret-shuttle bootstrap",
+  },
   bootstrap_destination_unknown: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => "Edit secret-shuttle.yml: replace the unknown destination shorthand with one of: vercel:<env>, github-actions:owner/repo, cloudflare:<env>, supabase:<projectref>.",

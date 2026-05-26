@@ -1,9 +1,10 @@
+import { isIP } from "node:net";
 import { parse as parseYaml } from "yaml";
 import { ShuttleError } from "../../shared/errors.js";
 import { parseSecretRef } from "../../shared/refs.js";
 
 export type BootstrapSource =
-  | { kind: "capture"; url: string }
+  | { kind: "capture"; url: string; expected_host: string }
   | { kind: "random_32_bytes" }
   | { kind: "random_64_bytes" }
   | { kind: "existing"; ref: string };
@@ -69,7 +70,50 @@ function parseSource(secretName: string, raw: unknown): BootstrapSource {
     if (typeof s.url !== "string" || s.url.length === 0) {
       fail(`secrets.${secretName}.source: kind=capture requires url`);
     }
-    return { kind: "capture", url: s.url };
+    // Strict URL validation. These checks use bootstrap_capture_url_invalid
+    // (not the generic bootstrap_plan_invalid) so the CLI can surface a
+    // targeted hint ("fix the capture URL in your bootstrap yml") without
+    // re-classifying the basic-shape failure above.
+    let u: URL;
+    try {
+      u = new URL(s.url);
+    } catch {
+      throw new ShuttleError(
+        "bootstrap_capture_url_invalid",
+        `secrets.${secretName}.source.url is not a valid URL: ${JSON.stringify(s.url)}`,
+      );
+    }
+    if (u.protocol !== "https:") {
+      throw new ShuttleError(
+        "bootstrap_capture_url_invalid",
+        `secrets.${secretName}.source.url must be https`,
+      );
+    }
+    if (u.username !== "" || u.password !== "") {
+      throw new ShuttleError(
+        "bootstrap_capture_url_invalid",
+        `secrets.${secretName}.source.url must not embed credentials`,
+      );
+    }
+    // Canonicalize the host: lowercase + strip trailing dot. For IPv6 the
+    // URL parser keeps the square brackets in hostname; strip them only for
+    // the isIP check (the bracketed form isn't a valid IP literal).
+    const hostRaw = u.hostname.toLowerCase();
+    const host = hostRaw.endsWith(".") ? hostRaw.slice(0, -1) : hostRaw;
+    const hostForIp = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+    if (isIP(hostForIp) !== 0) {
+      throw new ShuttleError(
+        "bootstrap_capture_url_invalid",
+        `secrets.${secretName}.source.url must not target an IP literal`,
+      );
+    }
+    if (host === "localhost" || host.endsWith(".localhost")) {
+      throw new ShuttleError(
+        "bootstrap_capture_url_invalid",
+        `secrets.${secretName}.source.url must not target localhost`,
+      );
+    }
+    return { kind: "capture", url: s.url, expected_host: host };
   }
   if (kind === "random_32_bytes") return { kind: "random_32_bytes" };
   if (kind === "random_64_bytes") return { kind: "random_64_bytes" };

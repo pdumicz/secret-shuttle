@@ -26,6 +26,7 @@ secrets:
   assert.strictEqual(first.source.kind, "capture");
   if (first.source.kind === "capture") {
     assert.strictEqual(first.source.url, "https://stripe.com");
+    assert.strictEqual(first.source.expected_host, "stripe.com");
   }
 });
 
@@ -296,4 +297,133 @@ secrets:
     (result.secrets[0]!.source as { ref: string }).ref,
     "ss://local/staging/X",
   );
+});
+
+// ── C1: strict capture URL validation ───────────────────────────────────────
+
+test("parseBootstrapYml: capture source — http URL → bootstrap_capture_url_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source: { kind: capture, url: "http://stripe.com/webhooks" }
+    destinations: [vercel:production]
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) =>
+      e instanceof ShuttleError &&
+      e.code === "bootstrap_capture_url_invalid" &&
+      /https/.test(e.message),
+  );
+});
+
+test("parseBootstrapYml: capture source — embedded credentials → bootstrap_capture_url_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source: { kind: capture, url: "https://user:pass@stripe.com/webhooks" }
+    destinations: [vercel:production]
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) =>
+      e instanceof ShuttleError &&
+      e.code === "bootstrap_capture_url_invalid" &&
+      /credentials/.test(e.message),
+  );
+});
+
+test("parseBootstrapYml: capture source — localhost variants all rejected", () => {
+  // Every localhost-flavored host must surface bootstrap_capture_url_invalid.
+  // Note: `127.0.0.1` is an IP literal, so it fails the isIP check first
+  // (different error message text), but the code is the same.
+  const variants: Array<{ url: string; expectedSubstring: RegExp }> = [
+    { url: "https://localhost/x", expectedSubstring: /localhost/ },
+    { url: "https://localhost./x", expectedSubstring: /localhost/ },
+    { url: "https://foo.localhost/x", expectedSubstring: /localhost/ },
+    { url: "https://127.0.0.1/x", expectedSubstring: /IP literal/ },
+  ];
+  for (const { url, expectedSubstring } of variants) {
+    const yml = `
+version: 1
+secrets:
+  FOO:
+    source: { kind: capture, url: "${url}" }
+    destinations: [vercel:production]
+`;
+    assert.throws(
+      () => parseBootstrapYml(yml),
+      (e: unknown) =>
+        e instanceof ShuttleError &&
+        e.code === "bootstrap_capture_url_invalid" &&
+        expectedSubstring.test(e.message),
+      `expected ${url} to be rejected with bootstrap_capture_url_invalid matching ${expectedSubstring}`,
+    );
+  }
+});
+
+test("parseBootstrapYml: capture source — IP literals (v4 and v6) all rejected", () => {
+  const variants = [
+    "https://192.168.1.1/x",
+    "https://[::1]/x",
+    "https://[2001:db8::1]/x",
+  ];
+  for (const url of variants) {
+    const yml = `
+version: 1
+secrets:
+  FOO:
+    source: { kind: capture, url: "${url}" }
+    destinations: [vercel:production]
+`;
+    assert.throws(
+      () => parseBootstrapYml(yml),
+      (e: unknown) =>
+        e instanceof ShuttleError &&
+        e.code === "bootstrap_capture_url_invalid" &&
+        /IP literal/.test(e.message),
+      `expected ${url} to be rejected as an IP literal`,
+    );
+  }
+});
+
+test("parseBootstrapYml: capture source — expected_host is lowercased + trailing-dot stripped", () => {
+  const yml = `
+version: 1
+secrets:
+  STRIPE_KEY:
+    source: { kind: capture, url: "https://Dashboard.Stripe.com./" }
+    destinations: [vercel:production]
+`;
+  const plan = parseBootstrapYml(yml);
+  const source = plan.secrets[0]!.source;
+  assert.strictEqual(source.kind, "capture");
+  if (source.kind === "capture") {
+    assert.strictEqual(source.expected_host, "dashboard.stripe.com");
+    // url field stays VERBATIM — only expected_host is canonicalized.
+    assert.strictEqual(source.url, "https://Dashboard.Stripe.com./");
+  }
+});
+
+test("parseBootstrapYml: capture source — well-formed https URL accepted with expected_host set", () => {
+  const yml = `
+version: 1
+secrets:
+  STRIPE_KEY:
+    source: { kind: capture, url: "https://dashboard.stripe.com/webhooks/we_abc/signing_secret" }
+    destinations: [vercel:production]
+`;
+  const plan = parseBootstrapYml(yml);
+  assert.strictEqual(plan.secrets.length, 1);
+  const source = plan.secrets[0]!.source;
+  assert.strictEqual(source.kind, "capture");
+  if (source.kind === "capture") {
+    assert.strictEqual(
+      source.url,
+      "https://dashboard.stripe.com/webhooks/we_abc/signing_secret",
+    );
+    assert.strictEqual(source.expected_host, "dashboard.stripe.com");
+  }
 });
