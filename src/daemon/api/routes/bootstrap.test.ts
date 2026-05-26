@@ -702,6 +702,208 @@ test("POST /v1/bootstrap/continue: cached failed_partial response surfaces per-d
   });
 });
 
+// ── R10: destination-policy gate (P0 security fix) ─────────────────────────
+// The binding environment MUST reflect the resolved destinations' production-class,
+// not just the --environment flag. Without this fix, a yml with
+// environment:"development" + destinations:[vercel:production] would auto-approve
+// (dev-env synth) and push to production with zero human clicks.
+
+test("POST /v1/bootstrap/plan: dev environment + vercel:production destination MUST require approval (P0 security gate)", async () => {
+  // Without the fix: returns 200 success with zero approvals consumed.
+  // With the fix: returns 400 approval_required because vercel:production → production-class.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  API_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:production"]
+`;
+    // Note: environment is explicitly "development" (the vulnerable path).
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    // Must fail with approval_required — NOT succeed silently.
+    assert.equal(
+      r.status,
+      400,
+      `P0 SECURITY GATE FAILED: expected 400 approval_required, got ${r.status} body=${JSON.stringify(r.body)}. This means secrets are being pushed to vercel:production without any human approval.`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(
+      error.code,
+      "approval_required",
+      `expected approval_required, got: ${error.code}`,
+    );
+
+    // batch_id must be in details so the user can /continue after approving.
+    const details = r.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string } | undefined;
+    assert.ok(details !== undefined, `expected details in response: ${JSON.stringify(r.body)}`);
+    assert.ok(
+      typeof details!.batch_id === "string" && details!.batch_id.startsWith("bootstrap-"),
+      `expected batch_id starting with "bootstrap-" in details`,
+    );
+
+    // The batch must remain "pending" — executor must NOT have run.
+    const state = await ctx.services.bootstrapStore.get(details!.batch_id);
+    assert.ok(state !== null, "batch state must be persisted");
+    assert.equal(
+      state!.status,
+      "pending",
+      `batch must remain "pending" after /plan: executor must not push to production`,
+    );
+  });
+});
+
+test("POST /v1/bootstrap/plan: dev environment + vercel:development destination still executes inline (no approval)", async () => {
+  // R8 regression guard: vercel:development is non-prod → synth path still works.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  DEV_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    // Must succeed without approval_required.
+    assert.equal(r.status, 200, `expected 200 inline-execute, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as { ok: boolean; batch_id?: string; completed: number; failed: number };
+    assert.equal(body.ok, true);
+    assert.ok(
+      typeof body.batch_id === "string" && body.batch_id.startsWith("bootstrap-"),
+      `expected batch_id in response, got: ${JSON.stringify(body.batch_id)}`,
+    );
+    // Executor ran: completed+failed >= 1 (at least generated the secret).
+    assert.ok(
+      body.completed + body.failed >= 1,
+      `expected executor to have run (completed+failed >= 1), got completed=${body.completed} failed=${body.failed}`,
+    );
+  });
+});
+
+test("POST /v1/bootstrap/plan: dev environment + github-actions destination requires approval (fail-closed)", async () => {
+  // github-actions is always production-class, regardless of --environment.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  GH_SECRET:
+    source: { kind: random_32_bytes }
+    destinations: ["github-actions:owner/repo"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    assert.equal(
+      r.status,
+      400,
+      `expected 400 approval_required for github-actions (fail-closed), got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(error.code, "approval_required", `expected approval_required, got: ${error.code}`);
+  });
+});
+
+test("POST /v1/bootstrap/plan: dev environment + supabase destination requires approval (fail-closed)", async () => {
+  // supabase is always production-class, regardless of --environment.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  SUPA_SECRET:
+    source: { kind: random_32_bytes }
+    destinations: ["supabase:myprojectref"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    assert.equal(
+      r.status,
+      400,
+      `expected 400 approval_required for supabase (fail-closed), got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(error.code, "approval_required", `expected approval_required, got: ${error.code}`);
+  });
+});
+
+test("POST /v1/bootstrap/plan: dev environment + cloudflare:production destination requires approval", async () => {
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  CF_SECRET:
+    source: { kind: random_32_bytes }
+    destinations: ["cloudflare:production"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    assert.equal(
+      r.status,
+      400,
+      `expected 400 approval_required for cloudflare:production, got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(error.code, "approval_required", `expected approval_required, got: ${error.code}`);
+  });
+});
+
+test("POST /v1/bootstrap/plan: dev environment + cloudflare:dev destination still executes inline", async () => {
+  // cloudflare:dev → env param "dev" → destinationEnvironment returns "dev" ≠ "production" → dev-class.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  CF_DEV:
+    source: { kind: random_32_bytes }
+    destinations: ["cloudflare:dev"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    // Must succeed without approval_required.
+    assert.equal(r.status, 200, `expected 200 inline-execute for cloudflare:dev, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as { ok: boolean; batch_id?: string; completed: number; failed: number };
+    assert.equal(body.ok, true);
+    assert.ok(
+      typeof body.batch_id === "string" && body.batch_id.startsWith("bootstrap-"),
+      `expected batch_id in response, got: ${JSON.stringify(body.batch_id)}`,
+    );
+    assert.ok(
+      body.completed + body.failed >= 1,
+      `expected executor to have run (completed+failed >= 1), got completed=${body.completed} failed=${body.failed}`,
+    );
+  });
+});
+
 test("POST /v1/bootstrap/plan: plan_summary includes ss:// ref for source: existing", async () => {
   await withDaemon(async (ctx) => {
     await unlockVault(ctx);

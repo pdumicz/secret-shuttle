@@ -16,6 +16,7 @@ import type { BatchState, PlanEntry } from "../../bootstrap/store.js";
 import { generateSecretCore } from "./secrets.js";
 import { revealCaptureCore } from "./reveal-capture.js";
 import { runTemplateCore } from "./templates.js";
+import { planHasProductionDestination } from "../../bootstrap/destination-policy.js";
 
 export function registerBootstrapRoutes(
   server: DaemonServer,
@@ -65,10 +66,22 @@ export function registerBootstrapRoutes(
     // /ui can look it up if it needs to render context while the user is deciding.
     const batchId = `bootstrap-${randomUUID()}`;
     const planSummary = buildPlanSummary(plan);
+
+    // Bootstrap binding gate: production-class if EITHER --environment is "production"
+    // OR any resolved destination is production-class. The destinations check is the
+    // security boundary — without it, a yml with environment:"development" +
+    // destinations:[vercel:production] would auto-approve (dev-env synth) and the
+    // executor would push to production via bootstrapAuthority, bypassing the inner
+    // template approval. The user would see no human-clicked approval for a write
+    // to vercel.com/<team>/production.
+    const requiresProductionGate =
+      environment === "production" || planHasProductionDestination(plan);
+    const bindingEnvironment = requiresProductionGate ? "production" : "development";
+
     const binding: ApprovalBinding = {
       action: "bootstrap",
       ref: null,
-      environment: environment === "production" ? "production" : "development",
+      environment: bindingEnvironment,
       destination_domain: null,
       target_id: null,
       field_fingerprint: null,
