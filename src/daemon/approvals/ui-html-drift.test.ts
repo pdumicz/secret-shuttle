@@ -94,3 +94,22 @@ test("ui.html: error_code=approval_not_found branch — comparison, cancellation
     "ui.html must call notifyHubIfFramed() within the approval_not_found branch to drain the hub broker",
   );
 });
+
+test("ui.html: renders bootstrap action with plan_summary parse", async () => {
+  const html = await loadHtml();
+  // Must handle action === 'bootstrap' by name
+  assert.match(html, /["']bootstrap["']/, "ui.html must handle action === 'bootstrap'");
+  // Must reference renderBootstrap function
+  assert.match(html, /function renderBootstrap\b/, "ui.html must define a renderBootstrap function");
+  // Must parse template_params.plan_summary
+  assert.match(html, /plan_summary/, "ui.html must reference template_params.plan_summary");
+  // Must call esc() on plan content (existing escaper is named esc, not escapeHtml)
+  assert.match(html, /esc\s*\(\s*s\.name\s*\)/, "ui.html must escape bootstrap secret names via esc()");
+  assert.match(html, /esc\s*\(\s*s\.source\s*\)/, "ui.html must escape bootstrap secret sources via esc()");
+  // Must branch on bootstrap action to call renderBootstrap
+  assert.match(
+    html,
+    /g\.action\s*===\s*["']bootstrap["'][^}]*renderBootstrap\s*\(\s*g\s*\)/s,
+    "ui.html must call renderBootstrap(g) when action === 'bootstrap'",
+  );
+});

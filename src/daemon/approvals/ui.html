@@ -21,6 +21,29 @@
     <div class="status" id="status"></div>
     <script type="module">
       const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+      function renderBootstrap(g) {
+        let summary;
+        try {
+          summary = JSON.parse(g.template_params?.plan_summary ?? "null");
+        } catch {
+          return `<div class="row" style="color:#c33"><b>Invalid plan_summary</b></div>`;
+        }
+        if (!Array.isArray(summary)) {
+          return `<div class="row" style="color:#c33"><b>plan_summary is not an array</b></div>`;
+        }
+        const rows = summary.map((s) => `
+          <li style="margin-bottom:.5rem">
+            <strong>${esc(s.name)}</strong>
+            <div style="color:#555;font-size:.9rem">source: ${esc(s.source)}</div>
+            <div style="color:#555;font-size:.9rem">&#8594; ${(s.destinations || []).map(esc).join(", ") || "(none)"}</div>
+          </li>
+        `).join("");
+        const n = summary.length;
+        return `
+          <h2 style="margin-top:0">Bootstrap (${n} secret${n === 1 ? "" : "s"})</h2>
+          <ul class="bootstrap-secrets" style="list-style:none;padding:0;margin:0">${rows}</ul>
+        `;
+      }
       const params = new URLSearchParams(location.search);
       const id = params.get("id");
       const token = params.get("token");
@@ -96,11 +119,18 @@
           run: `Resolve secret refs and inject them as env vars for the spawned command (refs visible in this approval; values stay in the daemon; child stdout/stderr are masked before relay).`,
           run_stdin: `Resolve secret ${esc(g.ref ?? "")} and pipe its value to the child's stdin (fd 0). The daemon writes the bytes directly; the CLI process never sees the plaintext. Child stdout/stderr are masked before relay. Use for tools that read secrets from stdin: gh auth login --with-token, docker login --password-stdin, kubectl create secret ... --from-file=-.`,
           inject_render: `Resolve secret refs and write the rendered template file (refs visible in this approval; values are written to disk at mode 0600 inside $HOME).`,
-        }[g.action] || `${esc(g.action)}`;
+          bootstrap: null,
+        }[g.action];
         const scope = Array.isArray(g.allowed_domains) && g.allowed_domains.length
           ? g.allowed_domains.map(esc).join(", ") : "(none yet — not injectable)";
+        if (g.action === "bootstrap") {
+          document.getElementById("grant").innerHTML = `
+            ${renderBootstrap(g)}
+            <div class="row"><span class="label">Environment</span><b>${esc(g.environment)}</b></div>
+          `;
+        } else {
         document.getElementById("grant").innerHTML = `
-          <p style="font-size:1.1rem"><b>${human}</b></p>
+          <p style="font-size:1.1rem"><b>${human ?? esc(g.action)}</b></p>
           <div class="row"><span class="label">Environment</span><b>${esc(g.environment)}</b></div>
           ${g.page_title ? `<div class="row"><span class="label">Page</span><b>${esc(g.page_title)}</b></div>` : ""}
           ${g.page_url_host ? `<div class="row"><span class="label">URL host</span><code>${esc(g.page_url_host)}</code></div>` : ""}
@@ -125,6 +155,7 @@
           ${g.action === "blind_end" ? `<div class="row" style="color:#c33"><b>Approving navigates open pages to about:blank and resumes observation. Approve only if the secret has been saved/submitted and is no longer visible.</b></div>` : ""}
           ${(g.action === "inject_submit" || g.action === "reveal_capture") ? `<div class="row" style="color:#c33"><b>Approving authorizes the daemon to auto-resume observation only if the secret is verified gone (success/capture and absence checks pass). If they do not, blind mode stays on.</b></div>` : ""}
         `;
+        }
         document.getElementById("status").textContent = `Status: ${g.status}`;
       }
       async function send(action) {
