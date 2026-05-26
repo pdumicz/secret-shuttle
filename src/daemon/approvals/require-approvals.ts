@@ -57,6 +57,13 @@ export async function requireApprovals(
 ): Promise<ApprovalGrant[]> {
   if (opts.bindings.length === 0) return [];
 
+  // Capture caller identity ONCE for the whole call. Used at every stage
+  // to verify owner_agent_id on grants and sessions. Root bypasses every
+  // ownership check (admin). The synth-grant path uses getCurrentAgentId()
+  // separately for stamping its owner.
+  const callerAgentId = getCurrentAgentId();
+  const isRoot = callerAgentId === "root";
+
   // Pre-scan: would every binding be planned as synth? (dev/non-force).
   // The old singular requireApproval returned synthesizeGrant for dev-env
   // without ever looking at approvalIdFromClient. Preserve that
@@ -73,10 +80,28 @@ export async function requireApprovals(
     return opts.bindings.map((b) => synthesizeGrant(b));
   }
 
+  // Session ownership precheck — once per call, BEFORE per-binding session
+  // peek loop. Non-root caller supplying a session_id owned by a different
+  // agent must see session_not_found (NOT fall through to mint, which would
+  // emit approval_required and leak existence of the session). Sessions
+  // that don't exist hit the same code via canMatchSession's own
+  // session_not_found path; we converge to a single error code.
+  if (opts.sessionId !== undefined && opts.sessionStore !== undefined && !isRoot) {
+    const sess = opts.sessionStore.get(opts.sessionId);
+    if (sess !== undefined && sess.owner_agent_id !== callerAgentId) {
+      throw new ShuttleError("session_not_found", `Unknown session id: ${opts.sessionId}`);
+    }
+  }
+
   // Phase 1 Step 0: resolve every supplied ID. Unknown IDs are approval_not_found.
+  // Owner mismatch (non-root) returns the same code — existence-non-disclosure.
   const suppliedIds = [...(opts.approvalIdsFromClient ?? [])];
   for (const id of suppliedIds) {
-    if (opts.store.get(id) === undefined) {
+    const peek = opts.store.get(id);
+    if (peek === undefined) {
+      throw new ShuttleError("approval_not_found", `Unknown approval id: ${id}`);
+    }
+    if (!isRoot && peek.owner_agent_id !== callerAgentId) {
       throw new ShuttleError("approval_not_found", `Unknown approval id: ${id}`);
     }
   }
@@ -134,10 +159,15 @@ export async function requireApprovals(
     }
 
     // 3. Supplied-ID match
+    // Defense-in-depth: Step 0 already gated ownership on every supplied ID,
+    // but re-check here so a tainted leftover from a different agent (in
+    // case Step 0 was ever relaxed) silently skips matching instead of
+    // disclosing existence via approval_mismatch downstream.
     let matchedId: string | undefined;
     for (const id of unusedIds) {
       const peek = opts.store.get(id);
       if (peek === undefined) continue; // resolved in step 0
+      if (!isRoot && peek.owner_agent_id !== callerAgentId) continue; // skip cross-owner
       if (approvalBindingsMatch(peek, binding)) {
         matchedId = id;
         break;
@@ -287,7 +317,7 @@ export async function requireApprovals(
     }
 
     // Step 1: validate consumes.
-    opts.store.validateConsumeBatch(consumeItems);
+    opts.store.validateConsumeBatch(consumeItems, callerAgentId);
 
     // Step 2: re-peek sessions. canMatchSession is pure; it throws on
     // session_not_found/expired/unauthorized/max_uses_exceeded and returns
@@ -316,7 +346,7 @@ export async function requireApprovals(
     }
 
     // Step 4: commit consumes atomically.
-    const consumed = consumeItems.length > 0 ? opts.store.consumeBatch(consumeItems) : [];
+    const consumed = consumeItems.length > 0 ? opts.store.consumeBatch(consumeItems, callerAgentId) : [];
 
     // Build results in plan order.
     const result: ApprovalGrant[] = new Array(plans.length);

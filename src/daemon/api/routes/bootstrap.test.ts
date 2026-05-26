@@ -396,7 +396,7 @@ test("POST /v1/bootstrap/continue: retry after failed_partial does NOT require f
           allowed_domains: ["vercel.com"],
         },
       },
-    ]);
+    ], "daemon");
 
     // POST /continue with the same (now-used) approval_ids — this is the retry call.
     // This matches the exact user-reported bug: user retries with the same approval_ids

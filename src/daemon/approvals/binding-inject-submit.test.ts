@@ -24,7 +24,7 @@ test("a matching inject_submit binding round-trips through create→consume", ()
   const store = new ApprovalStore();
   const g = store.create(base());
   store.approve(g.id);
-  const used = store.consume(g.id, base());
+  const used = store.consume(g.id, base(), "daemon");
   assert.equal(used.status, "used");
 });
 
@@ -33,7 +33,7 @@ test("a different submit_fingerprint is an approval_mismatch", () => {
   const g = store.create(base());
   store.approve(g.id);
   assert.throws(
-    () => store.consume(g.id, { ...base(), submit_fingerprint: "sha256:OTHER" }),
+    () => store.consume(g.id, { ...base(), submit_fingerprint: "sha256:OTHER" }, "daemon"),
     (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
   );
 });
@@ -43,7 +43,7 @@ test("a different success_condition is an approval_mismatch", () => {
   const g = store.create(base());
   store.approve(g.id);
   assert.throws(
-    () => store.consume(g.id, { ...base(), success_condition: "Something Else" }),
+    () => store.consume(g.id, { ...base(), success_condition: "Something Else" }, "daemon"),
     (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
   );
 });
@@ -52,7 +52,7 @@ test("display-only handle labels are NOT part of matching", () => {
   const store = new ApprovalStore();
   const g = store.create(base());
   store.approve(g.id);
-  const used = store.consume(g.id, { ...base(), field_handle_label: "renamed", submit_handle_label: "renamed2" });
+  const used = store.consume(g.id, { ...base(), field_handle_label: "renamed", submit_handle_label: "renamed2" }, "daemon");
   assert.equal(used.status, "used");
 });
 
@@ -67,13 +67,13 @@ test("allowed_actions is part of matching (approved scope cannot be swapped); or
   const g = store.create(gen);
   store.approve(g.id);
   // reordered same set still matches (stable-set comparison)
-  const used = store.consume(g.id, { ...gen, allowed_actions: ["inject_submit", "inject_into_field"] });
+  const used = store.consume(g.id, { ...gen, allowed_actions: ["inject_submit", "inject_into_field"] }, "daemon");
   assert.equal(used.status, "used");
 
   const g2 = store.create(gen);
   store.approve(g2.id);
   assert.throws(
-    () => store.consume(g2.id, { ...gen, allowed_actions: ["inject_into_field"] }),
+    () => store.consume(g2.id, { ...gen, allowed_actions: ["inject_into_field"] }, "daemon"),
     (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
   );
 });
@@ -84,7 +84,7 @@ test("auto_resume:false does not match an approval that omits auto_resume (scope
   store.approve(g.id);
   const { auto_resume: _omit, ...noFlag } = base();
   assert.throws(
-    () => store.consume(g.id, noFlag),
+    () => store.consume(g.id, noFlag, "daemon"),
     (e: unknown) => e instanceof Error && (e as { code?: string }).code === "approval_mismatch",
   );
 });

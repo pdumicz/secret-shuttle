@@ -119,9 +119,16 @@ export class ApprovalStore {
     this.onEvent?.({ kind: "denied", grant: g });
   }
 
-  consume(id: string, binding: ApprovalBinding): ApprovalGrant {
+  consume(id: string, binding: ApprovalBinding, callerAgentId: string): ApprovalGrant {
     const g = this.grants.get(id);
     if (g === undefined) throw new ShuttleError("approval_not_found", "Unknown approval id.");
+    // Owner enforcement: root bypasses; otherwise caller must own the grant.
+    // Owner-mismatch returns the SAME code as truly-missing (existence
+    // non-disclosure — a tainted leftover from another agent must not
+    // reveal that the id exists via approval_mismatch).
+    if (callerAgentId !== "root" && g.owner_agent_id !== callerAgentId) {
+      throw new ShuttleError("approval_not_found", "Unknown approval id.");
+    }
     if (g.status === "used") throw new ShuttleError("approval_already_used", "Approval was already used.");
     if (g.status !== "granted") throw new ShuttleError("approval_not_granted", "Approval not granted.");
     if (this.now() > g.expires_at) {
@@ -193,7 +200,7 @@ export class ApprovalStore {
    * The timestamp is captured once at the start of validation. The mutation
    * pass cannot fail (every check already passed against that timestamp).
    */
-  consumeBatch(items: Array<{ id: string; binding: ApprovalBinding }>): ApprovalGrant[] {
+  consumeBatch(items: Array<{ id: string; binding: ApprovalBinding }>, callerAgentId: string): ApprovalGrant[] {
     if (items.length === 0) return [];
 
     // Detect duplicate IDs upfront.
@@ -212,6 +219,11 @@ export class ApprovalStore {
     for (const { id, binding } of items) {
       const g = this.grants.get(id);
       if (g === undefined) throw new ShuttleError("approval_not_found", "Unknown approval id.");
+      // Owner enforcement: same existence-non-disclosure semantics as
+      // consume() — owner-mismatch returns approval_not_found.
+      if (callerAgentId !== "root" && g.owner_agent_id !== callerAgentId) {
+        throw new ShuttleError("approval_not_found", "Unknown approval id.");
+      }
       if (g.status === "used") throw new ShuttleError("approval_already_used", "Approval was already used.");
       if (g.status !== "granted") throw new ShuttleError("approval_not_granted", "Approval not granted.");
       if (now > g.expires_at) throw new ShuttleError("approval_expired", "Approval expired.");
@@ -245,7 +257,7 @@ export class ApprovalStore {
    * consumeBatch will see the same this.now() (Node's single-threaded
    * event loop). The atomic-batch invariant is preserved.
    */
-  validateConsumeBatch(items: Array<{ id: string; binding: ApprovalBinding }>): void {
+  validateConsumeBatch(items: Array<{ id: string; binding: ApprovalBinding }>, callerAgentId: string): void {
     if (items.length === 0) return;
 
     const seen = new Set<string>();
@@ -260,6 +272,11 @@ export class ApprovalStore {
     for (const { id, binding } of items) {
       const g = this.grants.get(id);
       if (g === undefined) throw new ShuttleError("approval_not_found", "Unknown approval id.");
+      // Owner enforcement: same existence-non-disclosure semantics as
+      // consume() — owner-mismatch returns approval_not_found.
+      if (callerAgentId !== "root" && g.owner_agent_id !== callerAgentId) {
+        throw new ShuttleError("approval_not_found", "Unknown approval id.");
+      }
       if (g.status === "used") throw new ShuttleError("approval_already_used", "Approval was already used.");
       if (g.status !== "granted") throw new ShuttleError("approval_not_granted", "Approval not granted.");
       if (now > g.expires_at) throw new ShuttleError("approval_expired", "Approval expired.");

@@ -27,10 +27,10 @@ test("approve flips status; consume marks used", () => {
   const s = new ApprovalStore({ ttlMs: 1000 });
   const g = s.create(sample);
   s.approve(g.id);
-  const consumed = s.consume(g.id, sample);
+  const consumed = s.consume(g.id, sample, "daemon");
   assert.equal(consumed.status, "used");
   assert.throws(
-    () => s.consume(g.id, sample),
+    () => s.consume(g.id, sample, "daemon"),
     (err) => err instanceof ShuttleError && err.code === "approval_already_used",
   );
 });
@@ -42,7 +42,7 @@ test("expired grants cannot be consumed", () => {
   s.approve(g.id);
   now = 1_000_000;
   assert.throws(
-    () => s.consume(g.id, sample),
+    () => s.consume(g.id, sample, "daemon"),
     (err) => err instanceof ShuttleError && err.code === "approval_expired",
   );
 });
@@ -52,7 +52,7 @@ test("consume rejects mismatched bindings", () => {
   const g = s.create(sample);
   s.approve(g.id);
   assert.throws(
-    () => s.consume(g.id, { ...sample, destination_domain: "evil.com" }),
+    () => s.consume(g.id, { ...sample, destination_domain: "evil.com" }, "daemon"),
     (err) => err instanceof ShuttleError && err.code === "approval_mismatch",
   );
 });
@@ -89,7 +89,7 @@ test("template_params order-insensitive matching", () => {
     template_id: "vercel-env-add",
     template_params: { environment: "production", name: "FOO" },
   };
-  assert.doesNotThrow(() => s.consume(g.id, swapped));
+  assert.doesNotThrow(() => s.consume(g.id, swapped, "daemon"));
 });
 
 test("bindings mismatch when allowed_domains differ; order-insensitive when equal", () => {
@@ -98,19 +98,19 @@ test("bindings mismatch when allowed_domains differ; order-insensitive when equa
   const g = s.create(base);
   s.approve(g.id);
   assert.throws(
-    () => s.consume(g.id, { ...sample, allowed_domains: ["evil.com"] }),
+    () => s.consume(g.id, { ...sample, allowed_domains: ["evil.com"] }, "daemon"),
     (err) => err instanceof ShuttleError && err.code === "approval_mismatch",
   );
   const g2 = s.create({ ...sample, allowed_domains: ["a.com", "b.com"] });
   s.approve(g2.id);
-  assert.doesNotThrow(() => s.consume(g2.id, { ...sample, allowed_domains: ["b.com", "a.com"] }));
+  assert.doesNotThrow(() => s.consume(g2.id, { ...sample, allowed_domains: ["b.com", "a.com"] }, "daemon"));
 });
 
 test("absent, null, and empty allowed_domains are treated as the same (empty) set", () => {
   const s = new ApprovalStore({ ttlMs: 60_000 });
   const g = s.create({ ...sample, allowed_domains: null });
   s.approve(g.id);
-  assert.doesNotThrow(() => s.consume(g.id, { ...sample })); // sample has no allowed_domains
+  assert.doesNotThrow(() => s.consume(g.id, { ...sample }, "daemon")); // sample has no allowed_domains
 });
 
 test("display-only fields (page_title/page_url_host) do not affect binding match", () => {
@@ -118,7 +118,7 @@ test("display-only fields (page_title/page_url_host) do not affect binding match
   const g = s.create({ ...sample, page_title: "Stripe", page_url_host: "dashboard.stripe.com" });
   s.approve(g.id);
   assert.doesNotThrow(() =>
-    s.consume(g.id, { ...sample, page_title: "DIFFERENT", page_url_host: "other" }),
+    s.consume(g.id, { ...sample, page_title: "DIFFERENT", page_url_host: "other" }, "daemon"),
   );
 });
 
@@ -186,7 +186,7 @@ test("invalidate: used grant is a no-op", () => {
   const b = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
   const g = store.create(b);
   store.approve(g.id);
-  store.consume(g.id, b);
+  store.consume(g.id, b, "daemon");
   events.length = 0;
 
   store.invalidate(g.id);
@@ -437,7 +437,7 @@ test("fireMismatch: used/expired grant doesn't fire", () => {
   const binding = makeBindingFor("inject_submit", { destination_domain: "a.com", allowed_domains: ["a.com"] });
   const grant = store.create(binding);
   store.approve(grant.id);
-  store.consume(grant.id, binding); // grant.status = "used"
+  store.consume(grant.id, binding, "daemon"); // grant.status = "used"
   events.length = 0;
   store.fireMismatch(grant.id, binding);
   assert.strictEqual(events.length, 0, "no event for used grant");
@@ -449,7 +449,7 @@ test("fireMismatch: used/expired grant doesn't fire", () => {
 
 test("consumeBatch: empty items returns []", () => {
   const store = new ApprovalStore();
-  assert.deepStrictEqual(store.consumeBatch([]), []);
+  assert.deepStrictEqual(store.consumeBatch([], "daemon"), []);
 });
 
 test("consumeBatch: all granted in order → consumes all atomically", () => {
@@ -461,7 +461,7 @@ test("consumeBatch: all granted in order → consumes all atomically", () => {
   const g2 = store.create(b2);
   store.approve(g2.id);
 
-  const out = store.consumeBatch([{ id: g1.id, binding: b1 }, { id: g2.id, binding: b2 }]);
+  const out = store.consumeBatch([{ id: g1.id, binding: b1 }, { id: g2.id, binding: b2 }], "daemon");
   assert.strictEqual(out.length, 2);
   assert.strictEqual(out[0]!.id, g1.id);
   assert.strictEqual(out[1]!.id, g2.id);
@@ -490,7 +490,7 @@ test("consumeBatch: TOCTOU — clock crosses second TTL during the call → thro
   nowMs = 1500;
 
   assert.throws(
-    () => store.consumeBatch([{ id: g1.id, binding: b1 }, { id: g2.id, binding: b2 }]),
+    () => store.consumeBatch([{ id: g1.id, binding: b1 }, { id: g2.id, binding: b2 }], "daemon"),
     (e: unknown) => e instanceof ShuttleError && e.code === "approval_expired",
   );
   // Critical: NEITHER consumed.
@@ -504,7 +504,7 @@ test("consumeBatch: duplicate id → bad_request, no mutations", () => {
   const g = store.create(b);
   store.approve(g.id);
   assert.throws(
-    () => store.consumeBatch([{ id: g.id, binding: b }, { id: g.id, binding: b }]),
+    () => store.consumeBatch([{ id: g.id, binding: b }, { id: g.id, binding: b }], "daemon"),
     (e: unknown) => e instanceof ShuttleError && e.code === "bad_request",
   );
   assert.strictEqual(store.get(g.id)!.status, "granted");
@@ -520,7 +520,7 @@ test("consumeBatch: one mismatch → throws approval_mismatch with NEITHER consu
   store.approve(g2.id);
   // Pass g2 against b1's binding shape — should mismatch.
   assert.throws(
-    () => store.consumeBatch([{ id: g1.id, binding: b1 }, { id: g2.id, binding: b1 }]),
+    () => store.consumeBatch([{ id: g1.id, binding: b1 }, { id: g2.id, binding: b1 }], "daemon"),
     (e: unknown) => e instanceof ShuttleError && e.code === "approval_mismatch",
   );
   assert.strictEqual(store.get(g1.id)!.status, "granted");
@@ -537,7 +537,7 @@ test("validateConsumeBatch: passes when all granted + within TTL, no mutations",
   const g = store.create(b);
   store.approve(g.id);
   // Should not throw, should not mutate.
-  store.validateConsumeBatch([{ id: g.id, binding: b }]);
+  store.validateConsumeBatch([{ id: g.id, binding: b }], "daemon");
   assert.strictEqual(store.get(g.id)!.status, "granted");
 });
 
@@ -549,7 +549,7 @@ test("validateConsumeBatch: throws approval_expired when past TTL, no mutations"
   store.approve(g.id);
   nowMs = 1500;
   assert.throws(
-    () => store.validateConsumeBatch([{ id: g.id, binding: b }]),
+    () => store.validateConsumeBatch([{ id: g.id, binding: b }], "daemon"),
     (e: unknown) => e instanceof ShuttleError && e.code === "approval_expired",
   );
   assert.strictEqual(store.get(g.id)!.status, "granted");
@@ -562,7 +562,7 @@ test("validateConsumeBatch: throws approval_mismatch but does NOT consume", () =
   const g = store.create(b1);
   store.approve(g.id);
   assert.throws(
-    () => store.validateConsumeBatch([{ id: g.id, binding: b2 }]),
+    () => store.validateConsumeBatch([{ id: g.id, binding: b2 }], "daemon"),
     (e: unknown) => e instanceof ShuttleError && e.code === "approval_mismatch",
   );
   assert.strictEqual(store.get(g.id)!.status, "granted");
