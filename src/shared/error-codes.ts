@@ -205,6 +205,11 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   browser_already_started: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   blind_mode_active: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   blind_mode_already_active: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
+  bootstrap_batch_busy: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "The batch is already executing. Wait for the current run to finish, then retry.",
+    nextAction: () => null, // retrying immediately is wrong; the user should wait
+  },
   secret_exists: {
     exitCode: EXIT_CODE_CONFLICT,
     hint: () => "Re-run with --force to overwrite.",

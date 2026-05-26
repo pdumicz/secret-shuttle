@@ -114,4 +114,26 @@ export class BootstrapStore {
       }
     }
   }
+
+  private readonly inFlightExecutions = new Set<string>();
+
+  /**
+   * Attempts to acquire the in-memory execution lock for `batchId`. Returns
+   * true on success (caller must release in finally), false if another
+   * execution is currently in flight for this batch.
+   *
+   * The lock is in-memory only — daemon restart clears it. Combined with the
+   * disk-persisted status field, this preserves crash-recovery: if a daemon
+   * crashes mid-execution, the new daemon process starts with an empty lock
+   * set and a fresh /continue can resume the in_progress batch.
+   */
+  tryAcquireExecutionLock(batchId: string): boolean {
+    if (this.inFlightExecutions.has(batchId)) return false;
+    this.inFlightExecutions.add(batchId);
+    return true;
+  }
+
+  releaseExecutionLock(batchId: string): void {
+    this.inFlightExecutions.delete(batchId);
+  }
 }

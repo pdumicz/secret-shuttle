@@ -133,14 +133,25 @@ export function registerBootstrapRoutes(
         }
       }
 
-      const deps: ExecutorDeps = {
-        generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
-        revealCapture: revealCaptureCore as ExecutorDeps["revealCapture"],
-        runTemplate: runTemplateCore as ExecutorDeps["runTemplate"],
-        services,
-        daemonPortRef,
-      };
-      const result = await executeBatch(services.bootstrapStore, batchId, deps);
+      if (!services.bootstrapStore.tryAcquireExecutionLock(batchId)) {
+        throw new ShuttleError(
+          "bootstrap_batch_busy",
+          `Batch ${batchId} is already executing; wait for the current run to finish, then retry.`,
+        );
+      }
+      let result: Awaited<ReturnType<typeof executeBatch>>;
+      try {
+        const deps: ExecutorDeps = {
+          generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
+          revealCapture: revealCaptureCore as ExecutorDeps["revealCapture"],
+          runTemplate: runTemplateCore as ExecutorDeps["runTemplate"],
+          services,
+          daemonPortRef,
+        };
+        result = await executeBatch(services.bootstrapStore, batchId, deps);
+      } finally {
+        services.bootstrapStore.releaseExecutionLock(batchId);
+      }
 
       await writeDaemonAudit({
         action: "bootstrap_plan",
@@ -225,16 +236,31 @@ export function registerBootstrapRoutes(
     // already consumed in a prior /continue call. Skip re-consumption; proceed to
     // executor (idempotent: reuses prior ref, retries only failed destinations).
 
-    // Execute the plan.
-    const deps: ExecutorDeps = {
-      generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
-      revealCapture: revealCaptureCore as ExecutorDeps["revealCapture"],
-      runTemplate: runTemplateCore as ExecutorDeps["runTemplate"],
-      services,
-      daemonPortRef,
-    };
-    const result = await executeBatch(services.bootstrapStore, batchId, deps);
-    return { ok: true, ...result };
+    // Acquire the in-memory execution lock before entering the executor.
+    // If another /continue (or /plan inline) is already inside executeBatch for
+    // this batch, the second caller gets bootstrap_batch_busy immediately.
+    // The lock is in-memory only — daemon restart clears it, so a crash-recovery
+    // /continue (in_progress on disk, no lock held) will always proceed.
+    if (!services.bootstrapStore.tryAcquireExecutionLock(batchId)) {
+      throw new ShuttleError(
+        "bootstrap_batch_busy",
+        `Batch ${batchId} is already executing; wait for the current run to finish, then retry.`,
+      );
+    }
+    try {
+      // Execute the plan.
+      const deps: ExecutorDeps = {
+        generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
+        revealCapture: revealCaptureCore as ExecutorDeps["revealCapture"],
+        runTemplate: runTemplateCore as ExecutorDeps["runTemplate"],
+        services,
+        daemonPortRef,
+      };
+      const result = await executeBatch(services.bootstrapStore, batchId, deps);
+      return { ok: true, ...result };
+    } finally {
+      services.bootstrapStore.releaseExecutionLock(batchId);
+    }
   });
 
   // ── POST /v1/bootstrap/abandon ───────────────────────────────────────────

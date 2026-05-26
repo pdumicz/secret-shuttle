@@ -904,6 +904,173 @@ secrets:
   });
 });
 
+// ── R11: per-batch execution lock (P1 concurrency fix) ─────────────────────
+
+test("POST /v1/bootstrap/continue: concurrent calls on same batch → second gets bootstrap_batch_busy", async () => {
+  // 1. Seed a batch with status: "failed_partial" (simulates a prior partial run).
+  // 2. Manually acquire the lock to simulate "first call is currently inside executeBatch".
+  // 3. POST /v1/bootstrap/continue with the batch_id.
+  // 4. Assert: second call throws bootstrap_batch_busy.
+  // 5. Release the lock at end of test.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const batchId = "bootstrap-r11-busy-test";
+    await ctx.services.bootstrapStore.save({
+      batch_id: batchId,
+      approval_id: "used-approval-id",
+      plan_file_path: "",
+      plan: [
+        {
+          secret: "LOCK_KEY",
+          ref: "ss://local/prod/LOCK_KEY",
+          source: { kind: "random_32_bytes" },
+          destinations: [
+            {
+              shorthand: "vercel:production",
+              template_id: "vercel-env-add",
+              template_params: { name: "LOCK_KEY", environment: "production" },
+              domain: "vercel.com",
+            },
+          ],
+        },
+      ],
+      step_results: {},
+      created_at: Date.now(),
+      status: "in_progress",
+    });
+
+    // Simulate first call currently inside executeBatch.
+    const acquired = ctx.services.bootstrapStore.tryAcquireExecutionLock(batchId);
+    assert.ok(acquired, "test setup: should acquire lock successfully");
+
+    try {
+      // Second call arrives while lock is held.
+      const r = await call(ctx, "POST", "/v1/bootstrap/continue", {
+        batch_id: batchId,
+      });
+
+      assert.equal(
+        r.status,
+        400,
+        `expected 400 bootstrap_batch_busy, got ${r.status} body=${JSON.stringify(r.body)}`,
+      );
+      const error = (r.body as { error: { code: string } }).error;
+      assert.equal(
+        error.code,
+        "bootstrap_batch_busy",
+        `expected bootstrap_batch_busy, got: ${error.code}`,
+      );
+    } finally {
+      ctx.services.bootstrapStore.releaseExecutionLock(batchId);
+    }
+  });
+});
+
+test("POST /v1/bootstrap/continue: after lock release, retry succeeds", async () => {
+  // Setup: seed a failed_partial batch, acquire then release the lock, verify /continue returns 200.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const batchId = "bootstrap-r11-release-test";
+    await ctx.services.bootstrapStore.save({
+      batch_id: batchId,
+      approval_id: "used-approval-id",
+      plan_file_path: "",
+      plan: [
+        {
+          secret: "RELEASE_KEY",
+          ref: "ss://local/prod/RELEASE_KEY",
+          source: { kind: "random_32_bytes" },
+          destinations: [
+            {
+              shorthand: "vercel:development",
+              template_id: "vercel-env-add",
+              template_params: { name: "RELEASE_KEY", environment: "development" },
+              domain: "vercel.com",
+            },
+          ],
+        },
+      ],
+      step_results: {},
+      created_at: Date.now(),
+      status: "failed_partial",
+    });
+
+    // Acquire and release (simulates a prior run completing).
+    ctx.services.bootstrapStore.tryAcquireExecutionLock(batchId);
+    ctx.services.bootstrapStore.releaseExecutionLock(batchId);
+
+    // Now /continue should proceed without bootstrap_batch_busy.
+    const r = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: batchId,
+    });
+
+    assert.equal(
+      r.status,
+      200,
+      `expected 200 after lock release, got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const body = r.body as { ok: boolean };
+    assert.equal(body.ok, true);
+  });
+});
+
+test("POST /v1/bootstrap/continue: status in_progress on disk + empty in-memory lock → /continue resumes (crash recovery)", async () => {
+  // Simulates: daemon crashed mid-execution (lock cleared), disk state still shows in_progress.
+  // A fresh /continue must bypass the lock (empty) and resume.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const batchId = "bootstrap-r11-crash-recovery";
+    await ctx.services.bootstrapStore.save({
+      batch_id: batchId,
+      approval_id: "used-approval-id",
+      plan_file_path: "",
+      plan: [
+        {
+          secret: "CRASH_KEY",
+          ref: "ss://local/prod/CRASH_KEY",
+          source: { kind: "random_32_bytes" },
+          destinations: [
+            {
+              shorthand: "vercel:development",
+              template_id: "vercel-env-add",
+              template_params: { name: "CRASH_KEY", environment: "development" },
+              domain: "vercel.com",
+            },
+          ],
+        },
+      ],
+      step_results: {},
+      created_at: Date.now(),
+      status: "in_progress", // disk says in_progress, but no in-memory lock (daemon restarted)
+    });
+
+    // No lock held — fresh daemon state.
+    const r = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: batchId,
+    });
+
+    // Must succeed: crash recovery path.
+    assert.equal(
+      r.status,
+      200,
+      `expected 200 (crash recovery), got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const body = r.body as { ok: boolean };
+    assert.equal(body.ok, true, `expected ok:true, got: ${JSON.stringify(body)}`);
+
+    // Final status must be terminal (not perpetually in_progress).
+    const state = await ctx.services.bootstrapStore.get(batchId);
+    assert.ok(state !== null, "batch state must exist after crash recovery resume");
+    assert.ok(
+      state!.status === "completed" || state!.status === "failed_partial",
+      `expected terminal status after crash recovery, got: ${state!.status}`,
+    );
+  });
+});
+
 test("POST /v1/bootstrap/plan: plan_summary includes ss:// ref for source: existing", async () => {
   await withDaemon(async (ctx) => {
     await unlockVault(ctx);

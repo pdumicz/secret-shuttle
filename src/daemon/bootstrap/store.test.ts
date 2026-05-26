@@ -74,3 +74,24 @@ test("BootstrapStore: pruneOlderThan removes stale batches", async () => {
   assert.strictEqual(await store.get("old"), null);
   assert.ok((await store.get("fresh")) !== null);
 });
+
+test("BootstrapStore.tryAcquireExecutionLock: second acquire fails until release", () => {
+  const store = new BootstrapStore({ rootDir: "/tmp/unused" });
+  assert.strictEqual(store.tryAcquireExecutionLock("b1"), true);
+  assert.strictEqual(store.tryAcquireExecutionLock("b1"), false);
+  store.releaseExecutionLock("b1");
+  assert.strictEqual(store.tryAcquireExecutionLock("b1"), true);
+  store.releaseExecutionLock("b1"); // cleanup
+});
+
+test("BootstrapStore.tryAcquireExecutionLock: different batch ids do not collide", () => {
+  const store = new BootstrapStore({ rootDir: "/tmp/unused" });
+  assert.strictEqual(store.tryAcquireExecutionLock("b1"), true);
+  assert.strictEqual(store.tryAcquireExecutionLock("b2"), true);
+  store.releaseExecutionLock("b1");
+  assert.strictEqual(store.tryAcquireExecutionLock("b1"), true);
+  // b2 is still held
+  assert.strictEqual(store.tryAcquireExecutionLock("b2"), false);
+  store.releaseExecutionLock("b1"); // cleanup
+  store.releaseExecutionLock("b2"); // cleanup
+});
