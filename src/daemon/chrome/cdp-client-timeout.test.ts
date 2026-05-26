@@ -7,6 +7,7 @@ interface Sent { id?: number; method?: string; params?: Record<string, unknown>;
 
 class ReplyTransport extends EventEmitter implements CdpTransport {
   reply = true;
+  close(): void { /* no-op */ }
   send(msg: Sent): void {
     if (this.reply) queueMicrotask(() => this.emit("message", { id: msg.id, result: { ok: 1 } }));
     // else: never reply (simulates a hung CDP call)

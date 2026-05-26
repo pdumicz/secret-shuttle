@@ -4,6 +4,7 @@ import test from "node:test";
 import { CdpClient, type CdpTransport } from "./cdp-client.js";
 
 class FakeTransport extends EventEmitter implements CdpTransport {
+  closeCalls = 0;
   send(msg: { id?: number; method?: string }): void {
     queueMicrotask(() => {
       if (msg.method === "Browser.getVersion") {
@@ -13,6 +14,7 @@ class FakeTransport extends EventEmitter implements CdpTransport {
       }
     });
   }
+  close(): void { this.closeCalls += 1; }
 }
 
 test("send resolves on response", async () => {
@@ -55,4 +57,33 @@ test("off() is a no-op for an unknown event or unregistered fn", () => {
   assert.doesNotThrow(() => c.off("Nope.event", () => {}));
   c.on("E", () => {});
   assert.doesNotThrow(() => c.off("E", () => {}));
+});
+
+test("close() tears down the transport and rejects pending sends with cdp_client_closed", async () => {
+  const t = new FakeTransport();
+  const c = new CdpClient(t);
+  // Page.enable is not scripted to reply → leaves a pending entry.
+  const sendPromise = c.send("Page.enable");
+  await c.close();
+  await assert.rejects(sendPromise, (e: unknown) => (e as Error).message === "cdp_client_closed");
+  assert.equal(t.closeCalls, 1);
+});
+
+test("close() makes subsequent send / sendWithTimeout reject immediately with cdp_client_closed", async () => {
+  const t = new FakeTransport();
+  const c = new CdpClient(t);
+  await c.close();
+  await assert.rejects(() => c.send("Page.enable"), (e: unknown) => (e as Error).message === "cdp_client_closed");
+  await assert.rejects(
+    () => c.sendWithTimeout("Page.enable", undefined, undefined, 1_000),
+    (e: unknown) => (e as Error).message === "cdp_client_closed",
+  );
+});
+
+test("close() is idempotent — a second call does not double-close the transport", async () => {
+  const t = new FakeTransport();
+  const c = new CdpClient(t);
+  await c.close();
+  await c.close();
+  assert.equal(t.closeCalls, 1);
 });

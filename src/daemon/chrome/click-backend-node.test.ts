@@ -18,6 +18,8 @@ class ClickTransport extends EventEmitter implements CdpTransport {
   // Used to prove which quad's centroid the daemon hit-tested.
   pointHit: { x: number; y: number; handleId: number; otherId: number } | null = null;
 
+  close(): void { /* no-op */ }
+
   send(msg: Sent): void {
     const reply = (result: unknown): void => queueMicrotask(() => this.emit("message", { id: msg.id, result }));
     switch (msg.method) {
@@ -128,6 +130,7 @@ test("clickBackendNode fails closed on a zero-area / missing box", async () => {
 test("injectIntoBackendNode focuses the node, asserts activeElement, then writes via the existing path", async () => {
   class InjectTransport extends EventEmitter implements CdpTransport {
     activeBackend = 77;
+    close(): void { /* no-op */ }
     send(msg: Sent): void {
       const reply = (result: unknown): void => queueMicrotask(() => this.emit("message", { id: msg.id, result }));
       switch (msg.method) {

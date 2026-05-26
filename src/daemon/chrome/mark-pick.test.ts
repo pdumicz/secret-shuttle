@@ -15,6 +15,8 @@ class ScriptedTransport extends EventEmitter implements CdpTransport {
   normalizeReturnsNull = false;
   readonly sessionId = "S-1";
 
+  close(): void { /* no-op */ }
+
   send(msg: Sent): void {
     const reply = (result: unknown): void =>
       queueMicrotask(() => this.emit("message", { id: msg.id, result }));

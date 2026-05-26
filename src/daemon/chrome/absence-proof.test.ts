@@ -12,6 +12,8 @@ class ScriptedTransport extends EventEmitter implements CdpTransport {
   scanThrows = false;
   observeValue: { host?: string; has?: boolean } = { host: "vercel.com", has: true };
 
+  close(): void { /* no-op */ }
+
   send(msg: Sent): void {
     const reply = (result: unknown): void => queueMicrotask(() => this.emit("message", { id: msg.id, result }));
     const fail = (m: string): void => queueMicrotask(() => this.emit("message", { id: msg.id, error: { code: -1, message: m } }));
@@ -102,6 +104,7 @@ test("observeText honors the success-wait budget even when CDP hangs (not the 10
   // 10s per-call cap, a naive bound would block ~10s on the first evaluate.
   // The remaining-budget cap must make a 400ms success-wait return ~promptly.
   class HangEvalTransport extends EventEmitter implements CdpTransport {
+    close(): void { /* no-op */ }
     send(msg: Sent): void {
       if (msg.method === "Target.getTargets") {
         queueMicrotask(() => this.emit("message", { id: msg.id, result: { targetInfos: [{ targetId: "T-1", type: "page" }] } }));
@@ -126,6 +129,7 @@ test("proveAbsence fails closed PROMPTLY when a CDP call never responds (no rout
   // the per-call bound so the route returns submitted:"unknown" (blind stays active)
   // instead of hanging the HTTP request indefinitely (§5.3 timeout ⇒ inconclusive).
   class DeadTransport extends EventEmitter implements CdpTransport {
+    close(): void { /* no-op */ }
     send(msg: Sent): void {
       if (msg.method === "Target.getTargets") {
         queueMicrotask(() => this.emit("message", { id: msg.id, result: { targetInfos: [{ targetId: "T-1", type: "page" }] } }));

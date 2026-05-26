@@ -4,18 +4,23 @@ export interface CdpTransport {
   send(message: CdpMessage): void;
   on(event: string, listener: (...args: unknown[]) => void): unknown;
   removeListener(event: string, listener: (...args: unknown[]) => void): unknown;
+  close(): Promise<void> | void;
 }
 
 export class CdpClient {
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private readonly listeners = new Map<string, ((p: unknown, sessionId?: string) => void)[]>();
+  private closed = false;
 
   constructor(private readonly transport: CdpTransport) {
     this.transport.on("message", (msg) => this.onMessage(msg as CdpMessage));
   }
 
   send<T = unknown>(method: string, params?: unknown, sessionId?: string): Promise<T> {
+    if (this.closed) {
+      return Promise.reject(new Error("cdp_client_closed"));
+    }
     const id = this.nextId++;
     const msg: CdpMessage = {
       id,
@@ -35,6 +40,9 @@ export class CdpClient {
     sessionId: string | undefined,
     timeoutMs: number,
   ): Promise<T> {
+    if (this.closed) {
+      return Promise.reject(new Error("cdp_client_closed"));
+    }
     const id = this.nextId++;
     const msg: CdpMessage = {
       id,
@@ -54,6 +62,22 @@ export class CdpClient {
       });
       this.transport.send(msg);
     });
+  }
+
+  /**
+   * Shuts down the client: closes the underlying transport, rejects every
+   * pending send with `cdp_client_closed`, and marks the client closed so
+   * subsequent `send` / `sendWithTimeout` calls reject immediately. Idempotent.
+   */
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    const closeResult = this.transport.close();
+    if (closeResult instanceof Promise) await closeResult;
+    for (const p of this.pending.values()) {
+      p.reject(new Error("cdp_client_closed"));
+    }
+    this.pending.clear();
   }
 
   on(event: string, fn: (params: unknown, sessionId?: string) => void): void {

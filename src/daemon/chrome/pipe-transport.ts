@@ -13,6 +13,7 @@ export interface CdpMessage {
 
 export class PipeTransport extends EventEmitter {
   private buf = Buffer.alloc(0);
+  private closed = false;
   constructor(
     private readonly inStream: Readable,
     private readonly outStream: Writable,
@@ -28,7 +29,24 @@ export class PipeTransport extends EventEmitter {
     this.outStream.write(Buffer.from([0]));
   }
 
+  /**
+   * Idempotently tears down the transport: stops processing further chunks
+   * from the readable side and ends the writable side. The owning child
+   * process is killed separately by the caller (see `launch.ts`).
+   */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      this.inStream.removeAllListeners("data");
+    } catch { /* best-effort */ }
+    try {
+      this.outStream.end();
+    } catch { /* best-effort */ }
+  }
+
   private onChunk(chunk: Buffer): void {
+    if (this.closed) return;
     this.buf = Buffer.concat([this.buf, chunk]);
     let nul: number;
     while ((nul = this.buf.indexOf(0)) !== -1) {

@@ -254,6 +254,8 @@ test("RESOLVE_SCAN_FN field-mode gate: a field already readable-unchanged pre-re
 //   readBackendNodeValue: DOM.resolveNode + Runtime.callFunctionOn value-reader.
 //   baselineCandidates:   DOM.resolveNode + Runtime.callFunctionOn BASELINE_SCAN_FN (returnByValue:true).
 class RcTransport extends EventEmitter implements CdpTransport {
+  close(): void { /* no-op */ }
+
   // readBackendNodeValue / the one-shot value read in resolveWithinContainer.
   fieldValue = "whsec_FIELD_MODE_VALUE";
   // baselineCandidates drives BASELINE_SCAN_FN whose result we inject directly
