@@ -25,6 +25,7 @@ import { registerHubRoutes } from "../hub/hub-server.js";
 import { registerBootstrapRoutes } from "./routes/bootstrap.js";
 import { registerTokens } from "./routes/tokens.js";
 import { registerWhoami } from "./routes/whoami.js";
+import { registerDaemonAdmin } from "./routes/daemon-admin.js";
 
 export function registerRoutes(
   server: DaemonServer,
@@ -58,4 +59,5 @@ export function registerRoutes(
   // next mint without re-registering the route.
   registerTokens(server, () => server.getRootToken());
   registerWhoami(server);
+  registerDaemonAdmin(server, daemonPortRef);
 }

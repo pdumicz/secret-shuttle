@@ -1,0 +1,72 @@
+// src/daemon/api/routes/daemon-admin.ts
+//
+// Root-only daemon administration routes (Task A13):
+//
+//   POST /v1/daemon/rotate
+//     Atomically regenerate <SHUTTLE_HOME>/root-token, rewrite the daemon
+//     socket file with the new token + the daemon's current port + pid, then
+//     hot-swap the in-memory token via DaemonServer.replaceRootToken().
+//     Effect: all previously-derived agent tokens (formatBearer(agentId,
+//     HMAC(OLD_ROOT, agentId))) fail verification against the new key on
+//     their next request — instant cluster-wide revocation. The response
+//     does NOT echo the new token; clients pick it up by re-reading the
+//     socket file (matches the existing resolveDaemonToken flow).
+//
+//   POST /v1/daemon/reset-machine-id
+//     Delete <SHUTTLE_HOME>/machine-id so the next `secret-shuttle init`
+//     run re-derives a different per-runtime agent_id. Does NOT invalidate
+//     any existing tokens — the HMAC chain depends on the root token, not
+//     on the machine-id. The success message says this explicitly so an
+//     operator who mistakenly believed `reset-machine-id` was a revocation
+//     primitive gets corrected at runtime.
+//
+// Both routes require a root-token bearer (ctx.isRoot === true). A valid
+// derived agent token is rejected with `unauthorized` — this is an
+// authorization failure, not authentication (auth context exists; the agent
+// just isn't allowed to run admin commands).
+
+import { ShuttleError } from "../../../shared/errors.js";
+import type { DaemonServer } from "../../server.js";
+import { getAuthContext } from "../../auth/auth-context.js";
+import { rotateRootToken } from "../../root-token.js";
+import { resetMachineId } from "../../machine-id.js";
+import { writeSocketFile } from "../../socket-file.js";
+import { writeDaemonAudit } from "../../audit.js";
+import { getShuttlePaths } from "../../../shared/config.js";
+
+export function registerDaemonAdmin(server: DaemonServer, daemonPortRef: () => number): void {
+  server.addRoute("POST", "/v1/daemon/rotate", async () => {
+    const ctx = getAuthContext();
+    if (ctx?.isRoot !== true) {
+      throw new ShuttleError("unauthorized", "daemon rotate is root-only.");
+    }
+    const paths = getShuttlePaths();
+    const newToken = await rotateRootToken(paths.homeDir);
+    await writeSocketFile({ port: daemonPortRef(), token: newToken, pid: process.pid });
+    server.replaceRootToken(newToken);
+    await writeDaemonAudit({ action: "daemon_rotate", ok: true, actor_agent_id: "root" });
+    return {
+      ok: true,
+      message: "Root token rotated. Re-run `secret-shuttle init` to re-issue per-agent tokens.",
+    };
+  });
+
+  server.addRoute("POST", "/v1/daemon/reset-machine-id", async () => {
+    const ctx = getAuthContext();
+    if (ctx?.isRoot !== true) {
+      throw new ShuttleError("unauthorized", "daemon reset-machine-id is root-only.");
+    }
+    const paths = getShuttlePaths();
+    await resetMachineId(paths.homeDir);
+    await writeDaemonAudit({
+      action: "daemon_reset_machine_id",
+      ok: true,
+      actor_agent_id: "root",
+    });
+    return {
+      ok: true,
+      message:
+        "machine-id reset. Re-run `secret-shuttle init` to re-derive per-runtime agent_ids. NOTE: this does NOT revoke existing tokens — use `secret-shuttle daemon rotate` for revocation.",
+    };
+  });
+}

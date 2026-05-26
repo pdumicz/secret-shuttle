@@ -12,7 +12,8 @@ export type DaemonAuditAction =
   | "approval_expired" | "approval_used" | "approval_cancelled" | "approval_mismatch"
   | "import"
   | "bootstrap_plan" | "bootstrap_step"
-  | "tokens_mint";
+  | "tokens_mint"
+  | "daemon_rotate" | "daemon_reset_machine_id";
 
 export interface DaemonAuditEvent {
   action: DaemonAuditAction;
