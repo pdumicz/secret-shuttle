@@ -175,6 +175,55 @@ test("executeBatch: capture source calls revealCapture core", async () => {
   assert.strictEqual(result.completed, 1);
 });
 
+test("executeBatch: non-zero template exit_code marks destination as failed", async () => {
+  const store = await setupStore();
+  await store.save({
+    batch_id: "exitcode",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [{
+      secret: "API_KEY",
+      ref: "ss://local/prod/API_KEY",
+      source: { kind: "random_32_bytes" },
+      destinations: [{
+        shorthand: "vercel:production",
+        template_id: "vercel-env-add",
+        template_params: {},
+        domain: "vercel.com",
+      }],
+    }],
+    step_results: {},
+    created_at: Date.now(),
+    status: "pending",
+  });
+
+  const result = await executeBatch(store, "exitcode", makeDeps({
+    runTemplate: async () => ({
+      executed: false,
+      template_id: "vercel-env-add",
+      secret_ref: "ss://local/prod/API_KEY",
+      binary_path: null,
+      binary_sha256: null,
+      exit_code: 1,
+      value_visible_to_agent: false as const,
+    }),
+  }));
+
+  assert.strictEqual(result.completed, 0);
+  assert.strictEqual(result.failed, 1);
+  const final = await store.get("exitcode");
+  assert.strictEqual(final?.status, "failed_partial");
+  const stepResult = final?.step_results["API_KEY"];
+  assert.strictEqual(stepResult?.ok, false);
+  // Step-level error_code is "destination_partial_failure" (inherited from the
+  // anyDestFailed branch in executeBatch), but the destination-level result
+  // must carry the template_exec_failed code so retries/triage can see why.
+  const destResult = stepResult?.destinations_pushed?.[0];
+  assert.strictEqual(destResult?.ok, false);
+  assert.strictEqual(destResult?.error_code, "template_exec_failed");
+  assert.match(destResult?.message ?? "", /exit.*1/i);
+});
+
 test("executeBatch: existing source skips source step", async () => {
   const store = await setupStore();
   await store.save({

@@ -192,7 +192,7 @@ async function runDestinationSteps(
   const results: Array<{ destination: string; ok: boolean; error_code?: string; message?: string }> = [];
   for (const dest of entry.destinations) {
     try {
-      await deps.runTemplate(
+      const result = await deps.runTemplate(
         deps.services,
         deps.daemonPortRef,
         {
@@ -202,7 +202,16 @@ async function runDestinationSteps(
         },
         { bootstrapAuthority: authority },
       );
-      results.push({ destination: dest.shorthand, ok: true });
+      if (result.exit_code !== 0) {
+        results.push({
+          destination: dest.shorthand,
+          ok: false,
+          error_code: "template_exec_failed",
+          message: `template ${dest.template_id} exited with code ${result.exit_code}`,
+        });
+      } else {
+        results.push({ destination: dest.shorthand, ok: true });
+      }
     } catch (e) {
       results.push({
         destination: dest.shorthand,
