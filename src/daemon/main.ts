@@ -1,5 +1,4 @@
 // src/daemon/main.ts
-import { randomBytes } from "node:crypto";
 import { ShuttleError } from "../shared/errors.js";
 import { DaemonServer } from "./server.js";
 import { DaemonServices } from "./services.js";
@@ -29,7 +28,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const token = process.env.SECRET_SHUTTLE_DAEMON_TOKEN ?? randomBytes(32).toString("base64url");
+  const { ensureRootToken } = await import("./root-token.js");
+  const { ensureMachineId } = await import("./machine-id.js");
+  const { getShuttlePaths } = await import("../shared/config.js");
+  const paths = getShuttlePaths();
+  const token = process.env.SECRET_SHUTTLE_DAEMON_TOKEN ?? (await ensureRootToken(paths.homeDir));
+  // Lock in machine_id at startup so later subsystems (Phase A agent_id derivation) read a stable value.
+  await ensureMachineId(paths.homeDir);
   // The token must never reach daemon-spawned children (templates, Chrome).
   scrubDaemonSecretsFromEnv();
   const services = new DaemonServices();
