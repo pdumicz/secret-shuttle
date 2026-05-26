@@ -1534,3 +1534,56 @@ secrets:
     );
   });
 });
+
+test("POST /v1/bootstrap/plan: capture source in dev env + dev destination still requires approval (C9)", async () => {
+  // C9 capture-always-requires-approval gate. Without this, a capture-only
+  // dev plan would inline-execute and hang because the dev-synth path has
+  // no UI surface for the user to trigger the capture step. The gate
+  // routes capture plans through the normal approval pipeline so /continue
+  // can drive the executor and the hub can render the capture coordinator card.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  STRIPE_KEY:
+    source: { kind: capture, url: "https://dashboard.stripe.com/apikeys" }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    // Must fail with approval_required even in dev env with dev destinations.
+    assert.equal(
+      r.status,
+      400,
+      `expected 400 approval_required for capture-only dev plan, got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(
+      error.code,
+      "approval_required",
+      `expected approval_required for capture source in dev env, got: ${error.code}`,
+    );
+
+    // batch_id must be present so the caller knows what to /continue after approving.
+    const details = r.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string } | undefined;
+    assert.ok(details !== undefined, `expected details in response: ${JSON.stringify(r.body)}`);
+    assert.ok(
+      typeof details!.batch_id === "string" && details!.batch_id.startsWith("bootstrap-"),
+      `expected batch_id starting with "bootstrap-" in details`,
+    );
+
+    // Batch must be persisted in "pending" state — executor must NOT have run.
+    const state = await ctx.services.bootstrapStore.get(details!.batch_id);
+    assert.ok(state !== null, "batch state must be persisted");
+    assert.equal(
+      state!.status,
+      "pending",
+      `batch must remain "pending" after /plan: capture step must wait for /continue`,
+    );
+  });
+});

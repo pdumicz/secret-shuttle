@@ -242,6 +242,11 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
       "The capture tab is no longer on the host declared in secret-shuttle.yml. Navigate back to the expected host (or fix the yml) and retry the capture step.",
     nextAction: () => null,
   },
+  bootstrap_batch_abandoned: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "This batch was abandoned. Start a new one with `secret-shuttle bootstrap`.",
+    nextAction: () => null,
+  },
   secret_exists: {
     exitCode: EXIT_CODE_CONFLICT,
     hint: () => "Re-run with --force to overwrite.",

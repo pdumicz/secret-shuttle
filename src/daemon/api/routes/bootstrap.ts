@@ -17,7 +17,7 @@ import type { BatchState, PlanEntry } from "../../bootstrap/store.js";
 import { generateSecretCore } from "./secrets.js";
 import { revealCaptureCore } from "./reveal-capture.js";
 import { runTemplateCore } from "./templates.js";
-import { planHasProductionDestination, planHasProductionSource } from "../../bootstrap/destination-policy.js";
+import { planHasProductionDestination, planHasProductionSource, planRequiresCapture } from "../../bootstrap/destination-policy.js";
 import { canonicalEnvironment } from "../../../shared/refs.js";
 
 export function registerBootstrapRoutes(
@@ -62,16 +62,25 @@ export function registerBootstrapRoutes(
     // Bootstrap binding gate: production-class if ANY of:
     //   (1) --environment canonicalizes to "production" (R12), OR
     //   (2) any resolved destination is production-class (R10), OR
-    //   (3) any plan entry's source ref resolves to production (R13).
+    //   (3) any plan entry's source ref resolves to production (R13), OR
+    //   (4) any plan entry has source.kind === "capture" (C9).
     //
-    // All three are needed because bootstrap calls inner cores under
+    // (1)-(3) are needed because bootstrap calls inner cores under
     // bootstrapAuthority, which bypasses the inner per-template/per-secret
     // approval gates. The outer bootstrap binding is the only chance to
     // require a human click.
+    //
+    // (4) is needed because capture is an interactive source — the user has
+    // to navigate a browser tab to the source site for the daemon to read
+    // the secret. The dev-synth-execute path has no UI surface for that
+    // click, so a capture-only dev plan would inline-execute and hang.
+    // Routing capture plans through approval gives the user an explicit
+    // /continue step and the hub a place to render the capture card.
     const requiresProductionGate =
       canonicalEnvironment(environment) === "production" ||
       planHasProductionDestination(plan) ||
-      planHasProductionSource(plan);
+      planHasProductionSource(plan) ||
+      planRequiresCapture(plan);
     const bindingEnvironment = requiresProductionGate ? "production" : "development";
 
     const binding: ApprovalBinding = {

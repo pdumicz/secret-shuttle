@@ -85,6 +85,17 @@ test("BootstrapStore.tryAcquireExecutionLock: second acquire fails until release
   store.releaseExecutionLock("b1"); // cleanup
 });
 
+test("BootstrapStore: round-trips status='abandoned' through save + get (C8)", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "ss-bootstrap-"));
+  const store = new BootstrapStore({ rootDir: dir });
+  const state = makeState("abandoned-batch");
+  state.status = "abandoned";
+  await store.save(state);
+  const got = await store.get("abandoned-batch");
+  assert.ok(got !== null);
+  assert.strictEqual(got!.status, "abandoned");
+});
+
 test("BootstrapStore.tryAcquireExecutionLock: different batch ids do not collide", () => {
   const store = new BootstrapStore({ rootDir: "/tmp/unused" });
   assert.strictEqual(store.tryAcquireExecutionLock("b1"), true);

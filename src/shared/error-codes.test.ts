@@ -152,12 +152,13 @@ test("registry total entry count (sanity check)", () => {
   // root_token_malformed) = 132 total.
   // Burst 4 Task C1 adds 1 more (bootstrap_capture_url_invalid) = 133 total.
   // Burst 4 Task C6 adds 1 more (bootstrap_capture_redirect_blocked) = 134.
+  // Burst 4 Task C8 adds 1 more (bootstrap_batch_abandoned) = 135.
   // Note: daemon_start_failed was removed (P3.1) — it was registered but never
   // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 134, `expected 134 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 135, `expected 135 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -233,6 +234,19 @@ test("error-codes: bootstrap_capture_redirect_blocked registered with CONFLICT +
     entry.hint("") ?? "",
     /expected host/i,
     "hint should reference the expected host",
+  );
+});
+
+test("error-codes: bootstrap_batch_abandoned registered with CONFLICT + null nextAction (C8)", () => {
+  const entry = lookupErrorCode("bootstrap_batch_abandoned");
+  assert.ok(entry, "bootstrap_batch_abandoned must be registered");
+  assert.strictEqual(entry.exitCode, EXIT_CODE_CONFLICT);
+  const next = entry.nextAction ? entry.nextAction("") : null;
+  assert.strictEqual(next, null, "no automatic recovery — user must start a new batch");
+  assert.match(
+    entry.hint("") ?? "",
+    /abandoned/i,
+    "hint should reference that the batch was abandoned",
   );
 });
 

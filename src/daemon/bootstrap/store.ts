@@ -43,7 +43,7 @@ export interface BatchState {
   plan: PlanEntry[];
   step_results: Record<string, StepResult>; // keyed by secret name
   created_at: number;
-  status: "pending" | "in_progress" | "completed" | "failed_partial";
+  status: "pending" | "in_progress" | "completed" | "failed_partial" | "abandoned";
   /**
    * Agent id that created this batch. Stamped at /plan time from the ALS
    * AuthContext (or "daemon" defensively). Persisted on disk and used by

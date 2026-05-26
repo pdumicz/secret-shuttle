@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isDestinationProductionClass, planHasProductionDestination, planHasProductionSource } from "./destination-policy.js";
+import { isDestinationProductionClass, planHasProductionDestination, planHasProductionSource, planRequiresCapture } from "./destination-policy.js";
 import type { ResolvedDestination } from "./store.js";
 
 // ── isDestinationProductionClass unit tests ──────────────────────────────────
@@ -200,4 +200,27 @@ test("planHasProductionSource: ss://upstream/prod/X (non-local source) → true"
     { ref: "ss://upstream/prod/A", destinations: [] },
   ];
   assert.strictEqual(planHasProductionSource(plan), true);
+});
+
+// ── planRequiresCapture unit tests (C9) ──────────────────────────────────────
+
+test("planRequiresCapture: true when any entry has source.kind === 'capture'", () => {
+  const plan = [
+    { source: { kind: "random_32_bytes" } },
+    { source: { kind: "capture" } },
+  ];
+  assert.strictEqual(planRequiresCapture(plan), true);
+});
+
+test("planRequiresCapture: false when all entries have other kinds (random/existing)", () => {
+  const plan = [
+    { source: { kind: "random_32_bytes" } },
+    { source: { kind: "random_64_bytes" } },
+    { source: { kind: "existing" } },
+  ];
+  assert.strictEqual(planRequiresCapture(plan), false);
+});
+
+test("planRequiresCapture: empty plan returns false", () => {
+  assert.strictEqual(planRequiresCapture([]), false);
 });
