@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import type { Writable } from "node:stream";
 import { buildChildEnv } from "../safe-env.js";
 import { ShuttleError } from "../../shared/errors.js";
 import { assertSafeExecutable } from "../safe-executable.js";
@@ -26,6 +27,19 @@ export interface TemplateRunResult {
 
 const PARAM_RE = /\{\{([a-z_][a-z0-9_]*)\}\}/g;
 const ENV_FILE_PLACEHOLDER = "{{__env_file_path__}}";
+
+/**
+ * Test-only hook. When set, the stdin-delivery branch invokes this with the
+ * local secretBuf and the child's stdin stream so tests can (a) assert that
+ * the Buffer is zeroed after the write, (b) inject errors on stdin to exercise
+ * the error/close fallback path. NEVER set this outside of tests.
+ */
+let __testStdinObserver: ((buf: Buffer, stdin: Writable) => void) | undefined;
+export function __setStdinObserverForTesting(
+  fn: ((buf: Buffer, stdin: Writable) => void) | undefined,
+): void {
+  __testStdinObserver = fn;
+}
 
 export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunResult> {
   for (const p of input.template.required_params) {
@@ -82,7 +96,31 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
       });
       child.on("error", (err) => reject(new ShuttleError("template_spawn_failed", err.message)));
       child.on("close", (code) => resolve({ template_id: input.template.id, exit_code: code ?? 1 }));
-      child.stdin.end(input.secret);
+
+      // Hold the bytes-to-write in a local Buffer so they're zeroable. (input.secret
+      // is a string today — the immutable plaintext copy lingers until GC; the
+      // Buffer-throughout refactor is Phase 5q. Until then, zeroing the Buffer that
+      // child.stdin actually flushes is the best we can do here.)
+      //
+      // The PRIMARY scrub is the .end(buf, cb) callback: Node may retain the same
+      // Buffer reference until the write completes, so zeroing BEFORE the callback
+      // could clobber not-yet-flushed bytes. error/close fallbacks handle abnormal
+      // termination (child crashes pre-write, stdin pipe errors). The scrub helper
+      // is idempotent so triple-fire (error + close + cb) is safe.
+      const secretBuf = Buffer.from(input.secret, "utf8");
+      let scrubbed = false;
+      const scrub = (): void => {
+        if (scrubbed) return;
+        scrubbed = true;
+        secretBuf.fill(0);
+      };
+      child.stdin.once("error", scrub);
+      child.stdin.once("close", scrub);
+      // Hand the Buffer (and stdin handle) to the test observer BEFORE .end()
+      // so tests can either retain a reference for post-resolve assertions, or
+      // synthesize an error on the stdin to exercise the fallback path.
+      __testStdinObserver?.(secretBuf, child.stdin);
+      child.stdin.end(secretBuf, () => { scrub(); });
     });
   }
 
