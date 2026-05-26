@@ -45,14 +45,33 @@ test("computeBootstrapPlan: --force re-plans even when present", () => {
   assert.strictEqual(result.length, 1);
 });
 
-test("computeBootstrapPlan: source: existing always uses given ref", () => {
+test("computeBootstrapPlan: source: existing — included even when ref IS in the vault (no --force)", () => {
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
       { name: "FOO", source: { kind: "existing", ref: "ss://upstream/prod/FOO" }, destinations: ["vercel:production"] },
     ],
   };
-  const result = computeBootstrapPlan(parsed, emptyVault, { force: false, source: "local", environment: "production" });
+  // The existing ref IS in the vault — that's the whole point of "existing".
+  const vault: MockVault = { has: (ref) => ref === "ss://upstream/prod/FOO" };
+  const result = computeBootstrapPlan(parsed, vault, { force: false, source: "local", environment: "production" });
+  // Regression: previously this returned 0 entries because vault.has() filtered it out.
+  assert.strictEqual(result.length, 1);
+  assert.strictEqual(result[0]!.ref, "ss://upstream/prod/FOO");
+  assert.strictEqual(result[0]!.destinations.length, 1);
+});
+
+test("computeBootstrapPlan: source: existing — included when ref is NOT in vault (still emits destinations)", () => {
+  const parsed: BootstrapPlan = {
+    version: 1,
+    secrets: [
+      { name: "FOO", source: { kind: "existing", ref: "ss://upstream/prod/FOO" }, destinations: ["vercel:production"] },
+    ],
+  };
+  const result = computeBootstrapPlan(parsed, { has: () => false }, { force: false, source: "local", environment: "production" });
+  // The executor will fail at source-step time with a vault lookup error — that
+  // is correct fail-loud behavior. The planner's job is to surface the
+  // requested work, not to silently drop it.
   assert.strictEqual(result.length, 1);
   assert.strictEqual(result[0]!.ref, "ss://upstream/prod/FOO");
 });

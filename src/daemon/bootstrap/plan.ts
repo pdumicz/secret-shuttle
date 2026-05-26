@@ -25,7 +25,11 @@ export function computeBootstrapPlan(
         ? s.source.ref
         : buildSecretRef(ctx.source, canonicalEnvironment(ctx.environment), s.name);
 
-    if (!ctx.force && vault.has(ref)) {
+    // The vault.has() diff only makes sense for source kinds that *create* a new
+    // secret (random_*, capture). For source: existing the ref is in the vault
+    // by definition — the entire purpose is to push the existing secret to its
+    // destinations. Skipping it would drop all destinations silently.
+    if (s.source.kind !== "existing" && !ctx.force && vault.has(ref)) {
       continue;
     }
 
