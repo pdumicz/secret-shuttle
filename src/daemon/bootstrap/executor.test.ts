@@ -153,7 +153,14 @@ test("executeBatch: already-completed batch returns cached result without re-run
   assert.strictEqual(result.completed, 1);
 });
 
-test("executeBatch: capture source calls revealCapture core", async () => {
+test("executeBatch: capture source no longer routes through revealCapture dep (C11)", async () => {
+  // Regression guard for the C11 refactor: prior behaviour delegated to
+  // deps.revealCapture; the new behaviour runs the full capture state
+  // machine inside the executor and bypasses the revealCapture dep
+  // entirely. With no browserSession on services, the capture branch
+  // throws the expected "no browser session" plan-invalid error, and
+  // revealCapture is never called. The full state machine is covered in
+  // executor-capture.test.ts.
   const store = await setupStore();
   await store.save({
     batch_id: "cap",
@@ -176,8 +183,10 @@ test("executeBatch: capture source calls revealCapture core", async () => {
     revealCapture: async () => { revealCalled = true; return { captured: true, secret_ref: "ss://local/prod/STRIPE", fingerprint: "fp", absence_proof: "passed" as const, blind_mode: false as const, value_visible_to_agent: false as const }; },
   }));
 
-  assert.strictEqual(revealCalled, true);
-  assert.strictEqual(result.completed, 1);
+  assert.strictEqual(revealCalled, false, "revealCapture must NOT be invoked from the executor under C11");
+  // No browser session → step fails with bootstrap_plan_invalid; batch ends failed_partial.
+  assert.strictEqual(result.completed, 0);
+  assert.strictEqual(result.failed, 1);
 });
 
 test("executeBatch: non-zero template exit_code marks destination as failed", async () => {

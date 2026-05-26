@@ -1,8 +1,19 @@
+import { randomBytes } from "node:crypto";
 import { ShuttleError } from "../../shared/errors.js";
 import { writeDaemonAudit } from "../audit.js";
+import {
+  openCaptureTarget,
+  blankTarget,
+  closeTarget,
+  getTargetURL,
+  listTargets,
+} from "../chrome/capture-target-ops.js";
+import { disableObservationDomains } from "../chrome/internal-ops.js";
+import { canonicalEnvironment } from "../../shared/refs.js";
 import type { BootstrapStore, BatchState, PlanEntry, ResolvedDestination } from "./store.js";
 import type { DaemonServices } from "../services.js";
 import type { BootstrapAuthority } from "./authority.js";
+import type { CdpClient } from "../chrome/cdp-client.js";
 import type {
   GenerateSecretInput,
   GenerateSecretOpts,
@@ -30,6 +41,13 @@ export type GenerateCore = (
  * source (kind: "capture", url) does not map 1:1 to RevealCaptureInput (which
  * requires live browser handles). The real integration will derive its own
  * input shape; tests spy on this with a mock that ignores the shape entirely.
+ *
+ * NOTE (C11): the executor no longer routes the capture branch through this
+ * dep — the full state machine lives in `runCaptureStep` below. The dep is
+ * kept on ExecutorDeps for back-compat with existing call sites (and the
+ * existing executor.test.ts which still patches it via makeDeps). Once C13
+ * lands and the legacy revealCaptureCore-from-bootstrap path is removed, this
+ * dep + the import block can be deleted.
  */
 export type RevealCore = (
   services: DaemonServices,
@@ -68,6 +86,42 @@ export interface ExecuteResult {
 }
 
 /**
+ * Per-entry context the capture state machine needs. Threaded through
+ * `runCaptureStep` so it can register the pending capture, emit the SSE event,
+ * record step_results on cleanup failure, and (on abort) set the batch status
+ * to "abandoned". These were previously read locally inside the outer loop;
+ * the capture branch is the first source kind that needs them.
+ */
+interface CaptureStepContext {
+  state: BatchState;
+  batchId: string;
+  step_idx: number;   // 1-based for human-facing UIs
+  step_total: number;
+}
+
+/**
+ * Outcome of a capture branch — richer than the legacy "ref or throw" shape
+ * because the state machine has 5 distinct branches (success/failure ×
+ * verified/not-verified, plus abort which always STOPs).
+ *
+ *   - SUCCESS+verified  → { kind: "ref", ref } → outer loop runs destinations
+ *   - SUCCESS+!verified → { kind: "stopWith", stepResult } → outer loop
+ *                         records the result + stops the batch
+ *   - FAILURE+verified  → { kind: "continueWith", stepResult }
+ *                         → record + go to next entry (R5 retry handles re-attempt)
+ *   - FAILURE+!verified → { kind: "stopWith", stepResult }
+ *   - FAILURE abort     → { kind: "stopAbandoned", stepResult }
+ *
+ * The outer loop branches on .kind exactly once; the rest of the state machine
+ * is contained inside runCaptureStep so the outer flow stays linear.
+ */
+type CaptureStepOutcome =
+  | { kind: "ref"; ref: string }
+  | { kind: "continueWith"; stepResult: import("./store.js").StepResult }
+  | { kind: "stopWith"; stepResult: import("./store.js").StepResult }
+  | { kind: "stopAbandoned"; stepResult: import("./store.js").StepResult };
+
+/**
  * Walks a bootstrap batch plan, calling the appropriate core function for each
  * PlanEntry's source step and then each destination step, all under a
  * BootstrapAuthority so inner routes skip their own requireApprovals call.
@@ -96,11 +150,135 @@ export async function executeBatch(
   await store.save(state);
 
   const authority: BootstrapAuthority = { batchId };
+  const stepTotal = state.plan.length;
+  let entryIdx = 0;
 
   for (const entry of state.plan) {
+    entryIdx += 1;
     const prior = state.step_results[entry.secret];
     if (prior?.ok === true) {
       continue;
+    }
+
+    // ── Capture branch (C11): the source step is a state machine, not a
+    // simple core-fn call. It can SUCCEED + ref (run destinations), SUCCEED
+    // + cleanup_failed (record + STOP), or FAIL with skip/timeout/redirect/
+    // abort (record + CONTINUE or STOP, depending on whether cleanup verified
+    // and whether the failure was an explicit abort). The state machine
+    // lives in `runCaptureStep`; the outer loop only branches on its
+    // outcome.
+    if (entry.source.kind === "capture" && prior?.ref === undefined) {
+      const ctx: CaptureStepContext = {
+        state,
+        batchId,
+        step_idx: entryIdx,
+        step_total: stepTotal,
+      };
+      let outcome: CaptureStepOutcome;
+      try {
+        outcome = await runCaptureStep(entry, deps, ctx);
+      } catch (e) {
+        // Defensive: runCaptureStep is supposed to translate every failure
+        // mode into a CaptureStepOutcome. An unexpected throw here means
+        // something we didn't anticipate; record it as a generic source-step
+        // failure (matching the pre-C11 catch shape) and continue to the
+        // next entry so the batch can finish partial-success.
+        const errorCode = e instanceof ShuttleError ? e.code : "unexpected_error";
+        const message = e instanceof Error ? e.message : String(e);
+        state.step_results[entry.secret] = { ok: false, error_code: errorCode, message };
+        await writeDaemonAudit({
+          action: "bootstrap_step",
+          ok: false,
+          ref: entry.ref,
+          error_code: errorCode,
+        });
+        await store.save(state);
+        continue;
+      }
+
+      if (outcome.kind === "ref") {
+        // Fall through to the destination-running path with the captured ref.
+        // We inline the same merge logic the legacy path uses so capture
+        // entries play correctly with the R5 retry semantics (destinations
+        // that previously succeeded must not be re-pushed).
+        try {
+          const ref = outcome.ref;
+          const priorDestinations = prior?.destinations_pushed ?? [];
+          const successfulPriorByShorthand = new Map<
+            string,
+            { destination: string; ok: boolean; error_code?: string; message?: string }
+          >();
+          for (const p of priorDestinations) {
+            if (p.ok === true) successfulPriorByShorthand.set(p.destination, p);
+          }
+          const destinationsToAttempt = entry.destinations.filter(
+            (d) => !successfulPriorByShorthand.has(d.shorthand),
+          );
+          const newAttempts = await runDestinationSteps(destinationsToAttempt, ref, deps, authority);
+          const merged: Array<{ destination: string; ok: boolean; error_code?: string; message?: string }> = entry.destinations.map(
+            (d) => successfulPriorByShorthand.get(d.shorthand) ?? newAttempts.find((n) => n.destination === d.shorthand)!,
+          );
+          const anyDestFailed = merged.some((d) => !d.ok);
+          state.step_results[entry.secret] = {
+            ok: !anyDestFailed,
+            ref,
+            destinations_pushed: merged,
+            ...(anyDestFailed ? { error_code: "destination_partial_failure" } : {}),
+          };
+          await writeDaemonAudit({ action: "bootstrap_step", ok: !anyDestFailed, ref });
+        } catch (e) {
+          // A destination failure here is recorded the same way the legacy
+          // path's catch block did. The ref is preserved so the R5 retry
+          // path can skip the source step on the next /continue.
+          const errorCode = e instanceof ShuttleError ? e.code : "unexpected_error";
+          const message = e instanceof Error ? e.message : String(e);
+          state.step_results[entry.secret] = {
+            ok: false,
+            error_code: errorCode,
+            message,
+            ref: outcome.ref,
+          };
+          await writeDaemonAudit({
+            action: "bootstrap_step",
+            ok: false,
+            ref: outcome.ref,
+            error_code: errorCode,
+          });
+        }
+        await store.save(state);
+        continue;
+      }
+
+      // continueWith / stopWith / stopAbandoned all record step_result + audit;
+      // stopWith and stopAbandoned additionally halt the loop. stopAbandoned
+      // also flips state.status — but state.status MUST stay "in_progress"
+      // until the loop exits, because the outer finalisation below sets the
+      // terminal status. We stash the abandonment intent in a local flag.
+      state.step_results[entry.secret] = outcome.stepResult;
+      await writeDaemonAudit({
+        action: "bootstrap_step",
+        ok: false,
+        ref: entry.ref,
+        error_code: outcome.stepResult.error_code ?? "unexpected_error",
+      });
+      await store.save(state);
+
+      if (outcome.kind === "continueWith") continue;
+
+      // STOP: record terminal state and exit the loop without processing more
+      // entries. stopAbandoned sets status=abandoned (C8); stopWith leaves the
+      // batch in failed_partial so /continue can retry per R5 once the
+      // operator clears blind mode. The outer finalisation block can't run
+      // here because we return early, so we set the terminal status inline.
+      if (outcome.kind === "stopAbandoned") {
+        state.status = "abandoned";
+      } else {
+        // stopWith — record failed_partial so the batch surface reads as a
+        // terminal failure the user can act on (clear blind, retry).
+        state.status = "failed_partial";
+      }
+      await store.save(state);
+      return summarize(state);
     }
 
     try {
@@ -167,7 +345,14 @@ export async function executeBatch(
   }
 
   const summary = summarize(state);
-  state.status = summary.failed > 0 ? "failed_partial" : "completed";
+  // C11: preserve a terminal "abandoned" status if the capture branch set it.
+  // Otherwise classify as completed / failed_partial the usual way. Cast via
+  // `as string` so TS doesn't narrow status to the "in_progress" literal
+  // assigned at the top of the function — runCaptureStep / its return-early
+  // branch may have set it to "abandoned" during the walk.
+  if ((state.status as string) !== "abandoned") {
+    state.status = summary.failed > 0 ? "failed_partial" : "completed";
+  }
   await store.save(state);
   return summary;
 }
@@ -200,29 +385,370 @@ async function runSourceStep(
   }
 
   if (entry.source.kind === "capture") {
-    // The capture flow requires live browser handles (set up by the user before
-    // running bootstrap). We pass the plan entry's ref and url; the dep
-    // implementation is responsible for constructing the full RevealCaptureInput
-    // from whatever browser handles are available at that point.
-    const result = await deps.revealCapture(
-      deps.services,
-      deps.daemonPortRef,
-      { ref: entry.ref, url: entry.source.url! },
-      { bootstrapAuthority: authority },
+    // C11: capture entries are handled by `runCaptureStep` in the outer loop.
+    // This branch is reachable only if a caller invokes runSourceStep directly
+    // (e.g. legacy code paths or tests pre-dating C11) — fail closed instead
+    // of silently delegating to the now-removed revealCapture dep.
+    throw new ShuttleError(
+      "bootstrap_plan_invalid",
+      `capture source for ${entry.secret} must go through runCaptureStep — caller bypassed the state machine`,
     );
-    if (!("secret_ref" in result)) {
-      throw new ShuttleError(
-        "bootstrap_plan_invalid",
-        `reveal-capture returned blind_mode=true for ${entry.secret}; manual recovery required`,
-      );
-    }
-    return result.secret_ref;
   }
 
   throw new ShuttleError(
     "bootstrap_plan_invalid",
     `unknown source.kind: ${(entry.source as { kind: string }).kind}`,
   );
+}
+
+/**
+ * Cleanup helper (C11 spec §3): blank the target → verify blank → close → verify close.
+ *
+ * The "verified" boolean is the entire cleanup outcome the executor cares
+ * about: it gates auto-resume of blind mode (verified ⇒ safe to resume; not
+ * verified ⇒ leave blind active so a residual on-page value can't be observed
+ * by the resumed agent).
+ *
+ * Verification semantics:
+ *   - After blankTarget: re-read the URL via getTargetURL. The target is
+ *     considered blank iff the URL is "about:blank" OR the target is no
+ *     longer in listTargets (Chrome closed it under us, e.g. user manually
+ *     closed the tab while the executor was awaiting the capture).
+ *   - After closeTarget: re-read listTargets. The target is considered
+ *     closed iff its id is absent.
+ *
+ * Any throw from blankTarget/closeTarget/getTargetURL/listTargets is treated
+ * as "not verified" — the cleanup couldn't prove the page is clean, so we
+ * must fail closed.
+ */
+async function cleanupCaptureTarget(cdp: CdpClient, target_id: string): Promise<{ verified: boolean }> {
+  // Step 1 — blank, then verify blank.
+  let blankVerified = false;
+  try {
+    await blankTarget(cdp, target_id);
+  } catch {
+    // navigate may fail if the target was closed externally — treat as
+    // implicitly clean only if listTargets confirms the target is gone.
+  }
+  try {
+    const url = await getTargetURL(cdp, target_id);
+    if (url === "about:blank") {
+      blankVerified = true;
+    } else {
+      // The target may have been closed externally — check listTargets.
+      const targets = await listTargets(cdp);
+      if (!targets.some((t) => t.target_id === target_id)) {
+        blankVerified = true;
+      }
+    }
+  } catch {
+    // getTargetURL throws when the target no longer exists. Confirm via
+    // listTargets so we don't pessimistically fail on a benign close.
+    try {
+      const targets = await listTargets(cdp);
+      if (!targets.some((t) => t.target_id === target_id)) {
+        blankVerified = true;
+      }
+    } catch {
+      blankVerified = false;
+    }
+  }
+
+  if (!blankVerified) {
+    return { verified: false };
+  }
+
+  // Step 2 — close, then verify close.
+  try {
+    await closeTarget(cdp, target_id);
+  } catch {
+    // closeTarget may throw if Chrome already discarded the target. Verify
+    // via listTargets regardless.
+  }
+  try {
+    const targets = await listTargets(cdp);
+    if (!targets.some((t) => t.target_id === target_id)) {
+      return { verified: true };
+    }
+    return { verified: false };
+  } catch {
+    // listTargets failure means we can't prove the target is gone → fail closed.
+    return { verified: false };
+  }
+}
+
+/**
+ * Capture branch state machine (C11). See CaptureStepOutcome for the five
+ * possible outcomes. The function is responsible for:
+ *
+ *   1. Pre-flight: blind.start + disableObservationDomains + severAgentConnections
+ *      BEFORE openCaptureTarget (so a navigation racing the open can't leak
+ *      observation events).
+ *   2. Open the capture target via C6's `openCaptureTarget`.
+ *   3. Mint the capture_token (32 random bytes, base64url).
+ *   4. **Synchronously** register a pending-captures entry → Promise.
+ *   5. Emit the bootstrap-capture-step SSE event (HubBroker stub for C11; the
+ *      real wire format lands in C14).
+ *   6. Await the Promise. Resolves with { value, field_fingerprint } on UI
+ *      submission; rejects on skip/timeout/abort/redirect.
+ *   7. Always cleanup via cleanupCaptureTarget (blank → verify → close → verify).
+ *   8. Branch on (outcome, verified):
+ *      - success + verified  → blind.end, audit blind_auto_resume, vault upsert,
+ *                              return { kind:"ref", ref }
+ *      - success + !verified → leave blind active, audit blind_remained_active,
+ *                              return { kind:"stopWith", cleanup_failed }
+ *      - failure (skip/timeout/redirect) + verified → blind.end, continue
+ *      - failure abort + verified → blind.end, stopAbandoned
+ *      - failure any + !verified → leave blind active, stopWith (and
+ *                                   stopAbandoned if the failure was abort)
+ *
+ * The CRITICAL ORDERING is register → emit → await:
+ *   - The UI cannot resolve the Promise without seeing the capture_token,
+ *     which it receives via the SSE event.
+ *   - If we awaited BEFORE emitting, the UI would never see the event and
+ *     the Promise would deadlock until the 5-minute registry timeout fired.
+ *   - If we emitted BEFORE registering, the UI could POST to the
+ *     tokenized raw routes (C13) before the entry existed in the registry,
+ *     racing into a 404.
+ *
+ * register() is synchronous (returns the Promise immediately, see C7
+ * pending-captures.ts) so the three steps land in this exact order
+ * deterministically.
+ */
+async function runCaptureStep(
+  entry: PlanEntry,
+  deps: ExecutorDeps,
+  ctx: CaptureStepContext,
+): Promise<CaptureStepOutcome> {
+  const url = entry.source.url;
+  if (typeof url !== "string" || url === "") {
+    throw new ShuttleError(
+      "bootstrap_plan_invalid",
+      `capture source for ${entry.secret} has no url`,
+    );
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new ShuttleError(
+      "bootstrap_capture_url_invalid",
+      `capture source url is not a valid URL: ${url}`,
+    );
+  }
+  const expectedHost = parsed.hostname.toLowerCase().replace(/\.$/, "");
+
+  const { services } = deps;
+  const browserSession = services.browserSession;
+  if (browserSession === null) {
+    // The /continue route (C12) is responsible for ensuring a browser session
+    // exists before invoking the executor. If we hit here, the caller skipped
+    // that contract.
+    throw new ShuttleError(
+      "bootstrap_plan_invalid",
+      `bootstrap capture for ${entry.secret} requires a browser session — none active`,
+    );
+  }
+  const cdp = browserSession.cdp;
+
+  // ── Step 1: pre-flight ──────────────────────────────────────────────────
+  // blind.start FIRST so any racing CDP events are dropped by the proxy from
+  // this moment forward. disableObservationDomains second, severAgentConnections
+  // third. ORDER MATTERS — the spec calls this out explicitly. Inject/inject_submit
+  // in api/routes use the identical sequence (see secrets.ts:433-437).
+  services.blind.start(expectedHost, "bootstrap-capture");
+  await disableObservationDomains(cdp).catch(() => undefined);
+  browserSession.proxy?.severAgentConnections();
+
+  // ── Step 2: open capture target ─────────────────────────────────────────
+  // From here on, ANY exit path MUST run cleanupCaptureTarget. We track the
+  // target_id so the cleanup helper can blank → close it. If openCaptureTarget
+  // itself throws, no target exists yet — fail closed without cleanup.
+  let target_id: string;
+  try {
+    const opened = await openCaptureTarget(cdp, url);
+    target_id = opened.target_id;
+  } catch (e) {
+    // No target opened → no cleanup needed. But we DID start blind mode in
+    // step 1, so we must end it before propagating: this open failure is a
+    // pre-write fault (no secret can be on the page) and the spec's
+    // safe-to-auto-resume rule applies (mirrors secrets.ts inject's
+    // pre-write catch at line 446-451). The outer catch in executeBatch will
+    // record the error code and continue to the next plan entry.
+    services.blind.end();
+    throw e;
+  }
+
+  // ── Step 3-5: register → emit → await ───────────────────────────────────
+  const capture_token = randomBytes(32).toString("base64url");
+
+  // The registry timeout is 5 minutes per the spec (and the C7 default in
+  // the tests). When it fires it rejects the Promise with bootstrap_capture_timeout.
+  const FIVE_MINUTES_MS = 5 * 60 * 1000;
+
+  // SYNCHRONOUS register: returns the Promise without awaiting. This is what
+  // makes the "register THEN emit THEN await" ordering tractable — there is
+  // no microtask between register's return and the SSE emit, so the UI
+  // cannot race the registry.
+  const pending = services.pendingCaptures.register({
+    batchId: ctx.batchId,
+    secretName: entry.secret,
+    capture_token,
+    target_id,
+    expected_host: expectedHost,
+    owner_agent_id: ctx.state.owner_agent_id,
+    timeoutMs: FIVE_MINUTES_MS,
+    onTimeout: () => {
+      // Side-channel hook for audit-on-timeout. We don't need extra work here
+      // because the registry rejects the Promise we await — the failure path
+      // below covers the timeout case the same way as any other rejection.
+    },
+  });
+
+  services.hubBroker.emitBootstrapCaptureStep({
+    batch_id: ctx.batchId,
+    secret_name: entry.secret,
+    url,
+    step_idx: ctx.step_idx,
+    step_total: ctx.step_total,
+    capture_token,
+  });
+
+  let captured: { value: string; field_fingerprint: string } | null = null;
+  let failureCode: string | null = null;
+  let failureMessage: string | null = null;
+  try {
+    captured = await pending;
+  } catch (e) {
+    captured = null;
+    if (e instanceof ShuttleError) {
+      failureCode = e.code;
+      failureMessage = e.message;
+    } else {
+      failureCode = "bootstrap_capture_aborted";
+      failureMessage = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  // ── Step 6: cleanup ─────────────────────────────────────────────────────
+  const { verified } = await cleanupCaptureTarget(cdp, target_id);
+
+  // ── Step 7: state machine ───────────────────────────────────────────────
+  if (captured !== null && verified) {
+    // SUCCESS + verified → safe to auto-resume blind and write to the vault.
+    services.blind.end();
+    await writeDaemonAudit({
+      action: "blind_auto_resume",
+      ok: true,
+      ref: entry.ref,
+      domain: expectedHost,
+      op: "bootstrap-capture",
+      success_signal: "bootstrap_capture_verified_clean",
+    });
+    const meta = await services.vault.upsertSecret({
+      name: entry.secret,
+      environment: refEnvFromRef(entry.ref),
+      source: refSourceFromRef(entry.ref),
+      value: captured.value,
+      allowedDomains: entry.destinations.map((d) => d.domain),
+      ...(entry.force === true ? { force: true } : {}),
+    });
+    return { kind: "ref", ref: meta.ref };
+  }
+
+  if (captured !== null && !verified) {
+    // SUCCESS + cleanup not verified → blind stays active; record + STOP.
+    await writeDaemonAudit({
+      action: "blind_auto_resume",
+      ok: false,
+      ref: entry.ref,
+      domain: expectedHost,
+      op: "bootstrap-capture",
+      error_code: "bootstrap_capture_cleanup_failed",
+      message: `target ${target_id} could not be verified clean after capture`,
+    });
+    return {
+      kind: "stopWith",
+      stepResult: {
+        ok: false,
+        // Intentionally OMIT ref: even though capture succeeded, the failed
+        // cleanup means we did NOT write the value to the vault (we never
+        // got to the vault.upsertSecret branch), so there is no ref to
+        // surface. A future retry must re-do the capture from scratch.
+        error_code: "bootstrap_capture_cleanup_failed",
+        message: `Capture for ${entry.secret} succeeded but the source tab could not be verified clean; blind mode kept active.`,
+      },
+    };
+  }
+
+  // From here on, captured === null. failureCode/Message are set.
+  const code = failureCode ?? "bootstrap_capture_aborted";
+  const message = failureMessage ?? "";
+
+  if (!verified) {
+    // FAILURE + cleanup not verified → blind stays active, record cleanup_failed.
+    // If the underlying failure was an abort, propagate the abandoned status
+    // through stopAbandoned; otherwise it's a stopWith.
+    await writeDaemonAudit({
+      action: "blind_auto_resume",
+      ok: false,
+      ref: entry.ref,
+      domain: expectedHost,
+      op: "bootstrap-capture",
+      error_code: "bootstrap_capture_cleanup_failed",
+      message: `failure ${code} + cleanup not verified; target ${target_id}`,
+    });
+    const stepResult: import("./store.js").StepResult = {
+      ok: false,
+      error_code: "bootstrap_capture_cleanup_failed",
+      message: `Capture for ${entry.secret} failed (${code}) and the source tab could not be verified clean; blind mode kept active.`,
+    };
+    if (code === "bootstrap_capture_aborted") {
+      return { kind: "stopAbandoned", stepResult };
+    }
+    return { kind: "stopWith", stepResult };
+  }
+
+  // FAILURE + verified. Branch on the failure reason: abort STOPs (with
+  // abandoned status); everything else CONTINUEs (R5 retry rules govern
+  // re-attempt on the next /continue).
+  services.blind.end();
+  if (code === "bootstrap_capture_aborted") {
+    await writeDaemonAudit({
+      action: "blind_auto_resume",
+      ok: true,
+      ref: entry.ref,
+      domain: expectedHost,
+      op: "bootstrap-capture",
+      error_code: code,
+      message,
+    });
+    return {
+      kind: "stopAbandoned",
+      stepResult: {
+        ok: false,
+        error_code: code,
+        message,
+      },
+    };
+  }
+  await writeDaemonAudit({
+    action: "blind_auto_resume",
+    ok: true,
+    ref: entry.ref,
+    domain: expectedHost,
+    op: "bootstrap-capture",
+    error_code: code,
+    message,
+  });
+  return {
+    kind: "continueWith",
+    stepResult: {
+      ok: false,
+      error_code: code,
+      message,
+    },
+  };
 }
 
 async function runDestinationSteps(
@@ -279,10 +805,9 @@ function refSourceFromRef(ref: string): string {
 function refEnvFromRef(ref: string): string {
   const m = ref.match(/^ss:\/\/[^/]+\/([^/]+)\/[^/]+$/);
   const short = m?.[1];
-  if (short === "prod") return "production";
-  if (short === "dev") return "development";
-  if (short === "preview") return "preview";
-  return short ?? "production";
+  // Canonicalise via the shared helper so we accept every alias that
+  // vault.upsertSecret + canonicalEnvironment recognise.
+  return canonicalEnvironment(short ?? "production");
 }
 
 function summarize(state: BatchState): ExecuteResult {

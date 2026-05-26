@@ -7,6 +7,23 @@ export type HubEvent =
   | { type: "navigate"; url: string; seq: number }
   | { type: "displaced" };
 
+/**
+ * Payload for the C11 bootstrap-capture SSE event. C14 will turn this into a
+ * real wire format + UI card; for C11 the executor just calls
+ * `emitBootstrapCaptureStep(payload)` and the broker records it (no SSE wire
+ * yet). The capture_token is the only piece the UI cannot derive itself — it
+ * has to come over the SSE channel because the executor mints it just before
+ * register-then-emit-then-await.
+ */
+export interface BootstrapCaptureStepEvent {
+  batch_id: string;
+  secret_name: string;
+  url: string;
+  step_idx: number;
+  step_total: number;
+  capture_token: string;
+}
+
 export interface HubSubscriber {
   write(e: HubEvent): void;
   close(): void;
@@ -177,6 +194,28 @@ export class HubBroker {
       spawnInFlight: this.isSpawnInFlight(),
     };
   }
+
+  /**
+   * C11 stub. The executor calls this synchronously right after registering a
+   * pending capture so the UI can pick up the capture_token via SSE. C14 will
+   * wire the actual SSE channel + render a coordinator card; for C11 the
+   * payload is just recorded into `lastBootstrapCaptureStep` so tests can
+   * assert ordering ("emit happened after register, before await"). Production
+   * callers that race a real human-driven UI will see this become a no-op
+   * until C14 lands — the executor's contract (register → emit → await) does
+   * not change.
+   */
+  emitBootstrapCaptureStep(event: BootstrapCaptureStepEvent): void {
+    this.lastBootstrapCaptureStep = event;
+  }
+
+  /**
+   * @internal — exposed only for tests + the C14 transition. Holds the last
+   * BootstrapCaptureStepEvent recorded by `emitBootstrapCaptureStep`. Lets
+   * C11 tests assert that emit() fired with the right payload between
+   * register and await.
+   */
+  lastBootstrapCaptureStep: BootstrapCaptureStepEvent | null = null;
 
   private isSpawnInFlight(): boolean {
     if (this.spawnInFlightSince === null) return false;
