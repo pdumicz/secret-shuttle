@@ -2392,50 +2392,133 @@ git commit -m "feat(cdp): CdpClient.close() — single chokepoint for shutdown"
 - Modify: ~15 sites that reference `services.browser` (enumerated in the file structure section)
 - Test: new tests for ownership tracking
 
-- [ ] **Step 1: Define the BrowserSession type + add to services**
+**Context — preserve 4 existing fields, not just `browser`:**
+
+`src/daemon/services.ts` today exposes FOUR coupled fields backing one logical browser session:
+- `browser: BrowserOps | null` (line 101)
+- `browserSessionId: string | null` (line 102)
+- `cdp: CdpClient | null` (line 104) — references type from `chrome/cdp-client.ts` (NOT `internal-ops.ts`)
+- `cdpProxy: ProxyServer | null` (line 105) — actual type is `ProxyServer` (NOT `CdpProxy`)
+
+15+ production call sites use `services.cdp` and `services.cdpProxy` independently (e.g., `inject-submit.ts:141`, `secrets.ts:434`, `reveal-capture.ts:311`, `blind.ts:25`, `health.ts:17`). And ~10+ tests in `src/daemon/api/routes.test.ts` directly assign `ctx.services.browser = stubBrowser(...)` for fixtures.
+
+The refactor MUST preserve all four field surfaces (read AND write). Strategy: keep the field NAMES, back them by `browserSession` via accessors. Accessor SETTERS compose the existing partial session rather than replacing — tests that assign just `services.browser` keep working; production code in `/v1/browser/start` constructs the full session atomically.
+
+- [ ] **Step 1: Define the BrowserSession type with the correct imports**
 
 ```ts
 // src/daemon/bootstrap/browser-session.ts
 import type { ChildProcess } from "node:child_process";
-import type { CdpClient } from "../chrome/internal-ops.js";
-import type { CdpProxy } from "../proxy/cdp-proxy.js";
+import type { CdpClient } from "../chrome/cdp-client.js";        // CORRECT path
+import type { ProxyServer } from "../proxy/cdp-proxy.js";        // CORRECT type name
 import type { BrowserOps } from "../chrome/internal-ops.js";
 
 export interface BrowserSession {
   owner: { kind: "user" } | { kind: "bootstrap"; batchId: string };
   child: ChildProcess;
   cdp: CdpClient;
-  proxy: CdpProxy | null;
+  proxy: ProxyServer | null;
   browserSessionId: string;
   browser: BrowserOps;
 }
 ```
 
-In `src/daemon/services.ts`:
+- [ ] **Step 2: Modify `src/daemon/services.ts` — drop the 4 raw fields, replace with accessors backed by `browserSession`**
+
 ```ts
+// In DaemonServices:
 import type { BrowserSession } from "./bootstrap/browser-session.js";
-export class DaemonServices {
-  browserSession: BrowserSession | null = null;
-  // Keep `get browser()` as a back-compat shim during migration:
-  get browser(): BrowserOps | null {
-    return this.browserSession?.browser ?? null;
+
+browserSession: BrowserSession | null = null;
+
+// Compatibility accessors — preserve the FOUR existing field surfaces.
+// Getters return browserSession?.<field> ?? null.
+// Setters compose: if a session already exists, mutate the matching field;
+// otherwise build a minimal session around the supplied value so existing
+// tests that assign one field at a time keep working.
+
+get browser(): BrowserOps | null {
+  return this.browserSession?.browser ?? null;
+}
+set browser(v: BrowserOps | null) {
+  if (v === null) { this.browserSession = null; return; }
+  if (this.browserSession !== null) {
+    this.browserSession.browser = v;
+  } else {
+    this.browserSession = {
+      owner: { kind: "user" },
+      child: null as unknown as ChildProcess,  // test stubs may not exercise this
+      cdp: null as unknown as CdpClient,
+      proxy: null,
+      browserSessionId: "test-stub",
+      browser: v,
+    };
   }
-  set browser(_v: BrowserOps | null) {
-    throw new Error("Direct services.browser assignment removed — use browserSession.");
+}
+
+get cdp(): CdpClient | null {
+  return this.browserSession?.cdp ?? null;
+}
+set cdp(v: CdpClient | null) {
+  if (this.browserSession !== null) {
+    this.browserSession.cdp = v as unknown as CdpClient;
+  } else if (v !== null) {
+    this.browserSession = {
+      owner: { kind: "user" },
+      child: null as unknown as ChildProcess,
+      cdp: v,
+      proxy: null,
+      browserSessionId: "test-stub",
+      browser: null as unknown as BrowserOps,
+    };
+  }
+}
+
+get cdpProxy(): ProxyServer | null {
+  return this.browserSession?.proxy ?? null;
+}
+set cdpProxy(v: ProxyServer | null) {
+  if (this.browserSession !== null) {
+    this.browserSession.proxy = v;
+  } else if (v !== null) {
+    this.browserSession = {
+      owner: { kind: "user" },
+      child: null as unknown as ChildProcess,
+      cdp: null as unknown as CdpClient,
+      proxy: v,
+      browserSessionId: "test-stub",
+      browser: null as unknown as BrowserOps,
+    };
+  }
+}
+
+get browserSessionId(): string | null {
+  return this.browserSession?.browserSessionId ?? null;
+}
+set browserSessionId(v: string | null) {
+  if (this.browserSession !== null) {
+    this.browserSession.browserSessionId = v ?? "test-stub";
+  } else if (v !== null) {
+    this.browserSession = {
+      owner: { kind: "user" },
+      child: null as unknown as ChildProcess,
+      cdp: null as unknown as CdpClient,
+      proxy: null,
+      browserSessionId: v,
+      browser: null as unknown as BrowserOps,
+    };
   }
 }
 ```
 
-- [ ] **Step 2: Refactor `/v1/browser/start` to construct + store the full session**
+Add JSDoc above the accessor block stating: "Production code (`/v1/browser/start`, `ensureBootstrapBrowser`) constructs `browserSession` directly. The per-field accessors exist for test fixtures and back-compat; setting them composes the current session rather than replacing."
 
-In `src/daemon/api/routes/browser.ts:16-22`, replace:
+- [ ] **Step 3: Refactor `/v1/browser/start` to construct + store the full session atomically**
+
+In `src/daemon/api/routes/browser.ts` (around line 16-22), replace the existing field-by-field assignments with a single object construction:
+
 ```ts
-if (services.browser !== null) { /* ... */ }
-services.browser = new CdpBrowserOps(session.cdp);
-```
-With:
-```ts
-if (services.browserSession !== null) { /* ... */ }
+if (services.browserSession !== null) { /* existing 'already started' error */ }
 services.browserSession = {
   owner: { kind: "user" },
   child: session.child,
@@ -2446,29 +2529,49 @@ services.browserSession = {
 };
 ```
 
-- [ ] **Step 3: Migrate the ~15 call sites**
+Audit the start route for any remaining `services.browser = ...`, `services.cdp = ...`, `services.cdpProxy = ...`, `services.browserSessionId = ...` and remove them — the single object assignment covers all four.
 
-For every site listed in the file structure section (inject-submit.ts, secrets.ts, browser.ts, health.ts, etc.) that does:
-- `services.browser === null` → unchanged (the getter handles it)
-- `services.browser.xxx()` → unchanged (getter returns the inner BrowserOps)
+- [ ] **Step 4: Audit ~15 read sites — verify they all keep working through getters**
 
-The back-compat getter means most call sites don't need changes. The only sites that DO need changes are the few that directly assign `services.browser = ...` — they should construct a full `BrowserSession` instead.
+Quick grep:
+```bash
+grep -rn "services\.\(browser\|cdp\|cdpProxy\|browserSessionId\)" src/daemon --include="*.ts" | grep -v test
+```
 
-- [ ] **Step 4: Run tests + verify nothing regresses**
+For each match, confirm it's a READ (`services.cdp !== null`, `services.cdp.send(...)`, etc.). All reads work unchanged through the getters. Routes that do nullish-check + use:
+
+```ts
+// Still works exactly as before:
+if (services.cdp !== null) {
+  await disableObservationDomains(services.cdp).catch(() => undefined);
+}
+services.cdpProxy?.severAgentConnections();
+```
+
+- [ ] **Step 5: Run tests + verify zero regression**
 
 Run: `npm test && npx tsc --noEmit`
-Expected: PASS.
+Expected: PASS. Pay special attention to:
+- `src/daemon/api/routes.test.ts` — the ~10+ tests that assign `ctx.services.browser = stubBrowser(...)` must keep passing without source changes
+- `src/daemon/api/routes/health.test.ts` (if exists) — `services.browser !== null` check
+- `src/daemon/api/routes/blind.test.ts` / `inject-submit.test.ts` / `reveal-capture.test.ts` — `services.cdp` read paths
 
-- [ ] **Step 5: Commit**
+If a test asserts `services.browser === stubBrowser` by reference identity (`assert.strictEqual`), it will still pass because the getter returns the same stub reference back.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/daemon/bootstrap/browser-session.ts src/daemon/services.ts src/daemon/api/routes/browser.ts
-git commit -m "refactor(daemon): introduce BrowserSession object with ownership tracking
+git commit -m "refactor(daemon): BrowserSession object with composing accessors for 4 existing fields
 
-services.browserSession holds child + cdp + proxy + owner. The existing
-services.browser getter returns the inner BrowserOps unchanged so most
-call sites need no migration. /v1/browser/start now constructs the
-full session with owner: { kind: 'user' }."
+The 4 raw fields (browser / browserSessionId / cdp / cdpProxy) become
+accessors backed by services.browserSession. Setters compose: assigning
+one field mutates the existing session, or creates a minimal session if
+none exists — so legacy tests that assign \`services.browser = stub\`
+keep working. /v1/browser/start now constructs the full session
+atomically with owner: { kind: 'user' }. Correct type imports:
+CdpClient from chrome/cdp-client.ts, ProxyServer (not CdpProxy) from
+proxy/cdp-proxy.ts."
 ```
 
 ---
@@ -2558,7 +2661,7 @@ test("listTargets: returns all open targets", async () => {});
 
 ```ts
 // src/daemon/chrome/capture-target-ops.ts
-import type { CdpClient } from "./internal-ops.js";
+import type { CdpClient } from "./cdp-client.js";
 import { ShuttleError } from "../../shared/errors.js";
 
 export interface CaptureTargetOpenResult { target_id: string; current_host: string; }
