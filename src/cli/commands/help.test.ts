@@ -6,7 +6,7 @@ import { renderTopLevelHelp, helpCommand } from "./help.js";
 test("renderTopLevelHelp output groups commands and stays under 30 lines", () => {
   const output = renderTopLevelHelp();
   const lines = output.split("\n");
-  assert.ok(lines.length <= 32, `expected ≤32 lines, got ${lines.length}`); // 30 + small buffer
+  assert.ok(lines.length <= 34, `expected ≤34 lines, got ${lines.length}`); // 30 + small buffer
   // Spot-check the groups are present:
   assert.match(output, /Setup/);
   assert.match(output, /Secrets/);
@@ -25,6 +25,8 @@ test("renderTopLevelHelp output groups commands and stays under 30 lines", () =>
   assert.match(output, /^\s*unlock\b/m);
   assert.match(output, /\bmigrate secure-vault\b/);
   assert.match(output, /\bdaemon start\|stop\|status\b/);
+  // keychain must appear (P3.2 fix — was missing from curated list).
+  assert.match(output, /\bkeychain\b/);
   // Internal namespace is hidden by default — only `internal session` is
   // surfaced as the user-facing entry for Plan 4a pre-approved sessions.
   // The other internal subcommands (compare, blind, capture, inject) stay hidden.

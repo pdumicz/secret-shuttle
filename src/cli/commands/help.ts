@@ -16,6 +16,7 @@ export function renderTopLevelHelp(): string {
     "  status                      Daemon, vault, and browser health",
     "  daemon start|stop|status    Daemon lifecycle",
     "  unlock                      Unlock the vault (passphrase via browser window)",
+    "  keychain enable|disable|status   OS keychain enrollment (Touch ID / libsecret / DPAPI)",
     "  migrate secure-vault        Migrate a legacy vault to the envelope format",
     "",
     "Secrets:",
