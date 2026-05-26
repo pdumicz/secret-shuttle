@@ -87,6 +87,14 @@ test("hub-ui.html: strips hub_token from URL after bootstrap (history.replaceSta
   assert.match(html, /history\.replaceState\s*\(\s*\{\s*\}\s*,\s*["']["']\s*,\s*["']\/ui\/hub["']\s*\)/);
 });
 
+test("hub-ui.html: bootstrap_capture_step coordinator card renders with Capture/Skip/Abandon buttons", async () => {
+  const html = await loadHtml();
+  assert.match(html, /function renderCaptureStep\b/);
+  assert.match(html, /\/ui\/bootstrap\/capture-step\?token=/);
+  assert.match(html, /\/ui\/bootstrap\/skip-step\?token=/);
+  assert.match(html, /\/ui\/bootstrap\/abandon\?token=/);
+});
+
 test("hub-ui.html: in-page recovery (takeOver) replaces reload-based recovery", async () => {
   const html = await loadHtml();
   // Because history.replaceState strips the token, a bare reload would

@@ -5,15 +5,24 @@ export const SPAWN_TIMEOUT_MS = 5000;
 
 export type HubEvent =
   | { type: "navigate"; url: string; seq: number }
-  | { type: "displaced" };
+  | { type: "displaced" }
+  | {
+      type: "bootstrap_capture_step";
+      batch_id: string;
+      secret_name: string;
+      url: string;
+      step_idx: number;
+      step_total: number;
+      capture_token: string;
+    };
 
 /**
- * Payload for the C11 bootstrap-capture SSE event. C14 will turn this into a
- * real wire format + UI card; for C11 the executor just calls
- * `emitBootstrapCaptureStep(payload)` and the broker records it (no SSE wire
- * yet). The capture_token is the only piece the UI cannot derive itself — it
- * has to come over the SSE channel because the executor mints it just before
- * register-then-emit-then-await.
+ * Payload for the C11/C14 bootstrap-capture SSE event. The capture_token is
+ * the only piece the UI cannot derive itself — it has to come over the SSE
+ * channel because the executor mints it just before
+ * register-then-emit-then-await. C14 wires the actual SSE broadcast via the
+ * currentSubscriber; lastBootstrapCaptureStep is retained for C11 test
+ * inspection (no UI attached in unit tests → SSE write is a no-op).
  */
 export interface BootstrapCaptureStepEvent {
   batch_id: string;
@@ -196,17 +205,21 @@ export class HubBroker {
   }
 
   /**
-   * C11 stub. The executor calls this synchronously right after registering a
-   * pending capture so the UI can pick up the capture_token via SSE. C14 will
-   * wire the actual SSE channel + render a coordinator card; for C11 the
-   * payload is just recorded into `lastBootstrapCaptureStep` so tests can
-   * assert ordering ("emit happened after register, before await"). Production
-   * callers that race a real human-driven UI will see this become a no-op
-   * until C14 lands — the executor's contract (register → emit → await) does
-   * not change.
+   * The executor calls this synchronously right after registering a pending
+   * capture so the UI can pick up the capture_token via SSE. C14 wires the
+   * actual SSE broadcast (via currentSubscriber); the payload is ALSO
+   * recorded into `lastBootstrapCaptureStep` so unit tests (which run with no
+   * UI attached, currentSubscriber === null) can still assert ordering
+   * ("emit happened after register, before await"). When no UI is attached
+   * the SSE write is skipped via optional chaining — the executor's contract
+   * (register → emit → await) does not change.
    */
   emitBootstrapCaptureStep(event: BootstrapCaptureStepEvent): void {
     this.lastBootstrapCaptureStep = event;
+    this.currentSubscriber?.write({
+      type: "bootstrap_capture_step",
+      ...event,
+    });
   }
 
   /**

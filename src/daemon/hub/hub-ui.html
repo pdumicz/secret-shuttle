@@ -52,6 +52,35 @@
       cursor: pointer;
     }
     #banner button:hover { background: #086030; }
+    /* Capture coordinator card (C14). Rendered on the hub page itself —
+       not inside the operation iframe — because the card is the UI for a
+       raw POST flow (no token-bearing approval grant) and the hub already
+       owns the SSE channel that carries the capture_token. While the card
+       is visible, the iframe is hidden so the user is not tempted to
+       interact with a stale approval page. */
+    #capture { display: none; padding: 1rem; }
+    #capture.active { display: block; }
+    #status.capture ~ #op { display: none; }
+    #capture .card {
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      padding: 1rem;
+      max-width: 36rem;
+    }
+    #capture h2 { margin-top: 0; font-size: 1.1rem; }
+    #capture .row { display: flex; justify-content: space-between; padding: 0.25rem 0; }
+    #capture .label { color: #555; }
+    #capture .actions { margin-top: 1rem; display: flex; gap: 0.5rem; }
+    #capture button {
+      font-size: 1rem;
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      border: 0;
+      cursor: pointer;
+    }
+    #capture .capture { background: #0a7a3b; color: #fff; }
+    #capture .skip { background: #888; color: #fff; }
+    #capture .abandon { background: #c2331a; color: #fff; }
   </style>
 </head>
 <body>
@@ -67,6 +96,11 @@
        hits /ui/hub with no token and 400s. The Take over / Reconnect
        button re-enters the active state using the closure-local token. -->
   <div id="banner"></div>
+  <!-- C14: capture coordinator card. Populated by renderCaptureStep when a
+       bootstrap_capture_step SSE event arrives. Buttons POST to the
+       tokenized /ui/bootstrap/{capture-step,skip-step,abandon} raw routes
+       (no daemon-token auth — the capture_token IS the auth). -->
+  <div id="capture"></div>
   <script>
     (() => {
       const params = new URLSearchParams(location.search);
@@ -86,6 +120,8 @@
       const statusText = document.getElementById("status-text");
       const statusPort = document.getElementById("status-port");
       const banner = document.getElementById("banner");
+      const captureEl = document.getElementById("capture");
+      const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
       statusPort.textContent = `port ${location.port}`;
 
@@ -104,6 +140,11 @@
           if (iframe.src !== "about:blank") {
             iframe.src = "about:blank";
           }
+          // Drop any in-flight capture card too: a displaced or terminal
+          // tab must not let the user POST to /ui/bootstrap/* on routes
+          // the new driver may already be handling.
+          captureEl.className = "";
+          captureEl.innerHTML = "";
           // Populate the banner with text + a recovery button. Reload
           // is NOT the recovery path: history.replaceState stripped the
           // hub_token from the URL, so a reload hits /ui/hub with no
@@ -141,7 +182,61 @@
       }
 
       function handleNavigate(url) {
+        // Any prior bootstrap_capture_step card is implicitly stale once the
+        // executor advances to a different operation — hide it before
+        // surfacing the navigate so the user never sees a stale card on top
+        // of a fresh iframe.
+        hideCaptureStep();
         iframe.src = url;
+      }
+
+      function hideCaptureStep() {
+        captureEl.className = "";
+        captureEl.innerHTML = "";
+        if (statusEl.className === "capture") {
+          statusEl.className = "connected";
+          statusText.textContent = "Connected";
+        }
+      }
+
+      // C14: render the bootstrap_capture_step coordinator card. The
+      // capture_token in the event payload is the only piece the UI cannot
+      // derive itself — it is minted by the executor between register and
+      // emit. Each button POSTs to a tokenized /ui/bootstrap/* raw route
+      // (no daemon-token auth) and then hides the card to wait for the next
+      // SSE event (either another bootstrap_capture_step for the next plan
+      // entry, or a navigate when the executor moves on).
+      function renderCaptureStep(event) {
+        const stepLabel = `step ${event.step_idx + 1} of ${event.step_total}`;
+        captureEl.innerHTML = `
+          <div class="card">
+            <h2>Capture <code>${esc(event.secret_name)}</code></h2>
+            <div class="row"><span class="label">Open</span><a href="${esc(event.url)}" target="_blank" rel="noopener noreferrer">${esc(event.url)}</a></div>
+            <div class="row"><span class="label">Progress</span><b>${esc(stepLabel)}</b></div>
+            <div class="actions">
+              <button class="capture" id="capture-btn">Capture</button>
+              <button class="skip" id="skip-btn">Skip</button>
+              <button class="abandon" id="abandon-btn">Abandon</button>
+            </div>
+          </div>
+        `;
+        captureEl.className = "active";
+        statusEl.className = "capture";
+        statusText.textContent = "Awaiting capture";
+
+        const token = encodeURIComponent(event.capture_token);
+        async function post(url) {
+          try {
+            await fetch(url, { method: "POST" });
+          } catch { /* network blip — server will time out the pending capture */ }
+          hideCaptureStep();
+        }
+        // Route URLs spelled out as literals (no template interpolation of the
+        // path segment) so drift-guard greps can match the exact route strings
+        // the daemon serves.
+        document.getElementById("capture-btn").addEventListener("click", () => post(`/ui/bootstrap/capture-step?token=${token}`));
+        document.getElementById("skip-btn").addEventListener("click", () => post(`/ui/bootstrap/skip-step?token=${token}`));
+        document.getElementById("abandon-btn").addEventListener("click", () => post(`/ui/bootstrap/abandon?token=${token}`));
       }
 
       function onMessage(ev) {
@@ -154,6 +249,11 @@
         }
         if (data.type === "navigate") {
           handleNavigate(data.url);
+          return;
+        }
+        if (data.type === "bootstrap_capture_step") {
+          renderCaptureStep(data);
+          return;
         }
       }
 
