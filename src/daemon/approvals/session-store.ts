@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ShuttleError } from "../../shared/errors.js";
+import { getCurrentAgentId } from "../auth/auth-context.js";
 import {
   assertSessionPatternValid,
   PENDING_TTL_MS,
@@ -31,6 +32,7 @@ export class SessionStore {
       approved_at: null,
       expires_at: created + PENDING_TTL_MS, // PENDING window; reset on approve
       uses: 0,
+      owner_agent_id: getCurrentAgentId(),
     };
     this.grants.set(grant.id, grant);
     return grant;

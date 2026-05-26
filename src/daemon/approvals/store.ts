@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ShuttleError } from "../../shared/errors.js";
+import { getCurrentAgentId } from "../auth/auth-context.js";
 import { matchesSessionPattern } from "./session-matchers.js";
 import type { SessionStore } from "./session-store.js";
 
@@ -53,6 +54,13 @@ export interface ApprovalGrant extends ApprovalBinding {
   created_at: number;
   expires_at: number;
   ui_token: string;
+  /**
+   * Agent id that minted this grant. Stamped from the ALS AuthContext at
+   * mint time, or "daemon" if no context (defensive — lifecycle hooks /
+   * background tasks). Used by owner-enforcement checks to ensure only
+   * the originating agent can consume or revoke it.
+   */
+  owner_agent_id: string;
   /** Set when this grant was minted from a pre-approved session. */
   session_id?: string;
 }
@@ -82,6 +90,7 @@ export class ApprovalStore {
       created_at: created,
       expires_at: created + this.ttlMs,
       ui_token: randomUUID(),
+      owner_agent_id: getCurrentAgentId(),
     };
     this.grants.set(id, grant);
     this.onEvent?.({ kind: "created", grant });
@@ -345,6 +354,7 @@ export class ApprovalStore {
       created_at: now,
       expires_at: now,
       ui_token: "",
+      owner_agent_id: getCurrentAgentId(),
       session_id: sessionId,
     };
     // Synthetic grant: skips pending/granted lifecycle — emit "used" directly.

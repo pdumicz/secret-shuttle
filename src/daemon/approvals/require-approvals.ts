@@ -1,4 +1,5 @@
 import { ShuttleError } from "../../shared/errors.js";
+import { getCurrentAgentId } from "../auth/auth-context.js";
 import { openUrl } from "./open-url.js";
 import {
   approvalBindingsMatch,
@@ -386,5 +387,6 @@ function synthesizeGrant(binding: ApprovalBinding): ApprovalGrant {
     created_at: now,
     expires_at: now,
     ui_token: "",
+    owner_agent_id: getCurrentAgentId(),
   };
 }

@@ -14,6 +14,7 @@ function makeState(id: string): BatchState {
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   };
 }
 

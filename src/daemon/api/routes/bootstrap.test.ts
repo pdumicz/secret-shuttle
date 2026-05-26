@@ -364,6 +364,7 @@ test("POST /v1/bootstrap/continue: retry after failed_partial does NOT require f
       },
       created_at: Date.now(),
       status: "failed_partial",
+      owner_agent_id: "daemon",
     });
 
     // Seed a used approval in the approval store to simulate the prior /continue call.
@@ -673,6 +674,7 @@ test("POST /v1/bootstrap/continue: cached failed_partial response surfaces per-d
       // For testing the route's summarizeFromState, we also cover the /continue path
       // with "failed_partial" status below.
       status: "completed",
+      owner_agent_id: "daemon",
     });
 
     const r = await call(ctx, "POST", "/v1/bootstrap/continue", {
@@ -938,6 +940,7 @@ test("POST /v1/bootstrap/continue: concurrent calls on same batch → second get
       step_results: {},
       created_at: Date.now(),
       status: "in_progress",
+      owner_agent_id: "daemon",
     });
 
     // Simulate first call currently inside executeBatch.
@@ -995,6 +998,7 @@ test("POST /v1/bootstrap/continue: after lock release, retry succeeds", async ()
       step_results: {},
       created_at: Date.now(),
       status: "failed_partial",
+      owner_agent_id: "daemon",
     });
 
     // Acquire and release (simulates a prior run completing).
@@ -1045,6 +1049,7 @@ test("POST /v1/bootstrap/continue: status in_progress on disk + empty in-memory 
       step_results: {},
       created_at: Date.now(),
       status: "in_progress", // disk says in_progress, but no in-memory lock (daemon restarted)
+      owner_agent_id: "daemon",
     });
 
     // No lock held — fresh daemon state.

@@ -44,6 +44,13 @@ export interface BatchState {
   step_results: Record<string, StepResult>; // keyed by secret name
   created_at: number;
   status: "pending" | "in_progress" | "completed" | "failed_partial";
+  /**
+   * Agent id that created this batch. Stamped at /plan time from the ALS
+   * AuthContext (or "daemon" defensively). Persisted on disk and used by
+   * owner-enforcement checks to ensure only the originating agent can
+   * /continue or /abandon the batch.
+   */
+  owner_agent_id: string;
 }
 
 export interface BootstrapStoreOpts {

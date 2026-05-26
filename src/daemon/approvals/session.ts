@@ -82,6 +82,13 @@ export interface SessionGrant extends SessionPattern {
   approved_at: number | null;      // null until approve() runs
   expires_at: number;              // PENDING window initially; RESET to now+ttl_ms on approve
   uses: number;
+  /**
+   * Agent id that created this session. Stamped from the ALS AuthContext
+   * at create time, or "daemon" if no context (defensive). Used by
+   * owner-enforcement checks to ensure only the originating agent can
+   * approve, revoke, or use it.
+   */
+  owner_agent_id: string;
 }
 
 /**

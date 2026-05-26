@@ -18,6 +18,7 @@ test("assertBootstrapAuthorityValid: in_progress batch passes", async () => {
     step_results: {},
     created_at: Date.now(),
     status: "in_progress",
+    owner_agent_id: "daemon",
   });
   await assertBootstrapAuthorityValid({ batchId: "x" }, store);
 });
@@ -33,6 +34,7 @@ test("assertBootstrapAuthorityValid: pending batch -> throws", async () => {
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
   await assert.rejects(
     assertBootstrapAuthorityValid({ batchId: "y" }, store),
@@ -60,6 +62,7 @@ test("assertBootstrapAuthorityValid: completed batch -> throws", async () => {
     step_results: {},
     created_at: Date.now(),
     status: "completed",
+    owner_agent_id: "daemon",
   });
   await assert.rejects(
     assertBootstrapAuthorityValid({ batchId: "done" }, store),

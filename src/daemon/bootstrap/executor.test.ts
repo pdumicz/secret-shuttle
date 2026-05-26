@@ -47,6 +47,7 @@ test("executeBatch: completes all steps for a 1-secret 1-destination plan", asyn
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   const result = await executeBatch(store, "b1", makeDeps());
@@ -70,6 +71,7 @@ test("executeBatch: partial-success records per-step errors", async () => {
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   let callCount = 0;
@@ -104,6 +106,7 @@ test("executeBatch: re-run skips completed steps (idempotent)", async () => {
     step_results: { API_KEY: { ok: true, ref: "ss://local/prod/API_KEY" } }, // already done
     created_at: Date.now(),
     status: "in_progress",
+    owner_agent_id: "daemon",
   });
 
   let coreCalled = 0;
@@ -137,6 +140,7 @@ test("executeBatch: already-completed batch returns cached result without re-run
     step_results: { API_KEY: { ok: true, ref: "ss://local/prod/API_KEY" } },
     created_at: Date.now(),
     status: "completed",
+    owner_agent_id: "daemon",
   });
 
   let coreCalled = 0;
@@ -164,6 +168,7 @@ test("executeBatch: capture source calls revealCapture core", async () => {
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   let revealCalled = false;
@@ -195,6 +200,7 @@ test("executeBatch: non-zero template exit_code marks destination as failed", as
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   const result = await executeBatch(store, "exitcode", makeDeps({
@@ -245,6 +251,7 @@ test("executeBatch: PlanEntry.force=true propagates to generateSecret input", as
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   let observedForce: unknown = "unset";
@@ -278,6 +285,7 @@ test("executeBatch: PlanEntry.force=undefined → generateSecret input has no fo
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   let observedKeys: string[] = [];
@@ -305,6 +313,7 @@ test("executeBatch: existing source skips source step", async () => {
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   let generateCalled = false;
@@ -348,6 +357,7 @@ test("executeBatch: retry reuses prior ref and only re-runs failed destinations"
     },
     created_at: Date.now(),
     status: "failed_partial",
+    owner_agent_id: "daemon",
   });
 
   let generateCalled = 0;
@@ -403,6 +413,7 @@ test("executeBatch: retry that fails again preserves prior ref + destinations_pu
     },
     created_at: Date.now(),
     status: "failed_partial",
+    owner_agent_id: "daemon",
   });
 
   // Destination fails again on retry.
@@ -433,6 +444,7 @@ test("executeBatch: no prior ref → source step still runs as before", async ()
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   let generateCalled = 0;
@@ -465,6 +477,7 @@ test("executeBatch: destination failure surfaces per-dest error_code + message +
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   // First destination succeeds (exit 0); second fails (exit 1).
@@ -512,6 +525,7 @@ test("executeBatch: source-step failure still emits step: 'execute' error (no de
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   const result = await executeBatch(store, "srcfail", makeDeps({
@@ -546,6 +560,7 @@ test("executeBatch: multiple failed destinations for one secret → one error ea
     step_results: {},
     created_at: Date.now(),
     status: "pending",
+    owner_agent_id: "daemon",
   });
 
   // All three fail.

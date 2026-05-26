@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ShuttleError } from "../../../shared/errors.js";
 import { asObject, optApprovalIds, optBool, optString, reqString } from "../validate.js";
 import { requireApprovals } from "../../approvals/require-approvals.js";
+import { getCurrentAgentId } from "../../auth/auth-context.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { parseBootstrapYml } from "../../../cli/bootstrap/yml.js";
@@ -107,6 +108,7 @@ export function registerBootstrapRoutes(
       step_results: {},
       created_at: Date.now(),
       status: "pending",
+      owner_agent_id: getCurrentAgentId(),
     });
 
     // requireApprovals with waitMs:0 throws approval_required when the binding
