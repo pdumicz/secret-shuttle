@@ -280,6 +280,12 @@ export function registerBootstrapRoutes(
     // already consumed in a prior /continue call. Skip re-consumption; proceed to
     // executor (idempotent: reuses prior ref, retries only failed destinations).
 
+    // C12: capture plans need a browser session for the duration of the run.
+    // hasCapture decides whether the outer try/finally must orchestrate the
+    // browser lifecycle. Non-capture plans (random_*, existing) skip this
+    // entirely — they don't touch Chrome at all.
+    const hasCapture = planRequiresCapture(state.plan);
+
     // Acquire the in-memory execution lock before entering the executor.
     // If another /continue (or /plan inline) is already inside executeBatch for
     // this batch, the second caller gets bootstrap_batch_busy immediately.
@@ -292,6 +298,16 @@ export function registerBootstrapRoutes(
       );
     }
     try {
+      // Capture-conditional: ensure a browser session is up before we hand off
+      // to the executor. No-op when a user-owned session already exists (the
+      // user's `browser start` is preserved); otherwise spawn a Chrome with
+      // owner:{kind:"bootstrap",batchId} so the finally can identify + tear it
+      // down. MUST run AFTER lock acquisition so concurrent /continue callers
+      // can't spawn duplicate Chromes for the same batch.
+      if (hasCapture) {
+        await services.ensureBootstrapBrowser(batchId);
+      }
+
       // Execute the plan.
       const deps: ExecutorDeps = {
         generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
@@ -303,6 +319,27 @@ export function registerBootstrapRoutes(
       const result = await executeBatch(services.bootstrapStore, batchId, deps);
       return { ok: true, ...result };
     } finally {
+      // Capture-conditional teardown: ALWAYS runs before lock release. If a
+      // bootstrap-owned Chrome was actually killed AND blind is still active
+      // (the executor took the cleanup-failed branch and left blind on so a
+      // residual on-page value couldn't be observed), auto-end blind: the
+      // rendering process is dead, there is nothing left to observe.
+      // stopBootstrapBrowser is a no-op for user-owned sessions, so user
+      // `browser start` survives this finally untouched.
+      if (hasCapture) {
+        const { stopped } = await services.stopBootstrapBrowser(batchId);
+        if (stopped && services.blind.current() !== null) {
+          services.blind.end();
+          await writeDaemonAudit({
+            action: "blind_auto_resume_after_browser_stop",
+            ok: true,
+            actor_agent_id: state.owner_agent_id,
+          });
+        }
+      }
+      // Lock release LAST — after browser cleanup. A retry after release must
+      // see a clean services.browserSession === null (or the user's session,
+      // untouched), not a half-torn-down bootstrap session.
       services.bootstrapStore.releaseExecutionLock(batchId);
     }
   });

@@ -6,11 +6,58 @@ import test from "node:test";
 import { DaemonServer } from "../../server.js";
 import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
+import type {
+  BrowserSession,
+  BrowserSessionChild,
+} from "../../bootstrap/browser-session.js";
+import type { CdpClient } from "../../chrome/cdp-client.js";
+import type { ProxyServer } from "../../proxy/cdp-proxy.js";
+import type { BrowserOps } from "../../chrome/internal-ops.js";
 
 // ── shared harness ──────────────────────────────────────────────────────────
 // Mirrors bootstrap.test.ts: SECRET_SHUTTLE_INSECURE_DEV_MODE=1 so the dev
 // synth/grant path works without real production env, NO_OPEN_URL=1 so the
 // hub doesn't try to spawn a real UI.
+
+// Minimal stub session — C12 makes /continue auto-spawn a browser for capture
+// plans, so any test that drives /continue on a capture batch must stub the
+// createBrowserSession factory. Without this the real launchChrome would run
+// and the test would hang on the headers timeout.
+function makeStubSession(owner: BrowserSession["owner"]): BrowserSession {
+  const exitListeners: Array<(code: number | null) => void> = [];
+  const child: BrowserSessionChild = {
+    kill(signal?: NodeJS.Signals): boolean {
+      // Fire any registered exit listener so stopBootstrapBrowser's
+      // Promise.race resolves on the exit branch instead of the SIGKILL
+      // fallback (which would add a 3-second delay).
+      if ((signal ?? "SIGTERM") === "SIGTERM") {
+        queueMicrotask(() => {
+          for (const l of exitListeners.splice(0)) l(0);
+        });
+      }
+      return true;
+    },
+    once(event: "exit", listener: (code: number | null) => void): unknown {
+      assert.equal(event, "exit");
+      exitListeners.push(listener);
+      return child;
+    },
+  };
+  const cdp = { async close(): Promise<void> { /* noop */ } } as unknown as CdpClient;
+  const proxy: ProxyServer = {
+    url: "ws://127.0.0.1:0/stub",
+    severAgentConnections(): void { /* noop */ },
+    async close(): Promise<void> { /* noop */ },
+  };
+  return {
+    owner,
+    child,
+    cdp,
+    proxy,
+    browserSessionId: "ws://127.0.0.1:0/stub",
+    browser: { available: true } as unknown as BrowserOps,
+  };
+}
 
 async function withDaemon<T>(
   fn: (ctx: { port: number; token: string; services: DaemonServices }) => Promise<T>,
@@ -23,7 +70,13 @@ async function withDaemon<T>(
   process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
   process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
   const server = new DaemonServer({ token: "t" });
-  const services = new DaemonServices();
+  // Stub the browser factory so C12's auto-spawn doesn't actually launch Chrome.
+  // We only need a valid BrowserSession shape — the executor will fail at the
+  // first CDP call against the stub, which is fine for the tests in this file
+  // (they don't assert on executor outcome, only on guard/approval invariants).
+  const services = new DaemonServices({
+    createBrowserSessionImpl: async (opts) => makeStubSession(opts.owner),
+  });
   let port = 0;
   registerRoutes(server, services, () => port);
   ({ port } = await server.listen(0));
