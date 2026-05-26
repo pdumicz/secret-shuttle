@@ -38,35 +38,78 @@ export function registerDaemonAdmin(server: DaemonServer, daemonPortRef: () => n
   server.addRoute("POST", "/v1/daemon/rotate", async () => {
     const ctx = getAuthContext();
     if (ctx?.isRoot !== true) {
+      // Record the rejected attempt with the caller's actual agent_id so the
+      // audit log answers "who tried to rotate" — not just "rotate failed".
+      await writeDaemonAudit({
+        action: "daemon_rotate",
+        ok: false,
+        actor_agent_id: ctx?.agent_id ?? "unknown",
+        error_code: "unauthorized",
+      });
       throw new ShuttleError("unauthorized", "daemon rotate is root-only.");
     }
-    const paths = getShuttlePaths();
-    const newToken = await rotateRootToken(paths.homeDir);
-    await writeSocketFile({ port: daemonPortRef(), token: newToken, pid: process.pid });
-    server.replaceRootToken(newToken);
-    await writeDaemonAudit({ action: "daemon_rotate", ok: true, actor_agent_id: "root" });
-    return {
-      ok: true,
-      message: "Root token rotated. Re-run `secret-shuttle init` to re-issue per-agent tokens.",
-    };
+    // NOTE: rotate is operator-initiated and low-frequency — no serialization
+    // guard. Concurrent /v1/daemon/rotate calls could interleave the file +
+    // socket + in-memory writes, leaving them three-way divergent. If that
+    // becomes a real concern, add a simple Promise-based mutex around the
+    // try-block below.
+    try {
+      const paths = getShuttlePaths();
+      const newToken = await rotateRootToken(paths.homeDir);
+      await writeSocketFile({ port: daemonPortRef(), token: newToken, pid: process.pid });
+      server.replaceRootToken(newToken);
+      await writeDaemonAudit({ action: "daemon_rotate", ok: true, actor_agent_id: "root" });
+      return {
+        ok: true,
+        message: "Root token rotated. Re-run `secret-shuttle init` to re-issue per-agent tokens.",
+      };
+    } catch (err) {
+      // We're past the isRoot guard, so actor_agent_id is "root" by construction.
+      await writeDaemonAudit({
+        action: "daemon_rotate",
+        ok: false,
+        actor_agent_id: "root",
+        error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+      });
+      throw err;
+    }
   });
 
   server.addRoute("POST", "/v1/daemon/reset-machine-id", async () => {
     const ctx = getAuthContext();
     if (ctx?.isRoot !== true) {
+      // Record the rejected attempt with the caller's actual agent_id so the
+      // audit log answers "who tried to reset-machine-id".
+      await writeDaemonAudit({
+        action: "daemon_reset_machine_id",
+        ok: false,
+        actor_agent_id: ctx?.agent_id ?? "unknown",
+        error_code: "unauthorized",
+      });
       throw new ShuttleError("unauthorized", "daemon reset-machine-id is root-only.");
     }
-    const paths = getShuttlePaths();
-    await resetMachineId(paths.homeDir);
-    await writeDaemonAudit({
-      action: "daemon_reset_machine_id",
-      ok: true,
-      actor_agent_id: "root",
-    });
-    return {
-      ok: true,
-      message:
-        "machine-id reset. Re-run `secret-shuttle init` to re-derive per-runtime agent_ids. NOTE: this does NOT revoke existing tokens — use `secret-shuttle daemon rotate` for revocation.",
-    };
+    try {
+      const paths = getShuttlePaths();
+      await resetMachineId(paths.homeDir);
+      await writeDaemonAudit({
+        action: "daemon_reset_machine_id",
+        ok: true,
+        actor_agent_id: "root",
+      });
+      return {
+        ok: true,
+        message:
+          "machine-id reset. Re-run `secret-shuttle init` to re-derive per-runtime agent_ids. NOTE: this does NOT revoke existing tokens — use `secret-shuttle daemon rotate` for revocation.",
+      };
+    } catch (err) {
+      // We're past the isRoot guard, so actor_agent_id is "root" by construction.
+      await writeDaemonAudit({
+        action: "daemon_reset_machine_id",
+        ok: false,
+        actor_agent_id: "root",
+        error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+      });
+      throw err;
+    }
   });
 }
