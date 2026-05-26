@@ -16,6 +16,7 @@ import { getShuttlePaths } from "../shared/config.js";
 import { HubBroker } from "./hub/hub-broker.js";
 import { openUrl } from "./approvals/open-url.js";
 import { BootstrapStore } from "./bootstrap/store.js";
+import { createBrowserSession as createBrowserSessionReal } from "./bootstrap/browser-session.js";
 import type { BrowserSession, BrowserSessionChild } from "./bootstrap/browser-session.js";
 import type { KeychainAdapter } from "../vault/keychain/types.js";
 
@@ -59,6 +60,15 @@ export interface DaemonServicesOptions {
    * `hubBroker` is provided.
    */
   hubOpenUrlImpl?: (url: string) => void;
+  /**
+   * Test-only injection point for the BrowserSession factory used by
+   * `ensureBootstrapBrowser`. Production leaves this undefined and
+   * the real `createBrowserSession` (which spawns Chrome) is used.
+   * Tests pass a stub that returns a hand-rolled BrowserSession so
+   * the ownership/reuse behavior can be exercised without launching
+   * a real browser.
+   */
+  createBrowserSessionImpl?: typeof createBrowserSessionReal;
 }
 
 export class DaemonServices {
@@ -207,6 +217,13 @@ export class DaemonServices {
    */
   keychain?: KeychainAdapter;
 
+  /**
+   * Factory used by `ensureBootstrapBrowser` to construct a BrowserSession.
+   * Defaults to the real `createBrowserSession` (which spawns Chrome).
+   * Tests inject a stub via DaemonServicesOptions.createBrowserSessionImpl.
+   */
+  private readonly createBrowserSessionImpl: typeof createBrowserSessionReal;
+
   constructor(opts: DaemonServicesOptions = {}) {
     // Production: real openUrl (which honors SECRET_SHUTTLE_NO_OPEN_URL=1
     // as a no-op for tests). The hubOpenUrlImpl hook lets tests prove
@@ -216,5 +233,59 @@ export class DaemonServices {
     this.hubBroker =
       opts.hubBroker ??
       new HubBroker({ openUrlImpl: opts.hubOpenUrlImpl ?? openUrl });
+    this.createBrowserSessionImpl = opts.createBrowserSessionImpl ?? createBrowserSessionReal;
+  }
+
+  /**
+   * Ensure a BrowserSession exists for the duration of a bootstrap batch.
+   *
+   * - If a session is already present (any owner — user or another bootstrap),
+   *   return it unchanged. Crucially, a pre-existing user session is never
+   *   overwritten or re-owned: a user who has `browser start`ed gets to keep
+   *   their session, and the outer `/continue` finally must NOT stop it.
+   * - If no session exists, spawn one with `owner = { kind: "bootstrap", batchId }`.
+   *   The owner tag is what `stopBootstrapBrowser` checks to decide whether it
+   *   may kill the session — see `stopBootstrapBrowser` below.
+   */
+  async ensureBootstrapBrowser(batchId: string): Promise<BrowserSession> {
+    if (this.browserSession !== null) return this.browserSession;
+    this.browserSession = await this.createBrowserSessionImpl({
+      profile: "bootstrap",
+      blind: this.blind,
+      owner: { kind: "bootstrap", batchId },
+    });
+    return this.browserSession;
+  }
+
+  /**
+   * Stop the BrowserSession iff it is owned by the given bootstrap batch.
+   *
+   * Returns `{ stopped: true }` only when this call actually killed the
+   * session. Returns `{ stopped: false }` when:
+   *   - there is no session,
+   *   - the session is user-owned (the user's `browser start` survives), or
+   *   - the session is owned by a *different* batchId (idempotency guard:
+   *     a stale finally from an aborted batch must not kill a fresh one).
+   *
+   * Cleanup order matches the documented teardown contract:
+   *   proxy.close → cdp.close → child.kill(SIGTERM) → wait-or-SIGKILL after 3s.
+   * The proxy is severed first so no in-flight agent CDP traffic races the
+   * child exit; cdp.close then rejects pending sends; finally the child is
+   * given 3s to exit cleanly before SIGKILL.
+   */
+  async stopBootstrapBrowser(batchId: string): Promise<{ stopped: boolean }> {
+    const s = this.browserSession;
+    if (s === null || s.owner.kind !== "bootstrap" || s.owner.batchId !== batchId) {
+      return { stopped: false };
+    }
+    await s.proxy?.close().catch(() => undefined);
+    await s.cdp.close().catch(() => undefined);
+    s.child.kill("SIGTERM");
+    await Promise.race([
+      new Promise<void>((r) => { s.child.once("exit", () => r()); }),
+      new Promise<void>((r) => setTimeout(() => { s.child.kill("SIGKILL"); r(); }, 3000)),
+    ]);
+    this.browserSession = null;
+    return { stopped: true };
   }
 }
