@@ -12,7 +12,8 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdtemp, mkdir, readFile, rm, writeFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,10 +22,12 @@ import { DaemonServices } from "../../daemon/services.js";
 import { registerHealth } from "../../daemon/api/routes/health.js";
 import { registerUnlockSession } from "../../daemon/api/routes/unlock-session.js";
 import { registerKeychainRoutes } from "../../daemon/api/routes/keychain.js";
+import { registerTokens } from "../../daemon/api/routes/tokens.js";
 import { writeSocketFile } from "../../daemon/socket-file.js";
 import { readEnvelope } from "../../vault/envelope.js";
 import { initCommand } from "./init.js";
 import type { KeychainAdapter } from "../../vault/keychain/types.js";
+import { deriveAutoAgentId } from "../../daemon/auth/agent-id.js";
 
 // ── Mock keychain ─────────────────────────────────────────────────────────────
 
@@ -52,23 +55,39 @@ class MockKeychain implements KeychainAdapter {
 interface HarnessCtx {
   port: number;
   services: DaemonServices;
+  /** SECRET_SHUTTLE_HOME — temp dir where socket file + machine-id + audit live. */
   home: string;
+  /** Sandboxed HOME directory — where ~/.claude/settings.json lands. */
+  userHome: string;
+  /** The 32-byte base64url root token used by the in-process daemon. */
+  rootToken: string;
 }
 
 async function withInitDaemon<T>(
   fn: (ctx: HarnessCtx) => Promise<T>,
-  opts: { keychain?: KeychainAdapter } = {},
+  opts: { keychain?: KeychainAdapter; seedMachineId?: boolean | string } = {},
 ): Promise<T> {
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-init-test-"));
+  // Sandbox HOME so installAgentToken writes ~/.claude/settings.json into a
+  // temp directory, never into the real user home (os.homedir() honors HOME on
+  // macOS/Linux). We restore HOME on cleanup like the other env vars.
+  const userHome = await mkdtemp(path.join(os.tmpdir(), "ss-init-userhome-"));
   const prevHome = process.env.SECRET_SHUTTLE_HOME;
   const prevDev = process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
+  const prevUserHome = process.env.HOME;
   // ensureDaemonRunning() checks readSocketFile() first. We pre-write the
   // socket file before the init action runs, so the spawn path is never taken
   // — the function sees an existing socket and returns { daemonSpawned: false }.
   process.env.SECRET_SHUTTLE_HOME = home;
   process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
+  process.env.HOME = userHome;
 
-  const server = new DaemonServer({ token: "test-token" });
+  // 32-byte base64url root token. /v1/tokens/mint uses HMAC-SHA256 keyed on the
+  // root_token bytes; deriveHmac rejects anything else with root_token_malformed
+  // (see src/daemon/auth/token-derive.ts). Hard-coded "test-token" worked for the
+  // earlier health/unlock-only tests because those routes never derive HMACs.
+  const rootToken = randomBytes(32).toString("base64url");
+  const server = new DaemonServer({ token: rootToken });
   const services = new DaemonServices({
     hubOpenUrlImpl: () => { /* no-op in tests */ },
   });
@@ -80,21 +99,38 @@ async function withInitDaemon<T>(
   registerHealth(server, services);
   registerUnlockSession(server, services, () => port);
   registerKeychainRoutes(server, services);
+  // Required so init can mint per-runtime agent tokens during the action.
+  registerTokens(server, () => server.getRootToken());
   ({ port } = await server.listen(0));
 
   // Write the socket file so daemonRequest() can find the test server.
   await mkdir(home, { recursive: true });
-  await writeSocketFile({ port, token: "test-token", pid: process.pid });
+  await writeSocketFile({ port, token: rootToken, pid: process.pid });
+
+  // Seed machine-id so init's per-runtime mint step finds it via readMachineId.
+  // In production this file is written during daemon bootstrap (ensureMachineId).
+  // The test harness short-circuits the spawn path, so we have to seed it here.
+  // Tests can opt out via seedMachineId: false to exercise the "no machine_id
+  // yet → skip mint step" branch.
+  if (opts.seedMachineId !== false) {
+    const id = typeof opts.seedMachineId === "string"
+      ? opts.seedMachineId
+      : randomBytes(32).toString("base64url");
+    await writeFile(path.join(home, "machine-id"), id, { mode: 0o600 });
+  }
 
   try {
-    return await fn({ port, services, home });
+    return await fn({ port, services, home, userHome, rootToken });
   } finally {
     await server.close();
     if (prevHome === undefined) delete process.env.SECRET_SHUTTLE_HOME;
     else process.env.SECRET_SHUTTLE_HOME = prevHome;
     if (prevDev === undefined) delete process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
     else process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = prevDev;
+    if (prevUserHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevUserHome;
     await rm(home, { recursive: true, force: true });
+    await rm(userHome, { recursive: true, force: true });
   }
 }
 
@@ -102,16 +138,20 @@ async function withInitDaemon<T>(
  * Bootstrap the vault: call /v1/unlock/start (creates the session) then
  * directly submit the passphrase to the UI route. Used to set up state
  * BEFORE running init — this mimics a user who has already created their vault.
+ *
+ * Takes the harness's rootToken so the bearer matches what the in-process
+ * DaemonServer is checking against (the harness now uses a real 32-byte root
+ * token instead of the hard-coded "test-token" string).
  */
 async function bootstrapVault(
-  port: number,
-  services: DaemonServices,
+  ctx: { port: number; services: DaemonServices; rootToken: string },
   passphrase: string,
 ): Promise<void> {
+  const { port, services, rootToken } = ctx;
   // Open a session (or get keychain fast-path).
   const startRes = await fetch(`http://127.0.0.1:${port}/v1/unlock/start`, {
     method: "POST",
-    headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+    headers: { authorization: `Bearer ${rootToken}`, "content-type": "application/json" },
     body: "{}",
   });
   assert.equal(startRes.status, 200, "unlock/start must succeed");
@@ -205,7 +245,7 @@ test("init: daemon already running + vault already unlocked → fast no-op", asy
 
   await withInitDaemon(async (ctx) => {
     // Bootstrap: create vault + unlock via passphrase UI.
-    await bootstrapVault(ctx.port, ctx.services, "my-passphrase");
+    await bootstrapVault(ctx, "my-passphrase");
 
     // Vault is unlocked. Run init — should fast-path immediately.
     const result = await runInit(["--no-agent-install"]);
@@ -226,7 +266,7 @@ test("init: vault locked + keychain has key → keychain fast-path, no UI needed
 
   await withInitDaemon(async (ctx) => {
     // Bootstrap: create vault via passphrase UI; keychain entry gets written by C2.
-    await bootstrapVault(ctx.port, ctx.services, "my-passphrase");
+    await bootstrapVault(ctx, "my-passphrase");
 
     // Re-lock the vault so init has to unlock it.
     ctx.services.lock.lock();
@@ -280,7 +320,7 @@ test("init: --no-agent-install skips skill writes", async () => {
 
   await withInitDaemon(async (ctx) => {
     // Bootstrap: unlock vault (keychain fast-path via C2 enrollment).
-    await bootstrapVault(ctx.port, ctx.services, "my-passphrase");
+    await bootstrapVault(ctx, "my-passphrase");
 
     // Create a fake .claude/ dir in ctx.home to trigger runtime detection
     // (but --no-agent-install should prevent writing anything).
@@ -308,7 +348,7 @@ test("init: agent runtime detected → skill file installed", async () => {
 
   await withInitDaemon(async (ctx) => {
     // Bootstrap: unlock vault (keychain fast-path via C2 enrollment).
-    await bootstrapVault(ctx.port, ctx.services, "my-passphrase");
+    await bootstrapVault(ctx, "my-passphrase");
 
     // Create a fake .claude/ dir to trigger runtime detection.
     const fakeCwd = ctx.home;
@@ -374,4 +414,234 @@ test("init: --no-keychain does NOT read or write the master key during the init 
     // Keychain must be completely empty.
     assert.equal(base.entries.size, 0, "keychain must be empty after --no-keychain init");
   }, { keychain: counting });
+});
+
+// ── A14: derive per-runtime agent_ids + write per-agent tokens ───────────────
+
+/**
+ * Recursively collect every file path under `dir`. Used to scan a project cwd
+ * for any file that might leak the minted token bytes.
+ */
+async function walkFiles(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      out.push(...(await walkFiles(full)));
+    } else if (e.isFile()) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+test("init: derives the same agent_id for the same runtime across different cwds (no overwrite)", async () => {
+  // Both project A and project B detect the "claude" runtime. We run init in A
+  // first, capture the token from ~/.claude/settings.json (sandboxed userHome),
+  // then chdir to project B and run init again. The token in ~/.claude/settings.json
+  // must be unchanged — proving the agent_id is deterministic per-machine
+  // (not per-cwd), so a different project does not overwrite the original token.
+  const keychain = new MockKeychain();
+  await withInitDaemon(async (ctx) => {
+    await bootstrapVault(ctx, "my-passphrase");
+
+    // Two project dirs, both with .claude/ so detectAgentRuntimes finds "claude".
+    const projA = await mkdtemp(path.join(os.tmpdir(), "ss-init-projA-"));
+    const projB = await mkdtemp(path.join(os.tmpdir(), "ss-init-projB-"));
+    await mkdir(path.join(projA, ".claude"), { recursive: true });
+    await mkdir(path.join(projB, ".claude"), { recursive: true });
+
+    const settingsPath = path.join(ctx.userHome, ".claude", "settings.json");
+    const origCwd = process.cwd();
+    try {
+      // Run init from project A.
+      process.chdir(projA);
+      const resultA = await runInit(["--no-keychain"]);
+      assert.equal(resultA.ok, true);
+      assert.deepEqual(resultA.agent_runtimes_configured, ["claude"]);
+
+      const settingsA = JSON.parse(await readFile(settingsPath, "utf8")) as {
+        env: Record<string, string>;
+      };
+      const tokenA = settingsA.env.SECRET_SHUTTLE_AGENT_TOKEN;
+      assert.ok(typeof tokenA === "string" && tokenA.length > 0, "token must be present after init A");
+
+      // Token shape is "<agent_id>.<hmac>". The agent_id must be the
+      // deterministic derivation of the test's machine_id + "claude".
+      const machineId = (await readFile(path.join(ctx.home, "machine-id"), "utf8")).trim();
+      const expectedAgentId = deriveAutoAgentId("claude", machineId);
+      assert.ok(
+        tokenA.startsWith(`${expectedAgentId}.`),
+        `token must start with ${expectedAgentId}.; got prefix ${tokenA.split(".")[0]}`,
+      );
+
+      // Run init again from project B (different cwd, SAME machine_id + root_token).
+      process.chdir(projB);
+      const resultB = await runInit(["--no-keychain"]);
+      assert.equal(resultB.ok, true);
+
+      const settingsB = JSON.parse(await readFile(settingsPath, "utf8")) as {
+        env: Record<string, string>;
+      };
+      const tokenB = settingsB.env.SECRET_SHUTTLE_AGENT_TOKEN;
+      // Deterministic per-machine: same machine_id + same root_token → same token.
+      assert.equal(
+        tokenB, tokenA,
+        "claude token must be unchanged after re-running init from a different cwd",
+      );
+    } finally {
+      process.chdir(origCwd);
+      await rm(projA, { recursive: true, force: true });
+      await rm(projB, { recursive: true, force: true });
+    }
+  }, { keychain });
+});
+
+test("init: writes SECRET_SHUTTLE_REQUIRE_AGENT_TOKEN=1 alongside the token", async () => {
+  // The token is useless on its own — the agent runtime needs to know it MUST
+  // present an agent token (so a missing/cleared token fails closed instead of
+  // silently degrading to root via the socket file). REQUIRE_AGENT_TOKEN=1 must
+  // land in the same env block as the token.
+  const keychain = new MockKeychain();
+  await withInitDaemon(async (ctx) => {
+    await bootstrapVault(ctx, "my-passphrase");
+
+    const projDir = await mkdtemp(path.join(os.tmpdir(), "ss-init-require-"));
+    await mkdir(path.join(projDir, ".claude"), { recursive: true });
+
+    const origCwd = process.cwd();
+    try {
+      process.chdir(projDir);
+      const result = await runInit(["--no-keychain"]);
+      assert.equal(result.ok, true);
+
+      const settingsPath = path.join(ctx.userHome, ".claude", "settings.json");
+      const settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+        env: Record<string, string>;
+      };
+      assert.ok(
+        typeof settings.env?.SECRET_SHUTTLE_AGENT_TOKEN === "string",
+        "SECRET_SHUTTLE_AGENT_TOKEN must be set",
+      );
+      assert.equal(
+        settings.env.SECRET_SHUTTLE_REQUIRE_AGENT_TOKEN,
+        "1",
+        "SECRET_SHUTTLE_REQUIRE_AGENT_TOKEN must be set to \"1\" alongside the token",
+      );
+    } finally {
+      process.chdir(origCwd);
+      await rm(projDir, { recursive: true, force: true });
+    }
+  }, { keychain });
+});
+
+test("init: claude config written to user-private path, NEVER repo-committed file", async () => {
+  // After init runs in a project, walk the project cwd recursively and confirm
+  // NO file contains the minted token bytes. The token must live ONLY in the
+  // user-private ~/.claude/settings.json (sandboxed userHome here), never in
+  // anything that could be accidentally committed.
+  const keychain = new MockKeychain();
+  await withInitDaemon(async (ctx) => {
+    await bootstrapVault(ctx, "my-passphrase");
+
+    const projDir = await mkdtemp(path.join(os.tmpdir(), "ss-init-noleak-"));
+    await mkdir(path.join(projDir, ".claude"), { recursive: true });
+
+    const origCwd = process.cwd();
+    try {
+      process.chdir(projDir);
+      const result = await runInit(["--no-keychain"]);
+      assert.equal(result.ok, true);
+
+      // Grab the token from the user-private config.
+      const settings = JSON.parse(
+        await readFile(path.join(ctx.userHome, ".claude", "settings.json"), "utf8"),
+      ) as { env: Record<string, string> };
+      const token = settings.env.SECRET_SHUTTLE_AGENT_TOKEN;
+      assert.ok(typeof token === "string" && token.length > 0, "token must be present");
+
+      // Scan every file in projDir — none may contain the token bytes.
+      const files = await walkFiles(projDir);
+      for (const f of files) {
+        const buf = await readFile(f);
+        assert.equal(
+          buf.includes(token),
+          false,
+          `token must NEVER appear in a file inside the project cwd; leaked into ${f}`,
+        );
+      }
+
+      // Also confirm the user-private config really did receive it.
+      const userPrivatePath = path.join(ctx.userHome, ".claude", "settings.json");
+      const userPrivateBuf = await readFile(userPrivatePath, "utf8");
+      assert.ok(
+        userPrivateBuf.includes(token),
+        "user-private settings.json must contain the token",
+      );
+      // And it lives OUTSIDE the project cwd.
+      assert.ok(
+        !userPrivatePath.startsWith(projDir),
+        "user-private settings.json must be OUTSIDE the project cwd",
+      );
+
+      // File mode must be 0600 (user-only readable).
+      const st = await stat(userPrivatePath);
+      assert.equal(
+        st.mode & 0o777, 0o600,
+        `user-private settings.json must be mode 0600, got ${(st.mode & 0o777).toString(8)}`,
+      );
+    } finally {
+      process.chdir(origCwd);
+      await rm(projDir, { recursive: true, force: true });
+    }
+  }, { keychain });
+});
+
+test("init: codex/copilot get manual-install instructions in the summary, not config writes", async () => {
+  // claude + copilot both detected → claude gets a config write, copilot gets a
+  // manual-install instruction string in next_actions. The summary must
+  // distinguish "configured" vs "pending_manual" so the user knows what they
+  // still need to do by hand.
+  const keychain = new MockKeychain();
+  await withInitDaemon(async (ctx) => {
+    await bootstrapVault(ctx, "my-passphrase");
+
+    const projDir = await mkdtemp(path.join(os.tmpdir(), "ss-init-mixed-"));
+    await mkdir(path.join(projDir, ".claude"), { recursive: true });
+    await mkdir(path.join(projDir, ".github"), { recursive: true });
+    await writeFile(
+      path.join(projDir, ".github", "copilot-instructions.md"),
+      "# pre-existing copilot instructions\n",
+      "utf8",
+    );
+
+    const origCwd = process.cwd();
+    try {
+      process.chdir(projDir);
+      const result = await runInit(["--no-keychain"]);
+      assert.equal(result.ok, true);
+      const detected = result.agent_runtimes_detected as string[];
+      assert.ok(detected.includes("claude"), "claude detected");
+      assert.ok(detected.includes("copilot"), "copilot detected");
+
+      const configured = result.agent_runtimes_configured as string[];
+      const pending = result.agent_runtimes_pending_manual as string[];
+      assert.ok(configured.includes("claude"), "claude must be in agent_runtimes_configured");
+      assert.ok(pending.includes("copilot"), "copilot must be in agent_runtimes_pending_manual");
+      assert.equal(
+        configured.includes("copilot"), false,
+        "copilot must NOT be in agent_runtimes_configured",
+      );
+
+      const nextActions = result.next_actions as string[];
+      assert.ok(
+        nextActions.some((s) => s.includes("copilot") && s.includes("SECRET_SHUTTLE_AGENT_TOKEN")),
+        `next_actions must include a copilot manual-install instruction; got: ${JSON.stringify(nextActions)}`,
+      );
+    } finally {
+      process.chdir(origCwd);
+      await rm(projDir, { recursive: true, force: true });
+    }
+  }, { keychain });
 });

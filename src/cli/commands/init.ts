@@ -6,6 +6,10 @@ import { ok, outputJson } from "../../shared/result.js";
 import { ShuttleError } from "../../shared/errors.js";
 import { detectAgentRuntimes, type AgentRuntime } from "../agent-runtime-detect.js";
 import { agentInstallTarget, readBundledSkill } from "./agent.js";
+import { getSecretShuttleHome } from "../../shared/config.js";
+import { readMachineId } from "../../daemon/machine-id.js";
+import { deriveAutoAgentId } from "../../daemon/auth/agent-id.js";
+import { installAgentToken, type InstallResult } from "../init/agent-token-installers.js";
 
 interface HealthResponse {
   daemon: boolean;
@@ -204,7 +208,45 @@ export function initCommand(): Command {
           ? await installAgentSkills(process.cwd())
           : [];
 
-      // Step 5: Emit summary.
+      // Step 5: Per-runtime agent_id derivation + token mint + write to USER-
+      // PRIVATE runtime config. Each detected runtime gets its own deterministic
+      // agent_id (per-(machine_id, runtime) — same machine produces the same id
+      // across different cwds, so the token written to the global config does
+      // not collide between projects). Tokens NEVER land in repo-committed files.
+      //
+      // Read machine_id directly via readMachineId (set during daemon bootstrap by
+      // ensureMachineId). The init CLI runs as the same user as the daemon, so the
+      // 0600 file is readable. If machine_id is somehow absent (daemon not started
+      // by us this run + never started before), we skip the per-runtime token
+      // install rather than crash — the agent_runtimes_detected list is still
+      // emitted so the user can re-run init after the daemon writes the file.
+      const configured: string[] = [];
+      const pendingManual: string[] = [];
+      const nextActions: string[] = [];
+      if (runtimes.length > 0) {
+        const machineId = await readMachineId(getSecretShuttleHome());
+        if (machineId !== null) {
+          for (const runtime of runtimes) {
+            const agentId = deriveAutoAgentId(runtime, machineId);
+            const { token } = await daemonRequest<{ token: string; agent_id: string }>(
+              "POST",
+              "/v1/tokens/mint",
+              { agent_id: agentId },
+            );
+            const result: InstallResult = await installAgentToken(runtime, agentId, token);
+            if (result.status === "configured") {
+              configured.push(runtime);
+            } else {
+              pendingManual.push(runtime);
+              if (result.manualInstructions !== undefined) {
+                nextActions.push(result.manualInstructions);
+              }
+            }
+          }
+        }
+      }
+
+      // Step 6: Emit summary.
       outputJson(
         ok({
           daemon_running: true,
@@ -214,6 +256,9 @@ export function initCommand(): Command {
           vault_just_created: vaultJustCreated,
           keychain_enrolled: keychainEnrolled,
           agent_runtimes_detected: runtimes,
+          agent_runtimes_configured: configured,
+          agent_runtimes_pending_manual: pendingManual,
+          next_actions: nextActions,
           next_action: vaultJustCreated
             ? "secret-shuttle import --env-file .env  # optional: migrate existing secrets"
             : null,
