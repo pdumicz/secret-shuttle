@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ShuttleError } from "../../../shared/errors.js";
 import { asObject, optApprovalIds, optBool, optString, reqString } from "../validate.js";
 import { requireApprovals } from "../../approvals/require-approvals.js";
-import { getCurrentAgentId } from "../../auth/auth-context.js";
+import { getAuthContext, getCurrentAgentId } from "../../auth/auth-context.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { parseBootstrapYml } from "../../../cli/bootstrap/yml.js";
@@ -201,6 +201,17 @@ export function registerBootstrapRoutes(
     if (state === null) {
       throw new ShuttleError("bootstrap_batch_not_found", `unknown batch_id: ${batchId}`);
     }
+    // Owner enforcement (A11). MUST run BEFORE the completed short-circuit,
+    // the blind-mode guard, requireApprovals, and the executor — otherwise a
+    // non-owner could probe approval state, read cached batch results, or
+    // skip approval entirely via the in_progress/failed_partial path. Return
+    // the same bootstrap_batch_not_found code as a truly-missing batch so
+    // existence is not disclosed across agents. Root bypasses.
+    const callerAgentId = getCurrentAgentId();
+    const callerIsRoot = getAuthContext()?.isRoot === true;
+    if (!callerIsRoot && state.owner_agent_id !== callerAgentId) {
+      throw new ShuttleError("bootstrap_batch_not_found", `unknown batch_id: ${batchId}`);
+    }
     if (state.status === "completed") {
       return { ok: true, ...summarizeFromState(state) };
     }
@@ -275,6 +286,18 @@ export function registerBootstrapRoutes(
     services.lock.requireKey();
     const o = asObject(raw);
     const batchId = reqString(o, "batch_id");
+
+    // Owner enforcement (A11). Load state first so we can verify ownership
+    // before deleting. Both "missing batch" and "cross-owner batch" emit the
+    // same bootstrap_batch_not_found error so existence is not disclosed.
+    // Root bypasses.
+    const state = await services.bootstrapStore.get(batchId);
+    const callerAgentId = getCurrentAgentId();
+    const callerIsRoot = getAuthContext()?.isRoot === true;
+    if (state === null || (!callerIsRoot && state.owner_agent_id !== callerAgentId)) {
+      throw new ShuttleError("bootstrap_batch_not_found", `unknown batch_id: ${batchId}`);
+    }
+
     await services.bootstrapStore.delete(batchId);
     return { ok: true, removed: true };
   });
@@ -283,9 +306,15 @@ export function registerBootstrapRoutes(
   server.addRoute("GET", "/v1/bootstrap/list", async () => {
     services.lock.requireKey();
     const batches = await services.bootstrapStore.list();
+    // Owner-filtered (A11): non-root callers only see batches they created;
+    // root sees all. Cross-agent batches are silently omitted so non-owners
+    // cannot enumerate other agents' batch_ids via /list.
+    const callerAgentId = getCurrentAgentId();
+    const callerIsRoot = getAuthContext()?.isRoot === true;
+    const filtered = callerIsRoot ? batches : batches.filter((s) => s.owner_agent_id === callerAgentId);
     return {
       ok: true,
-      batches: batches.map((s) => ({
+      batches: filtered.map((s) => ({
         batch_id: s.batch_id,
         status: s.status,
         created_at: s.created_at,
