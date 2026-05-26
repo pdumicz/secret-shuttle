@@ -72,6 +72,21 @@ Examples:
 - `claude-7f2a1b8c2d4e3f5a`
 - `cursor-9c4d8e2a1b6f3a5d`
 
+### `machine_id` source
+
+`machine_id` is read from `<SHUTTLE_HOME>/machine-id`:
+
+- File: `<SHUTTLE_HOME>/machine-id` (mode 0600, owner-only)
+- Generated **once** on first daemon start if absent: `randomBytes(32).toString("base64url")` → written atomically
+- Read at every subsequent start; never regenerated (would invalidate every derived agent_id silently)
+- Daemon refuses to start if the file exists but is not mode 0600 (matches `root-token` fail-closed policy)
+- Reset is explicit: `secret-shuttle daemon reset-machine-id` (root-only, separate from `daemon rotate`) — operator opt-in, not implicit. Re-running `init` after reset re-derives all agent_ids and rewrites runtime configs.
+
+Why this rather than OS-provided machine IDs (e.g., `/etc/machine-id`, ioreg, registry):
+- Cross-platform consistency (one path, one format, one permission rule)
+- No leakage of host fingerprint across daemon installs
+- Operator-controllable lifecycle (reset is explicit and rare)
+
 **No cwd in the derivation.** This is intentional:
 
 - Claude / Cursor settings.json files are **global** per machine (`~/.claude/settings.json`, etc.)
@@ -143,23 +158,42 @@ Failure cases all return 401 with code `unauthorized` (uniform; no information l
 
 Central helper `getAuditActor(emissionSite, context)` resolves the right source.
 
+### Root is admin — bypasses owner checks across the board
+
+Root (caller whose bearer is the bare root_token, no `.hmac` suffix) is the daemon's administrative principal. Root **never sees an owner mismatch**: every owner-check site treats `caller.isRoot === true` as "allowed regardless of owner." Root can consume, list, revoke, continue, abandon, and inspect any approval / session / batch owned by any agent.
+
+There is no `approval_owner_mismatch` error code. The owner check is binary — either it permits (owner matches OR caller is root) or it returns `approval_not_found` (non-root mismatch). Root never reaches the "mismatch" branch.
+
+Rationale: a separate "root saw a mismatch" path adds surface (a route that returns different responses to root than to non-root for the same input) without operator value — root already enumerates via direct list endpoints.
+
 ### Owner enforcement — threaded through ALL of requireApprovals
 
-Owner enforcement is NOT confined to `validateConsumeBatch`. It is threaded through every step of `requireApprovals` so the response is indistinguishable from "doesn't exist" to non-root callers at every observation point:
+Owner enforcement is NOT confined to `validateConsumeBatch`. It is threaded through every step of `requireApprovals` so the response is indistinguishable from "doesn't exist" to non-root callers at every observation point. Root bypasses every check.
 
 | `requireApprovals` step | Owner check applied |
 |---|---|
-| Step 0: parse + lookup supplied approval IDs | For each supplied ID, fetch grant; if `owner_agent_id !== caller_agent_id` AND caller is not root → return `approval_not_found` (DO NOT proceed to binding compare) |
+| Step 0: parse + lookup supplied approval IDs | For each supplied ID, fetch grant; if caller is not root AND `owner_agent_id !== caller_agent_id` → return `approval_not_found` (DO NOT proceed to binding compare) |
 | Step 1: match supplied IDs against bindings | Already filtered by Step 0 |
-| Leftover handling: session-candidate evaluation | Session candidate's `owner_agent_id` must match caller (or caller is root); otherwise treat as no session match |
+| Leftover handling: session-candidate evaluation | If a supplied `session_id` exists but `owner_agent_id !== caller_agent_id` (and caller is not root), return `session_not_found` immediately — same code current store throws for unknown sessions. Do NOT fall through to "no session match → mint" because that fall-through is observably different from `session_not_found` and leaks existence. Session candidates discovered via pattern-match scanning (no client-supplied id) are simply filtered to caller-owned candidates before evaluation. |
 | `validateConsumeBatch` | Re-check owner on every grant + session about to be consumed; reject same as Step 0 if mismatch |
 | Final `consume` / `consumeBatch` | Defensive re-check (belt-and-suspenders); reject if anything slipped through |
 
-For non-root callers, every owner mismatch returns `approval_not_found`. No existence / status / match-result information leak.
+For non-root callers, every owner mismatch returns `approval_not_found` (for approvals) or `session_not_found` (for sessions). No existence / status / match-result information leak.
 
-For root callers, owner mismatch returns `approval_owner_mismatch` (root has enumeration privileges anyway, and explicit code aids admin debugging).
+For root callers, all the owner checks above are bypassed.
 
-Audit on owner-mismatch failures records both `actor_agent_id` (the failing caller) and `subject_agent_id` (the grant's real owner).
+Audit on owner-mismatch failures (non-root) records both `actor_agent_id` (the failing caller) and `subject_agent_id` (the grant's / session's real owner).
+
+### Session ownership enforcement at create / use / list / revoke
+
+The cross-owner non-disclosure rule applies uniformly to session routes:
+
+| Session operation | Non-root behavior on cross-owner | Root behavior |
+|---|---|---|
+| `POST /v1/approvals/session` create | N/A (no existing session referenced) | N/A |
+| Session fast-path use via supplied `session_id` | `session_not_found` if owner mismatch | Allowed |
+| `GET /v1/approvals/session` list | Returns only sessions where `owner_agent_id === caller_agent_id` | Returns all sessions |
+| `POST /v1/approvals/session/revoke` with `session_id` | `session_not_found` if owner mismatch (no state change) | Revokes any session |
 
 ### Schema additions
 
@@ -249,7 +283,20 @@ For codex: add the following to your shell rc and restart codex:
   export SECRET_SHUTTLE_REQUIRE_AGENT_TOKEN=1
 ```
 
-The manual path also lets users opt-in to per-project agent_ids by editing the token with a project-specific suffix.
+The manual path also lets users opt-in to per-project agent_ids by **minting a new token** for a custom `agent_id` (e.g., `claude-7f2a1b8c2d4e3f5a.proj-acme-prod`) via the daemon, then placing that token in the project's shell rc:
+
+```
+secret-shuttle agent mint --child-id <custom-id>
+# → prints { token: "<custom-id>.<hmac>" }
+
+# in project's shell rc (e.g., direnv .envrc):
+export SECRET_SHUTTLE_AGENT_TOKEN=<custom-id>.<hmac>
+export SECRET_SHUTTLE_REQUIRE_AGENT_TOKEN=1
+```
+
+The mint is performed under the user's primary shell (root scope, so any well-formed `agent_id` is allowed) or under the auto-installed runtime agent (which can only mint children inside its own namespace — `claude-7f2a…proj-acme-prod` is inside `claude-7f2a…`).
+
+**Important:** users cannot just edit an existing token string. The `hmac` segment is bound to the `agent_id` it was minted for; changing the `agent_id` invalidates the HMAC. A new agent_id requires a fresh mint.
 
 `init` summary distinguishes:
 ```json
@@ -275,9 +322,10 @@ No bare `agent_id` at the top level of audit records.
 
 - `agent_token_required` — `SECRET_SHUTTLE_REQUIRE_AGENT_TOKEN=1` set, no agent token found, client refused to fall back
 - `agent_token_invalid` — bearer parse or HMAC validation failed (alias of `unauthorized` but more specific where useful)
-- `approval_owner_mismatch` — root-only error variant (non-root gets `approval_not_found`)
 - `agent_id_invalid` — mint requested a malformed agent_id
 - `agent_id_namespace_violation` — non-root mint requested an agent_id outside caller's namespace
+
+Reuses existing `approval_not_found` and `session_not_found` for all non-root owner-mismatch cases (no new mismatch codes — root never sees a mismatch).
 
 ### What stays unchanged
 
