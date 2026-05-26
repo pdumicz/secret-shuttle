@@ -117,3 +117,111 @@ test("Session leftover: cross-owner supplied session_id → session_not_found (n
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Direct store-level guard tests (bypass requireApprovals entirely).
+//
+// The tests above all enter requireApprovals via the supplied-ID path, which
+// throws at Step 0 (Stage 0 lookup). That means the duplicated guards inside
+// ApprovalStore.consume / consumeBatch / validateConsumeBatch never run in
+// those tests. The tests below exercise each store method DIRECTLY to prove
+// the in-store guards work in isolation: cross-owner non-root must throw
+// approval_not_found; same-owner and root callers must succeed.
+// ---------------------------------------------------------------------------
+
+test("ApprovalStore.consume: cross-owner throws approval_not_found; same-owner & root succeed", () => {
+  const store = new ApprovalStore();
+  let idCross = "";
+  let idSame = "";
+  let idRoot = "";
+  withAuthContext({ agent_id: "claude-abc", isRoot: false }, () => {
+    idCross = store.create(binding).id;
+    idSame = store.create(binding).id;
+    idRoot = store.create(binding).id;
+  });
+  store.approve(idCross);
+  store.approve(idSame);
+  store.approve(idRoot);
+
+  // Cross-owner non-root: must throw approval_not_found (existence non-disclosure).
+  assert.throws(
+    () => store.consume(idCross, binding, "cursor-xyz"),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_not_found",
+  );
+
+  // Same-owner: succeeds.
+  const gSame = store.consume(idSame, binding, "claude-abc");
+  assert.equal(gSame.status, "used");
+
+  // Root bypass: succeeds.
+  const gRoot = store.consume(idRoot, binding, "root");
+  assert.equal(gRoot.status, "used");
+});
+
+test("ApprovalStore.consumeBatch: cross-owner throws approval_not_found; same-owner & root succeed", () => {
+  const store = new ApprovalStore();
+  let idCross = "";
+  let idSame = "";
+  let idRoot = "";
+  withAuthContext({ agent_id: "claude-abc", isRoot: false }, () => {
+    idCross = store.create(binding).id;
+    idSame = store.create(binding).id;
+    idRoot = store.create(binding).id;
+  });
+  store.approve(idCross);
+  store.approve(idSame);
+  store.approve(idRoot);
+
+  // Cross-owner non-root: must throw approval_not_found, with no mutations
+  // (atomic batch).
+  assert.throws(
+    () => store.consumeBatch([{ id: idCross, binding }], "cursor-xyz"),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_not_found",
+  );
+  // Confirm idCross is still granted (batch did not mutate on failure).
+  assert.equal(store.get(idCross)?.status, "granted");
+
+  // Same-owner: succeeds.
+  const sameResults = store.consumeBatch([{ id: idSame, binding }], "claude-abc");
+  assert.equal(sameResults.length, 1);
+  assert.equal(sameResults[0]!.status, "used");
+
+  // Root bypass: succeeds.
+  const rootResults = store.consumeBatch([{ id: idRoot, binding }], "root");
+  assert.equal(rootResults.length, 1);
+  assert.equal(rootResults[0]!.status, "used");
+});
+
+test("ApprovalStore.validateConsumeBatch: cross-owner throws approval_not_found; same-owner & root succeed", () => {
+  const store = new ApprovalStore();
+  let idCross = "";
+  let idSame = "";
+  let idRoot = "";
+  withAuthContext({ agent_id: "claude-abc", isRoot: false }, () => {
+    idCross = store.create(binding).id;
+    idSame = store.create(binding).id;
+    idRoot = store.create(binding).id;
+  });
+  store.approve(idCross);
+  store.approve(idSame);
+  store.approve(idRoot);
+
+  // Cross-owner non-root: must throw approval_not_found.
+  assert.throws(
+    () => store.validateConsumeBatch([{ id: idCross, binding }], "cursor-xyz"),
+    (e: unknown) => e instanceof ShuttleError && e.code === "approval_not_found",
+  );
+
+  // validateConsumeBatch is a pure precheck — no mutations even on success.
+  // Confirm idCross is still granted (it would be regardless, but assert
+  // explicitly for clarity).
+  assert.equal(store.get(idCross)?.status, "granted");
+
+  // Same-owner: must NOT throw, must NOT mutate.
+  store.validateConsumeBatch([{ id: idSame, binding }], "claude-abc");
+  assert.equal(store.get(idSame)?.status, "granted");
+
+  // Root bypass: must NOT throw, must NOT mutate.
+  store.validateConsumeBatch([{ id: idRoot, binding }], "root");
+  assert.equal(store.get(idRoot)?.status, "granted");
+});
