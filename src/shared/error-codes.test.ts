@@ -153,12 +153,15 @@ test("registry total entry count (sanity check)", () => {
   // Burst 4 Task C1 adds 1 more (bootstrap_capture_url_invalid) = 133 total.
   // Burst 4 Task C6 adds 1 more (bootstrap_capture_redirect_blocked) = 134.
   // Burst 4 Task C8 adds 1 more (bootstrap_batch_abandoned) = 135.
+  // Burst 4 Task C16 adds 4 more (bootstrap_capture_skipped,
+  // bootstrap_capture_timeout, bootstrap_capture_aborted,
+  // bootstrap_capture_cleanup_failed) = 139 total.
   // Note: daemon_start_failed was removed (P3.1) — it was registered but never
   // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 135, `expected 135 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 139, `expected 139 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -248,6 +251,46 @@ test("error-codes: bootstrap_batch_abandoned registered with CONFLICT + null nex
     /abandoned/i,
     "hint should reference that the batch was abandoned",
   );
+});
+
+test("error-codes: bootstrap_capture_skipped → TRANSIENT exit + retry hint (C16)", () => {
+  const entry = lookupErrorCode("bootstrap_capture_skipped");
+  assert.ok(entry, "bootstrap_capture_skipped must be registered");
+  assert.strictEqual(entry.exitCode, EXIT_CODE_TRANSIENT);
+  assert.match(entry.hint("") ?? "", /Re-run bootstrap/);
+  // No nextAction: re-running bootstrap is the same command the user just
+  // invoked, so a literal recovery command would be redundant; the hint
+  // already names it.
+  const next = entry.nextAction ? entry.nextAction("") : null;
+  assert.strictEqual(next, null);
+});
+
+test("error-codes: bootstrap_capture_timeout → TRANSIENT exit + timeout hint (C16)", () => {
+  const entry = lookupErrorCode("bootstrap_capture_timeout");
+  assert.ok(entry, "bootstrap_capture_timeout must be registered");
+  assert.strictEqual(entry.exitCode, EXIT_CODE_TRANSIENT);
+  assert.match(entry.hint("") ?? "", /5 minutes/);
+  assert.match(entry.hint("") ?? "", /Capture/);
+});
+
+test("error-codes: bootstrap_capture_aborted → TRANSIENT exit, null hint (C16)", () => {
+  const entry = lookupErrorCode("bootstrap_capture_aborted");
+  assert.ok(entry, "bootstrap_capture_aborted must be registered");
+  assert.strictEqual(entry.exitCode, EXIT_CODE_TRANSIENT);
+  // No hint: the user explicitly aborted, so there's nothing actionable to
+  // suggest. Re-running bootstrap is allowed but no nag.
+  assert.strictEqual(entry.hint(""), null);
+});
+
+test("error-codes: bootstrap_capture_cleanup_failed → CONFLICT exit + nextAction blind-end (C16)", () => {
+  const entry = lookupErrorCode("bootstrap_capture_cleanup_failed");
+  assert.ok(entry, "bootstrap_capture_cleanup_failed must be registered");
+  assert.strictEqual(entry.exitCode, EXIT_CODE_CONFLICT);
+  assert.match(entry.hint("") ?? "", /capture browser tab/);
+  assert.match(entry.hint("") ?? "", /blind end/);
+  // Explicit recovery command so an agent can execute it directly.
+  assert.ok(entry.nextAction);
+  assert.strictEqual(entry.nextAction!(""), "secret-shuttle blind end");
 });
 
 test("error-codes: bootstrap_batch_not_found registered with NOT_FOUND exit code + nextAction", () => {

@@ -116,6 +116,18 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
       "source.url for kind=capture must be https, must not embed credentials, must not be an IP literal or localhost. Edit secret-shuttle.yml and re-run.",
     nextAction: () => "secret-shuttle bootstrap",
   },
+  bootstrap_capture_skipped: {
+    exitCode: EXIT_CODE_TRANSIENT,
+    hint: () => "Re-run bootstrap to retry the skipped secret.",
+  },
+  bootstrap_capture_timeout: {
+    exitCode: EXIT_CODE_TRANSIENT,
+    hint: () => "5 minutes elapsed without a capture. Re-run bootstrap and click Capture promptly.",
+  },
+  bootstrap_capture_aborted: {
+    exitCode: EXIT_CODE_TRANSIENT,
+    hint: () => null,
+  },
   bootstrap_destination_unknown: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => "Edit secret-shuttle.yml: replace the unknown destination shorthand with one of: vercel:<env>, github-actions:owner/repo, cloudflare:<env>, supabase:<projectref>.",
@@ -241,6 +253,17 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     hint: () =>
       "The capture tab is no longer on the host declared in secret-shuttle.yml. Navigate back to the expected host (or fix the yml) and retry the capture step.",
     nextAction: () => null,
+  },
+  bootstrap_capture_cleanup_failed: {
+    // CONFLICT: cleanup verification could not confirm the bootstrap-owned
+    // capture tab is closed, so the daemon halts and asks the human to
+    // close it manually then `blind end` to release the residual blind
+    // mode the executor left active for safety. nextAction is the explicit
+    // recovery command so agents can execute it without prose-parsing.
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () =>
+      "The capture browser tab could not be verified closed. Close it manually if open, then run `secret-shuttle blind end`.",
+    nextAction: () => "secret-shuttle blind end",
   },
   bootstrap_batch_abandoned: {
     exitCode: EXIT_CODE_CONFLICT,
