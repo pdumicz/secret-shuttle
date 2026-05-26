@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
+import { parseBearer, deriveHmac } from "./auth/token-derive.js";
+import { withAuthContext, type AuthContext } from "./auth/auth-context.js";
 
 type RouteHandler = (req: IncomingMessage, body: unknown) => Promise<unknown> | unknown;
 type RawHandler = (req: IncomingMessage, body: unknown, res: ServerResponse) => Promise<void> | void;
@@ -20,7 +22,7 @@ const ALLOWED_HOST_PREFIXES = ["127.0.0.1:", "localhost:", "[::1]:"];
 const MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MB
 
 export class DaemonServer {
-  private readonly token: string;
+  private token: string;
   private readonly routes = new Map<string, RouteHandler>();
   private readonly rawRoutes: { method: Method; pattern: RegExp; handler: RawHandler }[] = [];
   private readonly streamingRoutes = new Map<string, StreamingHandler>();
@@ -29,6 +31,17 @@ export class DaemonServer {
 
   constructor(opts: DaemonServerOptions) {
     this.token = opts.token;
+  }
+
+  /**
+   * Hot-swap the in-memory root token. Used by /v1/daemon/rotate (Task A13)
+   * to atomically invalidate the previous token + all derived agent tokens.
+   * JS is single-threaded so the assignment is atomic; in-flight requests
+   * that already passed auth continue running under the OLD token's
+   * AuthContext (correct — their work was authorized).
+   */
+  replaceRootToken(t: string): void {
+    this.token = t;
   }
 
   addRoute(method: Method, path: string, handler: RouteHandler): void {
@@ -110,21 +123,59 @@ export class DaemonServer {
       return;
     }
 
-    // Bearer token auth
+    // Bearer token auth + AsyncLocalStorage wrap.
     const authHeader = req.headers["authorization"];
     const auth = Array.isArray(authHeader) ? (authHeader[0] ?? "") : (authHeader ?? "");
-    const expected = Buffer.from(`Bearer ${this.token}`);
-    const actual = Buffer.from(auth);
-    if (actual.byteLength !== expected.byteLength || !timingSafeEqual(actual, expected)) {
-      // writeError defaults to 400 for ShuttleError; override to 401 for auth failure.
-      const err = new ShuttleError("unauthorized", "Invalid or missing bearer token.");
-      const payload = errorToJson(err);
-      res.statusCode = 401;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify(payload));
+    const BEARER = "Bearer ";
+    if (!auth.startsWith(BEARER)) {
+      this.writeUnauthorized(res);
+      return;
+    }
+    const bearer = auth.slice(BEARER.length);
+
+    let authCtx: AuthContext;
+    try {
+      const parsed = parseBearer(bearer);
+      if (parsed.kind === "root") {
+        const expected = Buffer.from(this.token);
+        const actual = Buffer.from(parsed.token);
+        if (actual.byteLength !== expected.byteLength || !timingSafeEqual(actual, expected)) {
+          this.writeUnauthorized(res);
+          return;
+        }
+        authCtx = { agent_id: "root", isRoot: true };
+      } else {
+        const expectedHmac = deriveHmac(this.token, parsed.agentId);
+        const expected = Buffer.from(expectedHmac);
+        const actual = Buffer.from(parsed.hmac);
+        if (actual.byteLength !== expected.byteLength || !timingSafeEqual(actual, expected)) {
+          this.writeUnauthorized(res);
+          return;
+        }
+        authCtx = { agent_id: parsed.agentId, isRoot: false };
+      }
+    } catch {
+      // parseBearer can throw ShuttleError(agent_token_invalid) for reserved 'root'
+      // agent_id or malformed agent_id charset. Surface uniformly as 401 unauthorized
+      // — don't leak the specific parse failure to unauthenticated callers.
+      this.writeUnauthorized(res);
       return;
     }
 
+    await withAuthContext(authCtx, async () => {
+      await this.dispatchHandler(req, res, urlPath);
+    });
+  }
+
+  private writeUnauthorized(res: ServerResponse): void {
+    const err = new ShuttleError("unauthorized", "Invalid or missing bearer token.");
+    const payload = errorToJson(err);
+    res.statusCode = 401;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(payload));
+  }
+
+  private async dispatchHandler(req: IncomingMessage, res: ServerResponse, urlPath: string): Promise<void> {
     const streamingKey = `${req.method ?? "GET"} ${urlPath}`;
     const streamingHandler = this.streamingRoutes.get(streamingKey);
     if (streamingHandler !== undefined) {
