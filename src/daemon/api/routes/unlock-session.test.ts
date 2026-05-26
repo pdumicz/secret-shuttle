@@ -411,6 +411,51 @@ test("unlock-session: keychain unavailable → no enrollment, no error", async (
   }, { keychain });
 });
 
+// ── P2.1: marker backfill on keychain fast-path ─────────────────────────────
+
+test("keychain fast-path: backfills marker for pre-marker enrollments", async () => {
+  // Simulates a user who enrolled before commit 05e8e7e (marker pattern).
+  // They have the real master key entry in the keychain but NO marker entry.
+  // After a successful fast-path unlock, the marker must be written so that
+  // subsequent /v1/keychain/status calls report enrolled: true.
+  const keychain = new MockKeychain();
+
+  await withUnlockUiDaemon(async (ctx) => {
+    // Bootstrap: create vault + envelope via passphrase, capture master key.
+    const { masterKey, envelopeId } = await bootstrapVaultWithPassphrase(ctx.port, ctx.services);
+
+    // Pre-load the real master key. The marker was written by C2 during bootstrap,
+    // so delete it to simulate the pre-05e8e7e enrollment state (real key present,
+    // no marker).
+    await keychain.set("secret-shuttle", envelopeId, masterKey);
+    await keychain.entries.delete(`secret-shuttle:${envelopeId}:enrolled`);
+    assert.equal(
+      await keychain.get("secret-shuttle", `${envelopeId}:enrolled`),
+      null,
+      "marker must be absent before fast-path unlock (simulates pre-05e8e7e state)",
+    );
+
+    // Re-lock first.
+    ctx.services.lock.lock();
+
+    // POST /v1/unlock/start — should hit the keychain fast path.
+    const res = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as Record<string, unknown>;
+    assert.equal(body.unlocked, true, "unlocked must be true (fast-path succeeded)");
+    assert.equal(body.source, "keychain", "source must be keychain");
+
+    // After unlock, the marker MUST have been backfilled.
+    const marker = await keychain.get("secret-shuttle", `${envelopeId}:enrolled`);
+    assert.ok(marker !== null, "marker must be present after fast-path unlock (backfilled)");
+    assert.equal(marker.toString(), "enrolled", "marker value must be 'enrolled'");
+  }, { keychain });
+});
+
 // ── P1.1 opt-out regression tests ──────────────────────────────────────────
 
 test("unlock-session: opt-out vault skips keychain (no read, no enroll)", async () => {

@@ -299,6 +299,62 @@ test("keychain enable clears opt-out flag", async () => {
   }, keychain);
 });
 
+// ── P2.2: opted_out field + stale marker handling ──────────────────────────
+
+test("GET /v1/keychain/status: opted_out field is false when keychain_opt_out not set", async () => {
+  const keychain = new MockKeychain();
+  await withKeychainDaemon(async (ctx) => {
+    await bootstrapVault(ctx.services);
+    const r = await call(ctx.port, "GET", "/v1/keychain/status");
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { opted_out: boolean }).opted_out, false);
+  }, keychain);
+});
+
+test("GET /v1/keychain/status: opted_out field reflects envelope.keychain_opt_out", async () => {
+  const keychain = new MockKeychain();
+  await withKeychainDaemon(async (ctx) => {
+    // (a) keychain_opt_out undefined → opted_out: false (covered by other tests)
+    // (b) keychain_opt_out: false → opted_out: false
+    const env0 = await bootstrapVault(ctx.services);
+    const env = await readEnvelope();
+    assert.ok(env !== null);
+    await writeEnvelope({ ...env, keychain_opt_out: false });
+    const r1 = await call(ctx.port, "GET", "/v1/keychain/status");
+    assert.equal((r1.body as { opted_out: boolean }).opted_out, false, "opted_out must be false when keychain_opt_out: false");
+
+    // (c) keychain_opt_out: true → opted_out: true
+    await writeEnvelope({ ...env, keychain_opt_out: true });
+    const r2 = await call(ctx.port, "GET", "/v1/keychain/status");
+    assert.equal((r2.body as { opted_out: boolean }).opted_out, true, "opted_out must be true when keychain_opt_out: true");
+    // suppress unused warning
+    void env0;
+  }, keychain);
+});
+
+test("GET /v1/keychain/status: opt-out vault reports enrolled: false even with stale marker", async () => {
+  // P2.2: a stale marker left by a crash must not trick status into reporting
+  // enrolled: true when the user has opted out.
+  const keychain = new MockKeychain();
+  await withKeychainDaemon(async (ctx) => {
+    const { envelopeId } = await bootstrapVault(ctx.services);
+
+    // Set opt-out flag.
+    const env = await readEnvelope();
+    assert.ok(env !== null);
+    await writeEnvelope({ ...env, keychain_opt_out: true });
+
+    // Pre-populate a stale marker entry (as if a crash left it behind).
+    await keychain.set("secret-shuttle", `${envelopeId}:enrolled`, Buffer.from("enrolled"));
+
+    const r = await call(ctx.port, "GET", "/v1/keychain/status");
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { enrolled: boolean }).enrolled, false, "enrolled must be false when opted out (stale marker ignored)");
+    assert.equal((r.body as { opted_out: boolean }).opted_out, true, "opted_out must be true");
+    assert.equal((r.body as { vault_id: string }).vault_id, envelopeId);
+  }, keychain);
+});
+
 test("GET /v1/keychain/status: reads ONLY the marker entry, never the real master key entry", async () => {
   // P2: status uses keychain.get on the marker (<id>:enrolled), NOT on the real
   // key entry (<id>). Track which accounts are read to verify the real key is

@@ -43,6 +43,15 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
           try {
             services.lock.unlock(cached);
             await services.vault.ensureInitialized(); // throws vault_decryption_failed if key is wrong
+            // P2.1 fix: backfill the marker for users who enrolled before the
+            // marker pattern shipped (commit 05e8e7e). Without this, status
+            // would report enrolled: false even though their unlocks work
+            // passwordlessly. Idempotent: overwriting with the same value is fine.
+            try {
+              await keychain.set("secret-shuttle", `${envelope.id}:enrolled`, Buffer.from("enrolled"));
+            } catch {
+              // Best-effort; do not fail an already-succeeded unlock.
+            }
             await writeDaemonAudit({ action: "unlock", ok: true, source: "keychain" });
             return { unlocked: true, source: "keychain" };
           } catch (err) {

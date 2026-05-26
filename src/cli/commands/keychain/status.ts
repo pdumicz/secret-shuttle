@@ -6,13 +6,14 @@ export function keychainStatusCommand(): Command {
   return new Command("status")
     .description("Report keychain availability + enrollment state.")
     .action(async () => {
-      const r = await daemonRequest<{ available: boolean; enrolled: boolean; vault_id: string | null }>(
+      const r = await daemonRequest<{ available: boolean; enrolled: boolean; opted_out: boolean; vault_id: string | null }>(
         "GET",
         "/v1/keychain/status",
       );
       outputJson(ok({
         available: r.available,
         enrolled: r.enrolled,
+        opted_out: r.opted_out,
         vault_id: r.vault_id,
       }));
     })

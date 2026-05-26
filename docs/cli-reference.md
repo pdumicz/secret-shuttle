@@ -311,12 +311,12 @@ Manage OS keychain enrollment for passwordless unlock.
 
 - `secret-shuttle keychain enable` — stores the master key in the OS keychain (requires an unlocked vault). Fires Touch ID on macOS, libsecret prompt on Linux, transparent on Windows. Subsequent unlocks skip the passphrase UI.
 - `secret-shuttle keychain disable` — removes the keychain entry. Idempotent. Subsequent unlocks fall back to the passphrase UI.
-- `secret-shuttle keychain status` — reports `{ available, enrolled, vault_id }`.
+- `secret-shuttle keychain status` — reports `{ available, enrolled, opted_out, vault_id }`. `enrolled` is true only when the keychain holds the master key and `keychain disable` has not been called. `opted_out` mirrors the envelope's opt-out flag; when true, `enrolled` is always false regardless of keychain state.
 
 Examples:
 ```bash
 secret-shuttle keychain status
-# → { ok: true, available: true, enrolled: true, vault_id: "..." }
+# → { ok: true, available: true, enrolled: true, opted_out: false, vault_id: "..." }
 
 secret-shuttle keychain enable
 # → { ok: true, enrolled: true }

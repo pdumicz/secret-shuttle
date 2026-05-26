@@ -62,10 +62,12 @@ export function registerKeychainRoutes(server: DaemonServer, services: DaemonSer
     const keychain = services.keychain ?? getKeychainAdapter();
     const available = await keychain.isAvailable();
     let enrolled = false;
+    let opted_out = false;
     let vault_id: string | null = null;
     if (envelope !== null) {
       vault_id = envelope.id;
-      if (available) {
+      opted_out = envelope.keychain_opt_out === true;
+      if (available && !opted_out) {
         // P2 post-ship fix: read the non-secret marker entry instead of calling
         // hasEntry(). Some adapter implementations of hasEntry() used
         // findCredentialsAsync() which materializes ALL passwords under the
@@ -75,10 +77,14 @@ export function registerKeychainRoutes(server: DaemonServer, services: DaemonSer
         // non-sensitive by design: it reveals only that this vault is enrolled.
         // The real master key entry's bytes never enter daemon memory for a
         // status query.
+        //
+        // P2.2 fix: when opted_out is true, skip the marker check entirely.
+        // A stale marker left by a crash must not report enrolled: true when
+        // the user has opted out. enrolled stays false in that case.
         const marker = await keychain.get("secret-shuttle", `${envelope.id}:enrolled`);
         enrolled = marker !== null;
       }
     }
-    return { available, enrolled, vault_id };
+    return { available, enrolled, opted_out, vault_id };
   });
 }
