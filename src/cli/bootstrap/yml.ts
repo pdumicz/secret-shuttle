@@ -1,5 +1,6 @@
 import { parse as parseYaml } from "yaml";
 import { ShuttleError } from "../../shared/errors.js";
+import { parseSecretRef } from "../../shared/refs.js";
 
 export type BootstrapSource =
   | { kind: "capture"; url: string }
@@ -75,6 +76,19 @@ function parseSource(secretName: string, raw: unknown): BootstrapSource {
   if (kind === "existing") {
     if (typeof s.ref !== "string" || !s.ref.startsWith("ss://")) {
       fail(`secrets.${secretName}.source: kind=existing requires ref (ss://...)`);
+    }
+    // Validate the full ref shape (source/environment/name segments + regex
+    // checks) at parse time, BEFORE the approval is minted. Without this, a
+    // malformed ref like "ss://local/prod" (missing name segment) would still
+    // pass the .startsWith("ss://") check, flow through to plan construction,
+    // trigger planHasProductionSource's fail-closed branch (which mints an
+    // approval), and only fail at executor time with no actionable recovery.
+    try {
+      parseSecretRef(s.ref);
+    } catch (e) {
+      fail(
+        `secrets.${secretName}.source.ref ${JSON.stringify(s.ref)} is not a valid ss:// ref: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
     return { kind: "existing", ref: s.ref };
   }

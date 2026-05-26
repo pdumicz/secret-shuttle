@@ -114,3 +114,91 @@ test("parseBootstrapYml: rejects malformed yaml", () => {
     (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_plan_invalid",
   );
 });
+
+test("parseBootstrapYml: existing source with missing name segment → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://local/prod"
+    destinations:
+      - "vercel:development"
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_plan_invalid" && /ss:\/\/local\/prod/.test(e.message),
+  );
+});
+
+test("parseBootstrapYml: existing source with missing env+name segments → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://local"
+    destinations:
+      - "vercel:development"
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("parseBootstrapYml: existing source with bare ss:// prefix → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://"
+    destinations:
+      - "vercel:development"
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("parseBootstrapYml: existing source with invalid characters in name segment → bootstrap_plan_invalid", () => {
+  // The NAME_RE in refs.ts requires names to start with a letter/underscore.
+  // A name starting with a digit should fail.
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://local/prod/9starts-with-digit"
+    destinations:
+      - "vercel:development"
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("parseBootstrapYml: existing source with well-formed ref → still passes (regression guard)", () => {
+  const yml = `
+version: 1
+secrets:
+  FOO:
+    source:
+      kind: existing
+      ref: "ss://local/prod/EXISTING_PROD"
+    destinations:
+      - "vercel:development"
+`;
+  const result = parseBootstrapYml(yml);
+  assert.strictEqual(result.secrets.length, 1);
+  assert.strictEqual(result.secrets[0]!.name, "FOO");
+  assert.strictEqual(result.secrets[0]!.source.kind, "existing");
+  assert.strictEqual((result.secrets[0]!.source as { ref: string }).ref, "ss://local/prod/EXISTING_PROD");
+});
