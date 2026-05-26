@@ -211,13 +211,25 @@ export class Vault {
     if (!(await fileExists(paths.vaultPath))) {
       throw new ShuttleError("vault_not_initialized", "Secret Shuttle is not initialized. Run `secret-shuttle init`.");
     }
-    const key = this.keyProvider();
+    // No key needed for the file read — defer requireKey() until immediately
+    // before the sync decrypt so the master-key copy doesn't linger across an
+    // await that doesn't need it.
     const file = await readJsonFile<EncryptedVaultFile>(paths.vaultPath);
-    const plaintext = decryptVault(file, key);
+    const key = this.keyProvider();
+    let plaintext: VaultPlaintext;
+    try {
+      plaintext = decryptVault(file, key);
+    } finally {
+      // Scrub the key copy in `finally` so a throw from decryptVault (e.g.
+      // corrupt file) still wipes the master-key bytes from this Buffer.
+      key.fill(0);
+    }
     if (plaintext.version !== 1 || !Array.isArray(plaintext.secrets)) {
       throw new ShuttleError("invalid_vault", "Secret Shuttle vault contents are invalid.");
     }
     if (this.migrateFingerprints(plaintext)) {
+      // write() acquires its own keyProvider() copy and scrubs it in its own
+      // try/finally — no coordination needed here.
       await this.write(plaintext);
     }
     return plaintext;
@@ -267,8 +279,19 @@ export class Vault {
   private async write(plaintext: VaultPlaintext): Promise<void> {
     const paths = getShuttlePaths();
     await ensureShuttleHome(paths);
+    // Defer requireKey() until immediately before the sync encrypt — the file
+    // write that follows doesn't need the key, so don't hold it across that
+    // await.
     const key = this.keyProvider();
-    await writeJsonFileAtomic(paths.vaultPath, encryptVault(plaintext, key));
+    let encrypted: EncryptedVaultFile;
+    try {
+      encrypted = encryptVault(plaintext, key);
+    } finally {
+      // Scrub in `finally` so an encryptVault throw (rare — only on internal
+      // error) still wipes the master-key bytes from this Buffer.
+      key.fill(0);
+    }
+    await writeJsonFileAtomic(paths.vaultPath, encrypted);
   }
 }
 

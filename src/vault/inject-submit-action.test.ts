@@ -12,7 +12,9 @@ async function withVault<T>(fn: (v: Vault) => Promise<T>): Promise<T> {
   process.env.SECRET_SHUTTLE_HOME = home;
   try {
     const key = randomBytes(32);
-    const vault = new Vault(() => key);
+    // Match production contract: keyProvider must return a fresh copy on each
+    // call (Vault.read/write now scrub the returned Buffer in finally).
+    const vault = new Vault(() => Buffer.from(key));
     await vault.ensureInitialized();
     return await fn(vault);
   } finally {

@@ -17,7 +17,9 @@ test("vault stores encrypted secrets and returns metadata only", async () => {
 
   try {
     const key = randomBytes(32);
-    const vault = new Vault(() => key);
+    // Match production contract: keyProvider returns a fresh copy each call
+    // (Vault.read/write scrub the returned Buffer in finally).
+    const vault = new Vault(() => Buffer.from(key));
     await vault.ensureInitialized();
     const metadata = await vault.upsertSecret({
       name: "STRIPE_WEBHOOK_SECRET",
@@ -84,8 +86,9 @@ test("legacy sha256 fingerprint is transparently migrated to hmac-sha256 on firs
     const paths = getShuttlePaths(home);
     await writeJsonFileAtomic(paths.vaultPath, encryptVault(legacyPlaintext, key));
 
-    // First read: migration should re-key the fingerprint.
-    const vault = new Vault(() => key);
+    // First read: migration should re-key the fingerprint. keyProvider must
+    // return a fresh copy each call to match production (Vault scrubs in finally).
+    const vault = new Vault(() => Buffer.from(key));
     const metadata = await vault.inspect("ss://stripe/prod/LEGACY_SECRET");
 
     assert.ok(
@@ -137,7 +140,8 @@ async function withVault<T>(
   process.env.SECRET_SHUTTLE_HOME = home;
   try {
     const key = randomBytes(32);
-    const vault = new Vault(() => key);
+    // Match production contract: keyProvider returns a fresh copy each call.
+    const vault = new Vault(() => Buffer.from(key));
     await vault.ensureInitialized();
     for (const s of seedRefs) {
       await vault.upsertSecret({
@@ -339,7 +343,8 @@ async function setUpTestVault(opts: {
   const originalHome = process.env.SECRET_SHUTTLE_HOME;
   process.env.SECRET_SHUTTLE_HOME = home;
   const key = randomBytes(32);
-  const vault = new Vault(() => key);
+  // Match production contract: keyProvider returns a fresh copy each call.
+  const vault = new Vault(() => Buffer.from(key));
   await vault.ensureInitialized();
   for (const s of opts.secrets) {
     await vault.upsertSecret({ ...s, allowedDomains: ["example.com"] });
