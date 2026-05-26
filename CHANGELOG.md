@@ -169,3 +169,34 @@
 - `DaemonServices` gains an optional `keychain?: KeychainAdapter` field for test injection. Production uses the platform-detected adapter via `getKeychainAdapter()`.
 
 - The keychain fast-path's catch block is narrowed: only `vault_decryption_failed` and `invalid_master_key` are treated as expected key-validation failures. Other errors (filesystem, audit-write) are audited then re-thrown so they surface to the caller instead of silently routing to the passphrase UI.
+
+### Plan 5g — `secret-shuttle bootstrap`
+
+**Added:**
+
+- `secret-shuttle bootstrap` — provision an entire project's secrets in one approval. Reads `secret-shuttle.yml`, computes the diff vs. the vault, mints a single bootstrap-action approval covering the whole plan, returns `approval_required`. On `--continue --batch <id> --approval-id <id>`, walks the plan and calls existing primitives (generate / template run) under the bootstrap approval's authority — no inner approvals needed.
+
+- Supports `random_32_bytes`, `random_64_bytes`, and `existing` source kinds. Destination shorthands: `vercel:<env>`, `github-actions:<owner/repo>`, `cloudflare:<env>`, `supabase:<project>` — mapping to the four shipped templates.
+
+- Diff-based idempotency: secrets already in the vault are skipped (override with `--force`). Partial-success enum on failure; retry with same `--batch <id>` is idempotent and resumes from the failed step.
+
+- `bootstrap --list` and `bootstrap --abandon --batch <id>` for batch state management.
+
+- New error codes: `bootstrap_plan_invalid`, `bootstrap_batch_not_found`, `bootstrap_destination_unknown` (all with `next_action`).
+
+- New audit actions: `bootstrap_plan`, `bootstrap_step`.
+
+- New approval binding action: `"bootstrap"`. Hub UI renders the plan summary as a multi-secret card with one [Approve] / [Deny] pair.
+
+**Changed:**
+
+- Internal: three route handlers (`/v1/secrets/generate`, `/v1/secrets/reveal-capture`, `/v1/templates/run`) refactored to expose their core logic as exported functions (`generateSecretCore`, `revealCaptureCore`, `runTemplateCore`). HTTP shells unchanged externally; the bootstrap executor calls the cores directly with a `bootstrapAuthority` context that bypasses inner `requireApprovals` when valid. **Security invariant**: `bootstrapAuthority` is server-internal — HTTP shells NEVER accept it from request bodies.
+
+**Internal:**
+
+- `BootstrapStore` persists batch state to `${SHUTTLE_HOME}/bootstrap-batches/<id>.json` (mode 0600).
+- `yaml@^2.x` added as a runtime dependency.
+
+**Known limitations (v1):**
+
+- `source: { kind: capture, url }` is **not yet supported** in bootstrap. `reveal-capture` requires a live browser handle (a marked field), which bootstrap can't construct from a URL alone. The bootstrap route rejects capture sources at plan time with a clear error. Workaround: run `secret-shuttle reveal-capture` manually for these secrets, then reference them via `source: { kind: existing, ref: ss://... }` in the yml.

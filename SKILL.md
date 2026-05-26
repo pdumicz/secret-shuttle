@@ -9,6 +9,15 @@ You — the agent — can read files and run commands. Anything that touches `.e
 ## Usage
 
 ```bash
+# Provision an entire project's secrets in one approval — primary path for new projects:
+secret-shuttle bootstrap
+# → Phase 1: reads secret-shuttle.yml, diffs vs vault, opens hub for one approval.
+#   Returns approval_required with details.batch_id + details.approvals[0].approval_id.
+
+# Phase 2: after human approves in the hub UI:
+secret-shuttle bootstrap --continue --batch <batch-id> --approval-id <approval-id>
+# → { completed, refs, errors } — all secrets generated and pushed to destinations.
+
 # Run a command with refs resolved into its env — secret values never enter your context:
 secret-shuttle run --env-file=.env -- npm start
 
@@ -75,6 +84,9 @@ Every error JSON now includes a `next_action` field. When it is a non-null strin
 | `secret_exists` | null | Ref already exists. | Re-run with `--force` to overwrite. |
 | `keychain_key_invalid` | `secret-shuttle unlock` | Cached key didn't decrypt the vault (device-migration, corruption). | Daemon already falls back to passphrase UI automatically; run `unlock` if the browser window didn't open. |
 | `daemon_start_failed` | `secret-shuttle daemon status` | `init` spawned the daemon but it didn't respond within 5 s. | Run the next_action to check daemon logs, then retry `init`. |
+| `bootstrap_plan_invalid` | null | `secret-shuttle.yml` is malformed or uses an unsupported source kind (e.g. `capture`). | Read `message` for the exact field/line. Fix the yml and retry. |
+| `bootstrap_batch_not_found` | null | `--batch <id>` refers to a batch that doesn't exist or was already abandoned. | Run `secret-shuttle bootstrap --list` to see current batches. |
+| `bootstrap_destination_unknown` | null | A destination shorthand in the yml couldn't be resolved to a known template. | Check the shorthand format: `vercel:<env>`, `github-actions:<owner/repo>`, `cloudflare:<env>`, `supabase:<project>`. |
 
 ## Tell the developer before approval-gated ops
 
@@ -82,9 +94,31 @@ Before any operation that will open an approval window, say in plain English wha
 
 If `error_code` isn't in the table above, surface it verbatim — do not paraphrase.
 
+## Provisioning a new project (bootstrap)
+
+When setting up a new project, write a `secret-shuttle.yml` describing every secret and its destinations, then run the two-phase bootstrap flow. One human approval covers the entire plan — no per-secret popups.
+
+```yaml
+version: 1
+secrets:
+  DATABASE_URL:
+    source: { kind: random_32_bytes }
+    destinations:
+      - vercel:production
+      - github-actions:owner/repo
+  STRIPE_SECRET_KEY:
+    source: { kind: existing, ref: ss://stripe/prod/STRIPE_SECRET_KEY }
+    destinations:
+      - vercel:production
+```
+
+Destination shorthands: `vercel:<env>`, `github-actions:<owner/repo>`, `cloudflare:<env>`, `supabase:<project>`.
+
+Note: `source: { kind: capture, url }` is **not yet supported** in bootstrap. For secrets that require a browser capture flow, run `secret-shuttle reveal-capture` manually first, then reference them via `kind: existing` in the yml.
+
 ## Low-level surface (rare)
 
-`daemon start/stop/status`, `unlock`, `init`, `keychain enable/disable/status`, `migrate secure-vault`, `secrets delete`, `secrets rotate`, `compare`, `inject`, `inject-submit`, `reveal-capture`, `capture`, `blind start/end`, `browser start/mark/marks`, `template list`, `internal session create/list/revoke`. Run `secret-shuttle <cmd> --help` for details.
+`bootstrap --list / --abandon`, `daemon start/stop/status`, `unlock`, `init`, `keychain enable/disable/status`, `migrate secure-vault`, `secrets delete`, `secrets rotate`, `compare`, `inject`, `inject-submit`, `reveal-capture`, `capture`, `blind start/end`, `browser start/mark/marks`, `template list`, `internal session create/list/revoke`. Run `secret-shuttle <cmd> --help` for details.
 
 ## Install this skill into a project
 

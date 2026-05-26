@@ -262,6 +262,61 @@ The skill content is the bundled `skills/secret-shuttle/SKILL.md` shipped with t
 
 Prints the raw GitHub URL of the canonical SKILL.md on one line of stdout, suitable for pasting into any agent that supports a remote skill URL. The URL is derived from the `repository` field in the shipped `package.json` (no hardcoded URLs — defense against fork/rename drift). Override the default `main` branch with `--branch <name>` or `--ref <name>`.
 
+## `secret-shuttle bootstrap`
+
+Provision an entire project's secrets in one approval. Reads `secret-shuttle.yml` from the current directory (or `--plan-file <path>`).
+
+### Plan format
+
+`secret-shuttle.yml`:
+
+```yaml
+version: 1
+secrets:
+  API_KEY:
+    source: { kind: random_32_bytes }
+    destinations:
+      - vercel:production
+      - github-actions:owner/repo
+  EXISTING_TOKEN:
+    source: { kind: existing, ref: ss://local/prod/EXISTING_TOKEN }
+    destinations:
+      - cloudflare:production
+```
+
+### Source kinds
+
+- `random_32_bytes` / `random_64_bytes` — daemon generates a random value.
+- `existing` (requires `ref`) — uses an already-vaulted secret; only the destinations run.
+- `capture` (requires `url`) — **deferred to a future release**. For now, run `secret-shuttle reveal-capture` manually for these secrets, then reference them via `kind: existing` in the yml.
+
+### Destination shorthand
+
+- `vercel:<env>` (env = production / preview / development)
+- `github-actions:<owner/repo>`
+- `cloudflare:<env>`
+- `supabase:<project-ref>`
+
+### Two-phase flow
+
+```bash
+# Phase 1: parse yml, diff vs vault, mint one approval covering the whole plan.
+secret-shuttle bootstrap
+# → returns approval_required with details.batch_id + details.approvals[0].approval_id.
+
+# Human approves in the hub UI.
+
+# Phase 2: consume approval, execute all steps.
+secret-shuttle bootstrap --continue --batch <batch-id> --approval-id <approval-id>
+# → returns enum: { completed, failed, refs, errors }.
+```
+
+### Other commands
+
+- `secret-shuttle bootstrap --list` — list persisted batches.
+- `secret-shuttle bootstrap --abandon --batch <id>` — delete a persisted batch.
+- `secret-shuttle bootstrap --force` — re-generate / re-push even when secrets already exist (default: skip existing).
+
 ## `secret-shuttle init`
 
 First-run setup. Idempotent.
