@@ -17,8 +17,10 @@ async function withDaemon<T>(
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-approvals-session-"));
   const prev = process.env.SECRET_SHUTTLE_HOME;
   const prevSecure = process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
+  const prevNoOpen = process.env.SECRET_SHUTTLE_NO_OPEN_URL;
   process.env.SECRET_SHUTTLE_HOME = home;
   process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
+  process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
   // 32-byte base64url root token. The owner-filtering tests below derive
   // agent HMACs from this, which require a 32-byte key (see token-derive.ts).
   const rootToken = randomBytes(32).toString("base64url");
@@ -35,6 +37,8 @@ async function withDaemon<T>(
     else process.env.SECRET_SHUTTLE_HOME = prev;
     if (prevSecure === undefined) delete process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
     else process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = prevSecure;
+    if (prevNoOpen === undefined) delete process.env.SECRET_SHUTTLE_NO_OPEN_URL;
+    else process.env.SECRET_SHUTTLE_NO_OPEN_URL = prevNoOpen;
     await rm(home, { recursive: true, force: true });
   }
 }

@@ -7,6 +7,13 @@ import { withAuthContext } from "../auth/auth-context.js";
 import { ShuttleError } from "../../shared/errors.js";
 import type { SessionPattern } from "./session.js";
 
+// Defense-in-depth: every requireApprovals() call in this file passes
+// `openUrlImpl: () => {}`, but set the global kill-switch too so that
+// running `npx tsx --test <file>` directly (bypassing the npm-test script's
+// env injection) cannot launch a real browser if a future test forgets to
+// override the impl.
+process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
+
 const binding: ApprovalBinding = {
   action: "generate", ref: null, planned_ref: "ss://local/prod/X", environment: "production",
   destination_domain: null, target_id: null, field_fingerprint: null,

@@ -75,12 +75,19 @@ async function withInitDaemon<T>(
   const prevHome = process.env.SECRET_SHUTTLE_HOME;
   const prevDev = process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
   const prevUserHome = process.env.HOME;
+  const prevNoOpen = process.env.SECRET_SHUTTLE_NO_OPEN_URL;
   // ensureDaemonRunning() checks readSocketFile() first. We pre-write the
   // socket file before the init action runs, so the spawn path is never taken
   // — the function sees an existing socket and returns { daemonSpawned: false }.
   process.env.SECRET_SHUTTLE_HOME = home;
   process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
   process.env.HOME = userHome;
+  // Defense-in-depth against real-browser launches. hubOpenUrlImpl below mocks
+  // the HubBroker path, but any other code path (e.g. a future feature that
+  // calls openUrl directly) would still spawn a real browser when this test
+  // runs under `npx tsx --test <file>` — the npm-test script sets this env
+  // var globally, but a file-targeted run bypasses that.
+  process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
 
   // 32-byte base64url root token. /v1/tokens/mint uses HMAC-SHA256 keyed on the
   // root_token bytes; deriveHmac rejects anything else with root_token_malformed
@@ -129,6 +136,8 @@ async function withInitDaemon<T>(
     else process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = prevDev;
     if (prevUserHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevUserHome;
+    if (prevNoOpen === undefined) delete process.env.SECRET_SHUTTLE_NO_OPEN_URL;
+    else process.env.SECRET_SHUTTLE_NO_OPEN_URL = prevNoOpen;
     await rm(home, { recursive: true, force: true });
     await rm(userHome, { recursive: true, force: true });
   }
