@@ -15,7 +15,15 @@ const HTML_PATH = path.resolve(
 );
 
 export function registerUnlockSession(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
-  server.addRoute("POST", "/v1/unlock/start", async () => {
+  server.addRoute("POST", "/v1/unlock/start", async (_req, raw) => {
+    // P1 post-ship fix: per-request skip_keychain flag. When init passes
+    // skip_keychain: true (e.g. --no-keychain), both the C1 keychain fast-path
+    // read and the C2 opportunistic write are suppressed for THIS request —
+    // ensuring the keychain is never touched during a --no-keychain init run,
+    // not just on future runs.
+    const body = raw as { skip_keychain?: boolean } | null;
+    const skipKeychain = body?.skip_keychain === true;
+
     const envelope = await readEnvelope();
 
     // Plan 5b/5f: try the OS keychain first. On macOS this fires Touch ID
@@ -27,9 +35,9 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
     // unavailable), fall through to the existing passphrase UI flow unchanged.
     if (envelope !== null) {
       const keychain = services.keychain ?? getKeychainAdapter();
-      // Respect the persistent opt-out: skip both the keychain-first read (C1)
-      // and the opportunistic write (C2) when opt_out === true.
-      if (envelope.keychain_opt_out !== true && await keychain.isAvailable()) {
+      // Respect the persistent opt-out OR the per-request skip flag: skip both
+      // the keychain-first read (C1) and the opportunistic write (C2).
+      if (!skipKeychain && envelope.keychain_opt_out !== true && await keychain.isAvailable()) {
         const cached = await keychain.get("secret-shuttle", envelope.id);
         if (cached !== null) {
           try {
@@ -68,7 +76,7 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
       }
     }
 
-    const session = services.unlockSessions.create();
+    const session = services.unlockSessions.create({ skip_keychain: skipKeychain });
     // Open the UI window from the daemon process itself, so the CLI/agent never
     // sees the per-session ui_token. Capture port once so the URL and the
     // broker's port arg can't diverge under a port-shift race.
@@ -127,7 +135,14 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
       if (existing === null) {
         if (set_passphrase !== true) throw new ShuttleError("envelope_missing", "No vault exists.");
         masterKey = randomBytes(32);
+        // P1 post-ship fix: when the session was started with skip_keychain,
+        // write the new envelope with keychain_opt_out: true baked in. This
+        // ensures C2's existing guard (currentEnvelope.keychain_opt_out !== true)
+        // catches it and never writes to the keychain — not even briefly.
         const newEnvelope = await encryptEnvelope(masterKey, passphrase);
+        if (session.skip_keychain === true) {
+          newEnvelope.keychain_opt_out = true;
+        }
         await writeEnvelope(newEnvelope);
         enrollEnvelopeId = newEnvelope.id;
       } else {
@@ -145,8 +160,9 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
       // has already succeeded; this is best-effort caching, not a requirement.
       //
       // Re-read the envelope to get the current opt-out flag (it may have been
-      // written to disk moments ago if this was a create=1 flow).
-      if (enrollEnvelopeId !== null) {
+      // written to disk moments ago if this was a create=1 flow). Also respect
+      // the session-level skip_keychain flag (P1 post-ship: per-request opt-out).
+      if (enrollEnvelopeId !== null && session.skip_keychain !== true) {
         const currentEnvelope = await readEnvelope();
         if (currentEnvelope === null || currentEnvelope.keychain_opt_out !== true) {
           const keychain = services.keychain ?? getKeychainAdapter();

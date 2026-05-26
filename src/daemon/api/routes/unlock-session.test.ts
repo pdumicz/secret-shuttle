@@ -538,3 +538,93 @@ test("unlock-session: clearing opt-out (enable) resumes keychain caching", async
     assert.ok(setCalled > 0, "keychain.set must be called after opt-out is cleared (C2 resumed)");
   }, { keychain: counting });
 });
+
+// ── P1 post-ship: skip_keychain per-request flag ────────────────────────────
+
+test("unlock-session: skip_keychain=true → C1 keychain fast-path is skipped (no get)", async () => {
+  const keychain = new MockKeychain();
+  let getCalled = 0;
+  const counting: KeychainAdapter = {
+    async isAvailable() { return keychain.isAvailable(); },
+    async set(s, a, v) { return keychain.set(s, a, v); },
+    async get(s, a) { getCalled++; return keychain.get(s, a); },
+    async delete(s, a) { return keychain.delete(s, a); },
+    async hasEntry(s, a) { return keychain.hasEntry(s, a); },
+  };
+
+  await withUnlockUiDaemon(async (ctx) => {
+    // Bootstrap vault; C2 populates the keychain entry.
+    const { masterKey, envelopeId } = await bootstrapVaultWithPassphrase(ctx.port, ctx.services);
+
+    // Verify: keychain has the real key (C2 ran during bootstrap).
+    const cached = await keychain.get("secret-shuttle", envelopeId);
+    assert.ok(cached !== null, "keychain must have entry after bootstrap");
+    assert.deepEqual(cached, masterKey, "cached key must match master key");
+    getCalled = 0; // reset counter after bootstrap reads
+
+    // Re-lock so we're in a locked state for the next request.
+    ctx.services.lock.lock();
+
+    // POST /v1/unlock/start with skip_keychain: true — must NOT read from keychain (C1 skipped).
+    const res = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: JSON.stringify({ skip_keychain: true }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as Record<string, unknown>;
+
+    // Must fall through to passphrase UI — NOT the keychain fast-path.
+    assert.equal(typeof body.session_id, "string", "session_id must be present (C1 skipped)");
+    assert.equal(body.unlocked, undefined, "unlocked must NOT be present (C1 skipped)");
+
+    // keychain.get must not have been called (C1 skipped).
+    assert.equal(getCalled, 0, "keychain.get must NOT be called when skip_keychain=true");
+  }, { keychain: counting });
+});
+
+test("unlock-session: skip_keychain=true on create-vault flow → envelope has keychain_opt_out=true, C2 never called", async () => {
+  const keychain = new MockKeychain();
+  let setCalled = 0;
+  const counting: KeychainAdapter = {
+    async isAvailable() { return keychain.isAvailable(); },
+    async set(s, a, v) { setCalled++; return keychain.set(s, a, v); },
+    async get(s, a) { return keychain.get(s, a); },
+    async delete(s, a) { return keychain.delete(s, a); },
+    async hasEntry(s, a) { return keychain.hasEntry(s, a); },
+  };
+
+  await withUnlockUiDaemon(async (ctx) => {
+    // No envelope exists yet — this is a fresh create=1 flow.
+    const startRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: JSON.stringify({ skip_keychain: true }),
+    });
+    assert.equal(startRes.status, 200);
+    const startBody = await startRes.json() as { session_id: string; requires_create: boolean };
+    assert.equal(startBody.requires_create, true, "must be a create flow (no envelope)");
+    const { session_id } = startBody;
+    const session = ctx.services.unlockSessions.get(session_id);
+    assert.ok(session, "session must exist");
+    assert.equal(session.skip_keychain, true, "session must carry skip_keychain flag");
+
+    // Submit the passphrase to create the vault.
+    const submitUrl = `http://127.0.0.1:${ctx.port}/ui/unlock/${session_id}?token=${session.ui_token}`;
+    const submitRes = await fetch(submitUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "my-passphrase", set_passphrase: true }),
+    });
+    assert.equal(submitRes.status, 200, "passphrase submit must succeed");
+
+    // Read the envelope — must have keychain_opt_out: true.
+    const { readEnvelope: readEnv } = await import("../../../vault/envelope.js");
+    const env = await readEnv();
+    assert.ok(env !== null, "envelope must exist after create flow");
+    assert.equal(env.keychain_opt_out, true, "envelope must have keychain_opt_out=true when skip_keychain was set");
+
+    // C2 must NOT have been called.
+    assert.equal(setCalled, 0, "keychain.set must NEVER be called when skip_keychain=true (C2 suppressed)");
+  }, { keychain: counting });
+});

@@ -63,7 +63,7 @@ async function ensureDaemonRunning(): Promise<{ daemonSpawned: boolean; port: nu
  *
  * Throws unlock_timeout after 2 minutes if the user does not complete the UI.
  */
-async function ensureVaultUnlocked(): Promise<boolean> {
+async function ensureVaultUnlocked(opts: { skipKeychain: boolean } = { skipKeychain: false }): Promise<boolean> {
   const health = await daemonRequest<HealthResponse>("GET", "/v1/health");
 
   // Already unlocked — nothing to do.
@@ -76,7 +76,14 @@ async function ensureVaultUnlocked(): Promise<boolean> {
   // POST /v1/unlock/start:
   //   - If the envelope exists AND keychain has the key → returns { unlocked: true, source: "keychain" }
   //   - Otherwise → opens the browser UI and returns { session_id, requires_create }
-  const startResp = await daemonRequest<UnlockStartResponse>("POST", "/v1/unlock/start");
+  //
+  // P1 post-ship fix: pass skip_keychain when the caller has --no-keychain so
+  // the daemon skips both the C1 keychain read and the C2 opportunistic write
+  // DURING THIS VERY REQUEST — not just on future runs. Without this flag, the
+  // keychain could be written (briefly) before /v1/keychain/disable cleaned it up.
+  const startResp = await daemonRequest<UnlockStartResponse>("POST", "/v1/unlock/start", {
+    skip_keychain: opts.skipKeychain,
+  });
 
   // Keychain fast-path: daemon already unlocked the vault.
   if (startResp.unlocked === true) {
@@ -171,7 +178,9 @@ export function initCommand(): Command {
       const { daemonSpawned, port } = await ensureDaemonRunning();
 
       // Step 2: Ensure vault exists and is unlocked (open passphrase UI if needed).
-      const vaultJustCreated = await ensureVaultUnlocked();
+      // Pass skipKeychain so the daemon never touches the keychain during a
+      // --no-keychain init run — not just on future runs (P1 post-ship fix).
+      const vaultJustCreated = await ensureVaultUnlocked({ skipKeychain: options.keychain === false });
 
       // Step 3a: If --no-keychain was passed, persist the opt-out on the envelope
       // so that the C2 opportunistic enrollment (which runs during the passphrase

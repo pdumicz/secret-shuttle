@@ -337,3 +337,46 @@ test("init: agent runtime detected → skill file installed", async () => {
     }
   }, { keychain });
 });
+
+// ── P1 post-ship: --no-keychain truly skips keychain during init run ─────────
+
+test("init: --no-keychain does NOT touch keychain even during the init run (P1 post-ship)", async () => {
+  // Track every keychain.set and keychain.get call to verify nothing touches
+  // the keychain during a --no-keychain init run.
+  const base = new MockKeychain();
+  let setCalled = 0;
+  let getCalled = 0;
+  const counting: KeychainAdapter = {
+    async isAvailable() { return base.isAvailable(); },
+    async set(s: string, a: string, v: Buffer) { setCalled++; return base.set(s, a, v); },
+    async get(s: string, a: string) { getCalled++; return base.get(s, a); },
+    async delete(s: string, a: string) { return base.delete(s, a); },
+    async hasEntry(s: string, a: string) { return base.hasEntry(s, a); },
+  };
+
+  await withInitDaemon(async (ctx) => {
+    // No pre-existing vault. Run init with --no-keychain.
+    const submitPromise = awaitAndSubmitPendingSession(
+      ctx.port, ctx.services, "init-p1-passphrase", true,
+    );
+    const resultPromise = runInit(["--no-keychain", "--no-agent-install"]);
+    const [result] = await Promise.all([resultPromise, submitPromise]);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.vault_just_created, true);
+    assert.equal(result.keychain_enrolled, false);
+
+    // P1 core assertion: keychain.set was NEVER called (C2 suppressed from init run start).
+    assert.equal(setCalled, 0, "keychain.set must NEVER be called during a --no-keychain init run (P1)");
+    // C1 read was not attempted either.
+    assert.equal(getCalled, 0, "keychain.get must NOT be called during a --no-keychain init run (P1)");
+
+    // Envelope must have keychain_opt_out: true baked in from vault creation.
+    const env = await readEnvelope();
+    assert.ok(env !== null, "envelope must exist after init");
+    assert.equal(env.keychain_opt_out, true, "keychain_opt_out must be true after --no-keychain");
+
+    // Keychain must be completely empty.
+    assert.equal(base.entries.size, 0, "keychain must be empty after --no-keychain init");
+  }, { keychain: counting });
+});

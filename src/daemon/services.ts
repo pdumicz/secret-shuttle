@@ -22,17 +22,20 @@ export interface UnlockSession {
   status: "pending" | "unlocked" | "failed" | "expired";
   message?: string;
   expires_at: number;
+  /** P1 post-ship: when true, C2 opportunistic keychain enrollment is suppressed for this session. */
+  skip_keychain?: boolean;
 }
 
 export class UnlockSessions {
   private readonly map = new Map<string, UnlockSession>();
-  create(): UnlockSession {
+  create(opts: { skip_keychain?: boolean } = {}): UnlockSession {
     const id = randomUUID();
     const s: UnlockSession = {
       id,
       ui_token: randomUUID(),
       status: "pending",
       expires_at: Date.now() + 5 * 60 * 1000,
+      ...(opts.skip_keychain === true ? { skip_keychain: true } : {}),
     };
     this.map.set(id, s);
     return s;
