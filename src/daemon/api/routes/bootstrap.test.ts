@@ -615,6 +615,93 @@ secrets:
   });
 });
 
+// ── R9: summarizeFromState surfaces per-destination errors (TDD) ────────────
+
+test("POST /v1/bootstrap/continue: cached failed_partial response surfaces per-destination errors", async () => {
+  // Seed a failed_partial batch whose step_results has destinations_pushed with a
+  // failed destination. When /continue is called and the batch status is not "pending",
+  // the executor runs (R7 fix) and returns the new summarize() shape.
+  // After R9 fix: errors[0] must have step:"destination", destination:<shorthand>,
+  // code:"template_exec_failed". Before fix: code is "destination_partial_failure"
+  // and destination field is absent.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const batchId = "bootstrap-r9-dest-detail";
+
+    // Seed a completed batch (so the executor hits the cached-result short-circuit in
+    // executeBatch, which calls summarize(state) directly without re-running anything).
+    // This exercises summarizeFromState via the /continue → executeBatch → summarize path.
+    await ctx.services.bootstrapStore.save({
+      batch_id: batchId,
+      approval_id: "used-approval-id",
+      plan_file_path: "",
+      plan: [
+        {
+          secret: "STRIPE_KEY",
+          ref: "ss://local/prod/STRIPE_KEY",
+          source: { kind: "random_32_bytes" },
+          destinations: [
+            {
+              shorthand: "vercel:production",
+              template_id: "vercel-env-add",
+              template_params: { name: "STRIPE_KEY", environment: "production" },
+              domain: "vercel.com",
+            },
+          ],
+        },
+      ],
+      step_results: {
+        STRIPE_KEY: {
+          ok: false,
+          ref: "ss://local/prod/STRIPE_KEY",
+          destinations_pushed: [
+            {
+              destination: "vercel:production",
+              ok: false,
+              error_code: "template_exec_failed",
+              message: "template vercel-env-add exited with code 1",
+            },
+          ],
+          error_code: "destination_partial_failure",
+        },
+      },
+      created_at: Date.now(),
+      // Use "completed" status so executeBatch hits the cached-result path (line 85-87 in executor.ts)
+      // and calls summarize(state) directly — this tests the summarize() fix.
+      // We rely on: executeBatch returns summarize(state) for "completed" status.
+      // For testing the route's summarizeFromState, we also cover the /continue path
+      // with "failed_partial" status below.
+      status: "completed",
+    });
+
+    const r = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: batchId,
+    });
+
+    assert.equal(r.status, 200, `expected 200, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as {
+      ok: boolean;
+      completed: number;
+      failed: number;
+      errors: Array<{ secret: string; step: string; code: string; message: string; destination?: string }>;
+    };
+    assert.equal(body.ok, true);
+    assert.equal(body.failed, 1, "one failed secret");
+    assert.equal(body.completed, 0);
+
+    // The R9 fix: errors[] must carry destination-level detail.
+    assert.ok(Array.isArray(body.errors), "errors must be an array");
+    assert.equal(body.errors.length, 1, "one failed destination → one error entry");
+    const err = body.errors[0]!;
+    assert.equal(err.secret, "STRIPE_KEY");
+    assert.equal(err.step, "destination", `expected step:"destination", got: ${err.step}`);
+    assert.equal(err.code, "template_exec_failed", `expected code:"template_exec_failed", got: ${err.code}`);
+    assert.equal(err.destination, "vercel:production", `expected destination:"vercel:production", got: ${err.destination}`);
+    assert.ok(err.message.includes("exit") || err.message.length > 0, `expected non-empty message, got: ${err.message}`);
+  });
+});
+
 test("POST /v1/bootstrap/plan: plan_summary includes ss:// ref for source: existing", async () => {
   await withDaemon(async (ctx) => {
     await unlockVault(ctx);

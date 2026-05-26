@@ -268,12 +268,24 @@ function summarizeFromState(state: BatchState): {
   completed: number;
   failed: number;
   refs: string[];
-  errors: Array<{ secret: string; step: string; code: string; message: string }>;
+  errors: Array<{
+    secret: string;
+    step: string;
+    code: string;
+    message: string;
+    destination?: string;
+  }>;
 } {
   let completed = 0;
   let failed = 0;
   const refs: string[] = [];
-  const errors: Array<{ secret: string; step: string; code: string; message: string }> = [];
+  const errors: Array<{
+    secret: string;
+    step: string;
+    code: string;
+    message: string;
+    destination?: string;
+  }> = [];
   for (const entry of state.plan) {
     const r = state.step_results[entry.secret];
     if (r === undefined) continue;
@@ -282,12 +294,28 @@ function summarizeFromState(state: BatchState): {
       if (r.ref !== undefined) refs.push(r.ref);
     } else {
       failed += 1;
-      errors.push({
-        secret: entry.secret,
-        step: "execute",
-        code: r.error_code ?? "unexpected_error",
-        message: r.message ?? "",
-      });
+      if (r.destinations_pushed !== undefined && r.destinations_pushed.length > 0) {
+        // Destination-level failures: emit one error entry per failed destination.
+        for (const dest of r.destinations_pushed) {
+          if (!dest.ok) {
+            errors.push({
+              secret: entry.secret,
+              step: "destination",
+              code: dest.error_code ?? "unexpected_error",
+              message: dest.message ?? "",
+              destination: dest.destination,
+            });
+          }
+        }
+      } else {
+        // Source-step failure (or unexpected error with no destination detail).
+        errors.push({
+          secret: entry.secret,
+          step: "execute",
+          code: r.error_code ?? "unexpected_error",
+          message: r.message ?? "",
+        });
+      }
     }
   }
   return { completed, failed, refs, errors };

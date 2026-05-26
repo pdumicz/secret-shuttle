@@ -444,3 +444,131 @@ test("executeBatch: no prior ref → source step still runs as before", async ()
   }));
   assert.strictEqual(generateCalled, 1, "source step must run on first attempt");
 });
+
+// ── R9: summarize() must surface per-destination failure detail (TDD) ────────
+
+test("executeBatch: destination failure surfaces per-dest error_code + message + destination", async () => {
+  const store = await setupStore();
+  await store.save({
+    batch_id: "destdetail",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [{
+      secret: "API_KEY",
+      ref: "ss://local/prod/API_KEY",
+      source: { kind: "random_32_bytes" },
+      destinations: [
+        { shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" },
+        { shorthand: "github-actions:acme/widgets", template_id: "github-actions-secret-set", template_params: {}, domain: "github.com" },
+      ],
+    }],
+    step_results: {},
+    created_at: Date.now(),
+    status: "pending",
+  });
+
+  // First destination succeeds (exit 0); second fails (exit 1).
+  let callIdx = 0;
+  const result = await executeBatch(store, "destdetail", makeDeps({
+    runTemplate: async (_s, _p, input) => {
+      callIdx += 1;
+      const exit = callIdx === 1 ? 0 : 1;
+      return {
+        executed: exit === 0,
+        template_id: (input as { templateId: string }).templateId,
+        secret_ref: (input as { ref: string }).ref,
+        binary_path: null,
+        binary_sha256: null,
+        exit_code: exit,
+        value_visible_to_agent: false as const,
+      };
+    },
+  }));
+
+  assert.strictEqual(result.completed, 0, "one secret with any failed destination counts as failed");
+  assert.strictEqual(result.failed, 1);
+  // errors[] now carries one entry per failed destination.
+  assert.strictEqual(result.errors.length, 1, "exactly one failed destination → one error entry");
+  const err = result.errors[0]!;
+  assert.strictEqual(err.secret, "API_KEY");
+  assert.strictEqual(err.step, "destination");
+  assert.strictEqual(err.code, "template_exec_failed");
+  assert.strictEqual(err.destination, "github-actions:acme/widgets");
+  assert.match(err.message, /exit.*1/i);
+});
+
+test("executeBatch: source-step failure still emits step: 'execute' error (no destination field)", async () => {
+  const store = await setupStore();
+  await store.save({
+    batch_id: "srcfail",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [{
+      secret: "API_KEY",
+      ref: "ss://local/prod/API_KEY",
+      source: { kind: "random_32_bytes" },
+      destinations: [{ shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" }],
+    }],
+    step_results: {},
+    created_at: Date.now(),
+    status: "pending",
+  });
+
+  const result = await executeBatch(store, "srcfail", makeDeps({
+    generateSecret: async () => { throw new (await import("../../shared/errors.js")).ShuttleError("secret_exists", "already there"); },
+  }));
+
+  assert.strictEqual(result.completed, 0);
+  assert.strictEqual(result.failed, 1);
+  assert.strictEqual(result.errors.length, 1);
+  const err = result.errors[0]!;
+  assert.strictEqual(err.step, "execute");
+  assert.strictEqual(err.code, "secret_exists");
+  assert.strictEqual(err.destination, undefined, "source-step errors must not carry a destination field");
+});
+
+test("executeBatch: multiple failed destinations for one secret → one error each", async () => {
+  const store = await setupStore();
+  await store.save({
+    batch_id: "multidest",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [{
+      secret: "API_KEY",
+      ref: "ss://local/prod/API_KEY",
+      source: { kind: "random_32_bytes" },
+      destinations: [
+        { shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" },
+        { shorthand: "github-actions:acme/widgets", template_id: "github-actions-secret-set", template_params: {}, domain: "github.com" },
+        { shorthand: "cloudflare:production", template_id: "cloudflare-secret-put", template_params: {}, domain: "cloudflare.com" },
+      ],
+    }],
+    step_results: {},
+    created_at: Date.now(),
+    status: "pending",
+  });
+
+  // All three fail.
+  const result = await executeBatch(store, "multidest", makeDeps({
+    runTemplate: async (_s, _p, input) => ({
+      executed: false,
+      template_id: (input as { templateId: string }).templateId,
+      secret_ref: (input as { ref: string }).ref,
+      binary_path: null,
+      binary_sha256: null,
+      exit_code: 1,
+      value_visible_to_agent: false as const,
+    }),
+  }));
+
+  assert.strictEqual(result.failed, 1, "one secret with any failed destinations still counts as 1 secret failure");
+  assert.strictEqual(result.errors.length, 3, "three failed destinations → three error entries");
+  assert.deepStrictEqual(
+    result.errors.map(e => e.destination).sort(),
+    ["cloudflare:production", "github-actions:acme/widgets", "vercel:production"],
+  );
+  for (const e of result.errors) {
+    assert.strictEqual(e.step, "destination");
+    assert.strictEqual(e.code, "template_exec_failed");
+  }
+});
