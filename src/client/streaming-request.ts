@@ -1,6 +1,7 @@
 import { readSocketFile } from "../daemon/socket-file.js";
 import { ShuttleError } from "../shared/errors.js";
 import { daemonErrorFromPayload } from "./daemon-client.js";
+import { resolveDaemonToken } from "./auth-token.js";
 
 export type StreamLine =
   | { stream: "stdout"; data: string } // base64
@@ -72,9 +73,10 @@ export async function streamingDaemonRequest(
   if (sf === null) {
     throw new ShuttleError("daemon_not_running", "Daemon not running. Run `secret-shuttle daemon start`.");
   }
+  const { bearer } = await resolveDaemonToken({ port: sf.port });
   const res = await fetch(`http://127.0.0.1:${sf.port}${path}`, {
     method,
-    headers: { Authorization: `Bearer ${sf.token}`, "content-type": "application/json" },
+    headers: { Authorization: `Bearer ${bearer}`, "content-type": "application/json" },
     body: JSON.stringify(body),
     ...(options?.signal !== undefined ? { signal: options.signal } : {}),
   });

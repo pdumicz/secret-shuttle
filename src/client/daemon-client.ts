@@ -1,12 +1,13 @@
 import { ShuttleError } from "../shared/errors.js";
 import { readSocketFile } from "../daemon/socket-file.js";
+import { resolveDaemonToken } from "./auth-token.js";
 
-async function endpoint(): Promise<{ url: string; token: string }> {
+async function endpoint(): Promise<{ url: string; port: number }> {
   const sf = await readSocketFile();
   if (sf === null) {
     throw new ShuttleError("daemon_not_running", "Daemon not running. Run `secret-shuttle daemon start`.");
   }
-  return { url: `http://127.0.0.1:${sf.port}`, token: sf.token };
+  return { url: `http://127.0.0.1:${sf.port}`, port: sf.port };
 }
 
 /**
@@ -57,10 +58,11 @@ export async function daemonRequest<T = Record<string, unknown>>(
   path: string,
   body?: unknown,
 ): Promise<T & { ok: true }> {
-  const { url, token } = await endpoint();
+  const { url, port } = await endpoint();
+  const { bearer } = await resolveDaemonToken({ port });
   const init: RequestInit = {
     method,
-    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: { Authorization: `Bearer ${bearer}`, "content-type": "application/json" },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   };
   const res = await fetch(`${url}${path}`, init);
