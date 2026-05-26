@@ -472,6 +472,149 @@ secrets:
   });
 });
 
+// ── R8: dev-env synth path must execute inline (TDD for R8 fix) ─────────────
+// Two response shapes exist for /plan:
+//   1. empty-plan short-circuit (lines 58-62): no batch was saved, returns
+//      { ok, completed: 0, ... } with NO batch_id — correct, nothing to follow up on.
+//   2. synth-execute path (this fix): requireApprovals returns a synth grant without
+//      throwing; the handler must run executeBatch inline and return
+//      { ok, batch_id, ...result } so the batch is in a terminal state.
+
+test("POST /v1/bootstrap/plan: dev environment executes inline and returns batch_id with results", async () => {
+  // Without the fix: returns { ok: true, completed: 0, failed: 0, refs: [], errors: [] }
+  // WITHOUT batch_id, and the batch is stranded in "pending" status forever.
+  // With the fix: executeBatch runs inline, batch reaches a terminal state,
+  // and batch_id is included in the response.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  DEV_SECRET:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    // Must succeed (200).
+    assert.equal(r.status, 200, `expected 200, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as { ok: boolean; batch_id?: string; completed: number; failed: number; refs: unknown[]; errors: unknown[] };
+    assert.equal(body.ok, true);
+
+    // batch_id must be present — the batch was created, executed, and is now terminal.
+    assert.ok(
+      typeof body.batch_id === "string" && body.batch_id.startsWith("bootstrap-"),
+      `expected batch_id starting with "bootstrap-", got: ${JSON.stringify(body.batch_id)}`,
+    );
+
+    // completed + failed must reflect actual executor output (not just { completed: 0 }).
+    assert.ok(
+      typeof body.completed === "number" && typeof body.failed === "number",
+      `expected numeric completed/failed, got: ${JSON.stringify(body)}`,
+    );
+    // The executor ran at least one secret generation; sum must be >= 1.
+    assert.ok(
+      body.completed + body.failed >= 1,
+      `expected completed+failed >= 1 (executor must have run), got completed=${body.completed} failed=${body.failed}`,
+    );
+
+    // The batch state in the store must be terminal (completed or failed_partial),
+    // NOT "pending" (which is the bug: batch was saved but executor never ran).
+    const state = await ctx.services.bootstrapStore.get(body.batch_id!);
+    assert.ok(state !== null, "batch state must be persisted in bootstrap store");
+    assert.ok(
+      state!.status === "completed" || state!.status === "failed_partial",
+      `expected terminal status (completed or failed_partial), got: ${state!.status}`,
+    );
+  });
+});
+
+test("POST /v1/bootstrap/plan: dev environment batch is idempotent — /continue with dev batch_id returns cached result", async () => {
+  // After the fix, the batch is already in a terminal state after /plan.
+  // Calling /continue with the returned batch_id must hit the "completed" short-circuit
+  // (line 144 of bootstrap.ts) and return the cached result — not re-run the executor.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  DEV_IDEMPOTENT:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const planR = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+    assert.equal(planR.status, 200, `expected 200 from /plan, got ${planR.status} body=${JSON.stringify(planR.body)}`);
+    const planBody = planR.body as { ok: boolean; batch_id: string; completed: number; failed: number };
+    assert.ok(typeof planBody.batch_id === "string", "expected batch_id in /plan response");
+
+    // Verify the batch reached a terminal state.
+    const stateBefore = await ctx.services.bootstrapStore.get(planBody.batch_id);
+    assert.ok(stateBefore !== null, "batch must exist in store");
+    const terminalBefore = stateBefore!.status === "completed" || stateBefore!.status === "failed_partial";
+    assert.ok(terminalBefore, `expected terminal status before /continue, got: ${stateBefore!.status}`);
+
+    // Now call /continue with the dev batch_id — must hit the completed short-circuit.
+    // No approval_ids needed since the batch is already terminal.
+    const contR = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: planBody.batch_id,
+    });
+    assert.equal(contR.status, 200, `expected 200 from /continue, got ${contR.status} body=${JSON.stringify(contR.body)}`);
+    const contBody = contR.body as { ok: boolean; completed: number; failed: number };
+    assert.equal(contBody.ok, true);
+    // Result must match what /plan returned (cached, not re-executed).
+    assert.equal(contBody.completed, planBody.completed, "cached completed count must match /plan");
+    assert.equal(contBody.failed, planBody.failed, "cached failed count must match /plan");
+  });
+});
+
+test("POST /v1/bootstrap/plan: production environment still returns approval_required with batch_id (regression guard)", async () => {
+  // Regression: ensure the production path (approval gating) is NOT affected by the dev fix.
+  // This is the same assertion as the existing "returns approval_required" test — kept as
+  // an explicit regression guard for R8 so a reviewer can see both paths side-by-side.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  PROD_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:production"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "production",
+    });
+
+    // Must be 400 with approval_required.
+    assert.equal(r.status, 400, `expected 400 (approval_required), got ${r.status} body=${JSON.stringify(r.body)}`);
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(error.code, "approval_required");
+
+    // Details must include both approvals array AND batch_id.
+    const details = r.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string } | undefined;
+    assert.ok(details !== undefined, `expected details in response: ${JSON.stringify(r.body)}`);
+    assert.ok(Array.isArray(details!.approvals) && details!.approvals.length >= 1, "expected at least 1 approval in details");
+    assert.ok(
+      typeof details!.batch_id === "string" && details!.batch_id.startsWith("bootstrap-"),
+      `expected batch_id starting with "bootstrap-" in details, got: ${details!.batch_id}`,
+    );
+
+    // The batch must still be in "pending" status (executor has NOT run yet).
+    const state = await ctx.services.bootstrapStore.get(details!.batch_id);
+    assert.ok(state !== null, "batch state must be persisted");
+    assert.equal(state!.status, "pending", `production batch must remain "pending" after /plan, got: ${state!.status}`);
+  });
+});
+
 test("POST /v1/bootstrap/plan: plan_summary includes ss:// ref for source: existing", async () => {
   await withDaemon(async (ctx) => {
     await unlockVault(ctx);

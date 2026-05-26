@@ -91,11 +91,14 @@ export function registerBootstrapRoutes(
       status: "pending",
     });
 
-    // requireApprovals with waitMs:0 always throws approval_required when the
-    // binding needs an approval (production environment). We catch it, enrich
-    // with batch_id, persist the minted approval_id, and re-throw.
+    // requireApprovals with waitMs:0 throws approval_required when the binding
+    // needs a human approval (production environment). For dev-env bindings it
+    // synthesizes a grant and returns without throwing.
+    // We catch the throw, enrich with batch_id, persist the minted approval_id,
+    // and re-throw. On the no-throw path (dev-env synth) we run the executor
+    // inline so the batch reaches a terminal state in a single /plan call.
     try {
-      await requireApprovals({
+      const grants = await requireApprovals({
         store: services.approvals,
         bindings: [binding],
         daemonPort: daemonPortRef(),
@@ -103,9 +106,35 @@ export function registerBootstrapRoutes(
         openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
         waitMs: 0,
       });
-      // If we somehow reach here (e.g., dev-env synth), return success.
-      await writeDaemonAudit({ action: "bootstrap_plan", ok: true });
-      return { ok: true, completed: 0, failed: 0, refs: [], errors: [] };
+
+      // No throw: dev-env synthesized a grant (no human approval needed) or a
+      // live session matched. The bootstrap is authorized — run the executor
+      // inline so the user gets the result in one call instead of stranding
+      // the batch in "pending" forever.
+      const grant = grants[0];
+      if (grant !== undefined) {
+        const fresh = await services.bootstrapStore.get(batchId);
+        if (fresh !== null) {
+          fresh.approval_id = grant.id ?? "";
+          await services.bootstrapStore.save(fresh);
+        }
+      }
+
+      const deps: ExecutorDeps = {
+        generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
+        revealCapture: revealCaptureCore as ExecutorDeps["revealCapture"],
+        runTemplate: runTemplateCore as ExecutorDeps["runTemplate"],
+        services,
+        daemonPortRef,
+      };
+      const result = await executeBatch(services.bootstrapStore, batchId, deps);
+
+      await writeDaemonAudit({
+        action: "bootstrap_plan",
+        ok: true,
+        ...(grant?.id !== undefined && grant.id !== "no-approval-required" ? { approval_id: grant.id } : {}),
+      });
+      return { ok: true, batch_id: batchId, ...result };
     } catch (e) {
       if (e instanceof ShuttleError && e.code === "approval_required") {
         const details = e.details as { approvals: Array<{ approval_id: string; expires_at: number; action: string }> } | undefined;
