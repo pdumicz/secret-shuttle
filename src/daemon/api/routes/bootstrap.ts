@@ -145,33 +145,43 @@ export function registerBootstrapRoutes(
       return { ok: true, ...summarizeFromState(state) };
     }
 
-    // Rebuild the same binding shape that /plan minted, so requireApprovals'
-    // equality check passes when consuming the pre-minted approval.
-    const planSummary = buildPlanSummary(state.plan);
-    const binding: ApprovalBinding = {
-      action: "bootstrap",
-      ref: null,
-      environment: "production",
-      destination_domain: null,
-      target_id: null,
-      field_fingerprint: null,
-      template_id: null,
-      template_params: {
-        batch_id: batchId,
-        plan_summary: JSON.stringify(planSummary),
-      },
-      allowed_domains: Array.from(new Set(state.plan.flatMap((e) => e.destinations.map((d) => d.domain)))),
-    };
+    // The bootstrap approval is single-use, but the executor is idempotent
+    // (skips completed steps, reuses prior ref, retries only failed destinations).
+    // We only consume the approval on the FIRST /continue call (state.status === "pending").
+    // For retries (in_progress / failed_partial), the approval was already consumed
+    // in the prior call — the batch_id + the locked-daemon precondition are the
+    // authorization for the retry.
+    if (state.status === "pending") {
+      // Rebuild the same binding shape that /plan minted, so requireApprovals'
+      // equality check passes when consuming the pre-minted approval.
+      const planSummary = buildPlanSummary(state.plan);
+      const binding: ApprovalBinding = {
+        action: "bootstrap",
+        ref: null,
+        environment: "production",
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: null,
+        template_params: {
+          batch_id: batchId,
+          plan_summary: JSON.stringify(planSummary),
+        },
+        allowed_domains: Array.from(new Set(state.plan.flatMap((e) => e.destinations.map((d) => d.domain)))),
+      };
 
-    // Consume the bootstrap approval.
-    await requireApprovals({
-      store: services.approvals,
-      bindings: [binding],
-      daemonPort: daemonPortRef(),
-      sessionStore: services.sessionStore,
-      openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
-      ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
-    });
+      await requireApprovals({
+        store: services.approvals,
+        bindings: [binding],
+        daemonPort: daemonPortRef(),
+        sessionStore: services.sessionStore,
+        openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
+        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
+      });
+    }
+    // else: state.status is "in_progress" or "failed_partial" — the approval was
+    // already consumed in a prior /continue call. Skip re-consumption; proceed to
+    // executor (idempotent: reuses prior ref, retries only failed destinations).
 
     // Execute the plan.
     const deps: ExecutorDeps = {

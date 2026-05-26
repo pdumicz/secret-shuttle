@@ -313,6 +313,165 @@ secrets:
   });
 });
 
+// ── Retry-after-failed_partial tests (TDD for R7 fix) ──────────────────────
+
+test("POST /v1/bootstrap/continue: retry after failed_partial does NOT require fresh approval", async () => {
+  // Regression: before the fix, /continue unconditionally called requireApprovals,
+  // so a second call with an already-consumed approval threw approval_already_used.
+  // After the fix: when state.status !== "pending", the approval gate is skipped.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const batchId = "bootstrap-retry-test-uuid";
+
+    // Seed a failed_partial batch. The plan entry's source is random_32_bytes
+    // so the executor will need to call generateSecretCore for the secret.
+    // We set a prior ref so the executor reuses it (no secret generation needed),
+    // and simulate one failed destination so it will attempt to retry it.
+    await ctx.services.bootstrapStore.save({
+      batch_id: batchId,
+      approval_id: "used-approval-id",
+      plan_file_path: "",
+      plan: [
+        {
+          secret: "RETRY_KEY",
+          ref: "ss://local/prod/RETRY_KEY",
+          source: { kind: "random_32_bytes" },
+          destinations: [
+            {
+              shorthand: "vercel:production",
+              template_id: "vercel-env-add",
+              template_params: { name: "RETRY_KEY", environment: "production" },
+              domain: "vercel.com",
+            },
+          ],
+        },
+      ],
+      step_results: {
+        RETRY_KEY: {
+          ok: false,
+          ref: "ss://local/prod/RETRY_KEY",
+          destinations_pushed: [
+            {
+              destination: "vercel:production",
+              ok: false,
+              error_code: "template_exec_failed",
+              message: "exit 1",
+            },
+          ],
+          error_code: "destination_partial_failure",
+        },
+      },
+      created_at: Date.now(),
+      status: "failed_partial",
+    });
+
+    // Seed a used approval in the approval store to simulate the prior /continue call.
+    const usedGrant = ctx.services.approvals.create({
+      action: "bootstrap",
+      ref: null,
+      environment: "production",
+      destination_domain: null,
+      target_id: null,
+      field_fingerprint: null,
+      template_id: null,
+      template_params: { batch_id: batchId, plan_summary: "[]" },
+      allowed_domains: ["vercel.com"],
+    });
+    ctx.services.approvals.approve(usedGrant.id);
+    // Consume the approval — now it's in "used" state, matching the real scenario.
+    ctx.services.approvals.consumeBatch([
+      {
+        id: usedGrant.id,
+        binding: {
+          action: "bootstrap",
+          ref: null,
+          environment: "production",
+          destination_domain: null,
+          target_id: null,
+          field_fingerprint: null,
+          template_id: null,
+          template_params: { batch_id: batchId, plan_summary: "[]" },
+          allowed_domains: ["vercel.com"],
+        },
+      },
+    ]);
+
+    // POST /continue with the same (now-used) approval_ids — this is the retry call.
+    // This matches the exact user-reported bug: user retries with the same approval_ids
+    // they used on the first call, and gets approval_already_used.
+    const r = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: batchId,
+      approval_ids: [usedGrant.id],
+    });
+
+    // With the fix: state.status is "failed_partial" (not "pending"), so requireApprovals
+    // is skipped entirely. The executor runs and returns ok:true with a result.
+    // Without the fix: requireApprovals sees approval status "used" and throws
+    // approval_already_used immediately (status 400).
+    assert.equal(
+      r.status,
+      200,
+      `expected 200 (executor ran), got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const body = r.body as { ok: boolean; error?: { code: string } };
+    assert.equal(body.ok, true, `expected ok:true, got: ${JSON.stringify(body)}`);
+
+    // The batch status must be updated (in_progress or failed_partial or completed —
+    // the destination template will likely fail again since no real binary exists).
+    const state = await ctx.services.bootstrapStore.get(batchId);
+    assert.ok(state !== null, "batch state must still exist after retry");
+    assert.ok(
+      state!.status === "completed" || state!.status === "failed_partial",
+      `unexpected batch status after retry: ${state!.status}`,
+    );
+  });
+});
+
+test("POST /v1/bootstrap/continue: first call (pending) still requires a granted approval", async () => {
+  // Regression guard: when state.status === "pending", requireApprovals MUST be
+  // called. Without this, a malicious caller could skip approval by POSTing to
+  // /continue with just a batch_id from /plan before approving.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    // Create a pending batch via the /plan route — this mints a real pending approval.
+    const yml = `
+version: 1
+secrets:
+  GATE_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:production"]
+`;
+    const planR = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml });
+    assert.equal(planR.status, 400, `expected 400 approval_required from /plan`);
+    const planDetails = planR.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string };
+    assert.ok(planDetails !== undefined, `plan did not return details: ${JSON.stringify(planR.body)}`);
+    const batchId = planDetails.batch_id;
+    const mintedApprovalId = planDetails.approvals[0]!.approval_id;
+
+    // The approval is minted (pending) but NOT granted yet.
+    // POST /continue with the minted-but-not-granted approval_id.
+    const r = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: batchId,
+      approval_ids: [mintedApprovalId],
+    });
+
+    // Must fail: the approval is not granted → approval_not_granted.
+    // This proves the approval gate is still enforced for the first /continue call.
+    assert.equal(
+      r.status,
+      400,
+      `expected 400, got ${r.status} body=${JSON.stringify(r.body)}`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.ok(
+      error.code === "approval_not_granted" || error.code === "approval_required",
+      `expected approval_not_granted or approval_required, got: ${error.code}`,
+    );
+  });
+});
+
 test("POST /v1/bootstrap/plan: plan_summary includes ss:// ref for source: existing", async () => {
   await withDaemon(async (ctx) => {
     await unlockVault(ctx);
