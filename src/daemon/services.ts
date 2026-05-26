@@ -16,6 +16,7 @@ import { getShuttlePaths } from "../shared/config.js";
 import { HubBroker } from "./hub/hub-broker.js";
 import { openUrl } from "./approvals/open-url.js";
 import { BootstrapStore } from "./bootstrap/store.js";
+import type { BrowserSession, BrowserSessionChild } from "./bootstrap/browser-session.js";
 import type { KeychainAdapter } from "../vault/keychain/types.js";
 
 export interface UnlockSession {
@@ -98,11 +99,106 @@ export class DaemonServices {
   readonly bootstrapStore = new BootstrapStore({
     rootDir: path.join(getShuttlePaths().homeDir, "bootstrap-batches"),
   });
-  browser: BrowserOps | null = null;
-  browserSessionId: string | null = null;
-  /** Internal CDP client for the running Chrome process; null before browser start. */
-  cdp: CdpClient | null = null;
-  cdpProxy: ProxyServer | null = null;
+  /**
+   * Unified BrowserSession — source of truth. Production code constructs this
+   * via `createBrowserSession()` (see bootstrap/browser-session.ts). The four
+   * accessors below (`browser`, `browserSessionId`, `cdp`, `cdpProxy`) expose
+   * the legacy field surfaces backed by this object.
+   */
+  browserSession: BrowserSession | null = null;
+
+  /**
+   * Compatibility accessors backing the unified `browserSession` field. Production
+   * code (`/v1/browser/start`, `ensureBootstrapBrowser`) constructs browserSession
+   * directly via createBrowserSession(). These accessors exist for test fixtures
+   * and back-compat — setting one field composes the current session rather than
+   * replacing it.
+   */
+  get browser(): BrowserOps | null {
+    return this.browserSession?.browser ?? null;
+  }
+  set browser(v: BrowserOps | null) {
+    if (v === null) { this.browserSession = null; return; }
+    if (this.browserSession !== null) {
+      this.browserSession.browser = v;
+    } else {
+      this.browserSession = {
+        owner: { kind: "user" },
+        child: null as unknown as BrowserSessionChild,
+        cdp: null as unknown as CdpClient,
+        proxy: null,
+        browserSessionId: "test-stub",
+        browser: v,
+      };
+    }
+  }
+
+  get cdp(): CdpClient | null {
+    return this.browserSession?.cdp ?? null;
+  }
+  set cdp(v: CdpClient | null) {
+    if (v === null) { this.browserSession = null; return; }
+    if (this.browserSession !== null) {
+      this.browserSession.cdp = v;
+    } else {
+      this.browserSession = {
+        owner: { kind: "user" },
+        child: null as unknown as BrowserSessionChild,
+        cdp: v,
+        proxy: null,
+        browserSessionId: "test-stub",
+        browser: null as unknown as BrowserOps,
+      };
+    }
+  }
+
+  get cdpProxy(): ProxyServer | null {
+    return this.browserSession?.proxy ?? null;
+  }
+  set cdpProxy(v: ProxyServer | null) {
+    if (v === null) {
+      if (this.browserSession !== null) {
+        this.browserSession.proxy = null;
+      }
+      return;
+    }
+    if (this.browserSession !== null) {
+      this.browserSession.proxy = v;
+    } else {
+      this.browserSession = {
+        owner: { kind: "user" },
+        child: null as unknown as BrowserSessionChild,
+        cdp: null as unknown as CdpClient,
+        proxy: v,
+        browserSessionId: "test-stub",
+        browser: null as unknown as BrowserOps,
+      };
+    }
+  }
+
+  get browserSessionId(): string | null {
+    return this.browserSession?.browserSessionId ?? null;
+  }
+  set browserSessionId(v: string | null) {
+    if (v === null) {
+      if (this.browserSession !== null) {
+        this.browserSession.browserSessionId = "";
+      }
+      return;
+    }
+    if (this.browserSession !== null) {
+      this.browserSession.browserSessionId = v;
+    } else {
+      this.browserSession = {
+        owner: { kind: "user" },
+        child: null as unknown as BrowserSessionChild,
+        cdp: null as unknown as CdpClient,
+        proxy: null,
+        browserSessionId: v,
+        browser: null as unknown as BrowserOps,
+      };
+    }
+  }
   readonly hubBroker: HubBroker;
   /**
    * Test-only override for the OS keychain adapter.

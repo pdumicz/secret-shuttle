@@ -10,7 +10,10 @@ import { buildChildEnv } from "../safe-env.js";
 import { CdpClient } from "./cdp-client.js";
 
 export interface ChromeSession {
-  child: { kill(signal?: NodeJS.Signals): boolean };
+  child: {
+    kill(signal?: NodeJS.Signals): boolean;
+    once(event: "exit", listener: (code: number | null) => void): unknown;
+  };
   cdp: CdpClient;
   transport: PipeTransport;
 }
