@@ -44,6 +44,18 @@ export class DaemonServer {
     this.token = t;
   }
 
+  /**
+   * Read the current in-memory root token. Used by /v1/tokens/mint (Task A12)
+   * via a closure passed to its route registrar — every mint reads the CURRENT
+   * token at call time, so a hot-swap from replaceRootToken() takes effect on
+   * the very next mint request without re-registering the route. Exposing this
+   * is safe because the daemon binds to 127.0.0.1 only and all calls are
+   * bearer-gated before reaching any handler.
+   */
+  getRootToken(): string {
+    return this.token;
+  }
+
   addRoute(method: Method, path: string, handler: RouteHandler): void {
     this.routes.set(`${method} ${path}`, handler);
   }

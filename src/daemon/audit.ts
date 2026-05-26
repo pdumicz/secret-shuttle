@@ -11,7 +11,8 @@ export type DaemonAuditAction =
   | "approval_created" | "approval_granted" | "approval_denied"
   | "approval_expired" | "approval_used" | "approval_cancelled" | "approval_mismatch"
   | "import"
-  | "bootstrap_plan" | "bootstrap_step";
+  | "bootstrap_plan" | "bootstrap_step"
+  | "tokens_mint";
 
 export interface DaemonAuditEvent {
   action: DaemonAuditAction;
@@ -59,6 +60,19 @@ export interface DaemonAuditEvent {
    * should pass the grant's owner_agent_id explicitly.
    */
   actor_agent_id?: string;
+  /**
+   * The agent_id of the caller that minted a child token via /v1/tokens/mint
+   * (Task A12). Equal to `actor_agent_id` for the same event — recorded as a
+   * dedicated field so audit consumers can correlate parent→child trees
+   * without parsing actor_agent_id semantics.
+   */
+  parent_agent_id?: string;
+  /**
+   * The agent_id minted by /v1/tokens/mint (Task A12). For non-root callers
+   * this MUST start with `${parent_agent_id}.` (namespace restriction enforced
+   * by the route).
+   */
+  child_agent_id?: string;
 }
 
 /**

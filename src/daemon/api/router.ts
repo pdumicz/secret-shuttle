@@ -23,6 +23,8 @@ import { registerSecretsImportRoute } from "./routes/secrets-import.js";
 import { registerKeychainRoutes } from "./routes/keychain.js";
 import { registerHubRoutes } from "../hub/hub-server.js";
 import { registerBootstrapRoutes } from "./routes/bootstrap.js";
+import { registerTokens } from "./routes/tokens.js";
+import { registerWhoami } from "./routes/whoami.js";
 
 export function registerRoutes(
   server: DaemonServer,
@@ -51,4 +53,9 @@ export function registerRoutes(
   registerSecretsImportRoute(server, services, daemonPortRef);
   registerKeychainRoutes(server, services);
   registerBootstrapRoutes(server, services, daemonPortRef);
+  // /v1/tokens/mint reads the CURRENT root token on every call via a closure,
+  // so a future replaceRootToken() hot-swap (Task A13) takes effect on the
+  // next mint without re-registering the route.
+  registerTokens(server, () => server.getRootToken());
+  registerWhoami(server);
 }

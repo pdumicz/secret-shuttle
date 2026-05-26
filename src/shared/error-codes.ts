@@ -110,6 +110,11 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     hint: () => "Edit secret-shuttle.yml: replace the unknown destination shorthand with one of: vercel:<env>, github-actions:owner/repo, cloudflare:<env>, supabase:<projectref>.",
     nextAction: () => "secret-shuttle bootstrap",
   },
+  agent_id_namespace_violation: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () =>
+      "Non-root callers can only mint children under their own agent_id prefix (e.g., caller \"claude-7f2a\" can mint \"claude-7f2a.helper-3a1b\"). Re-run with --child-id starting with your own agent_id followed by a dot.",
+  },
 
   // ── Not found ──────────────────────────────────────────────────────────────
   not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },

@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { ShuttleError } from "../../shared/errors.js";
 import { writeAgentFile, writeAgentSnippet } from "../agent-writer.js";
 import { deriveSkillUrl, type RepositoryField } from "../skill-url.js";
+import { daemonRequest } from "../../client/daemon-client.js";
+import { ok, outputJson } from "../../shared/result.js";
 
 const BEGIN_MARKER = "<!-- secret-shuttle:begin -->";
 const END_MARKER = "<!-- secret-shuttle:end -->";
@@ -144,6 +146,17 @@ Examples:
       const branch = opts.branch ?? opts.ref;
       const url = agentPrintSkillUrl(pkg, branch !== undefined ? { branch } : {});
       process.stdout.write(`${url}\n`);
+    });
+
+  agent
+    .command("mint")
+    .description("Mint a child agent token (namespace-restricted to caller; root mints any agent_id).")
+    .requiredOption("--child-id <id>", "Requested child agent_id (e.g., claude-7f2a.proj-acme-prod)")
+    .action(async (options: { childId: string }) => {
+      const r = await daemonRequest<{ token: string; agent_id: string }>("POST", "/v1/tokens/mint", {
+        agent_id: options.childId,
+      });
+      outputJson(ok(r));
     });
 
   return agent;
