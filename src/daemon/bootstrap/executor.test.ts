@@ -318,3 +318,129 @@ test("executeBatch: existing source skips source step", async () => {
   assert.strictEqual(revealCalled, false);
   assert.strictEqual(result.completed, 1);
 });
+
+test("executeBatch: retry reuses prior ref and only re-runs failed destinations", async () => {
+  const store = await setupStore();
+  // Simulate a prior run that succeeded at source and at dest1 but failed dest2.
+  await store.save({
+    batch_id: "retry",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [{
+      secret: "API_KEY",
+      ref: "ss://local/prod/API_KEY",
+      source: { kind: "random_32_bytes" },
+      destinations: [
+        { shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" },
+        { shorthand: "github-actions:acme/widgets", template_id: "github-actions-secret-set", template_params: {}, domain: "github.com" },
+      ],
+    }],
+    step_results: {
+      API_KEY: {
+        ok: false,
+        ref: "ss://local/prod/API_KEY",
+        destinations_pushed: [
+          { destination: "vercel:production", ok: true },
+          { destination: "github-actions:acme/widgets", ok: false, error_code: "template_exec_failed", message: "exit 1" },
+        ],
+        error_code: "destination_partial_failure",
+      },
+    },
+    created_at: Date.now(),
+    status: "failed_partial",
+  });
+
+  let generateCalled = 0;
+  const templateCalls: Array<{ id: string; ref: string }> = [];
+  const result = await executeBatch(store, "retry", makeDeps({
+    generateSecret: async () => {
+      generateCalled += 1;
+      return { generated: true, secret_ref: "ss://local/prod/API_KEY", name: "API_KEY", environment: "production", fingerprint: "fp", value_visible_to_agent: false as const };
+    },
+    runTemplate: async (_s, _p, input) => {
+      templateCalls.push({ id: (input as { templateId: string; ref: string }).templateId, ref: (input as { templateId: string; ref: string }).ref });
+      return { executed: true, template_id: (input as { templateId: string }).templateId, secret_ref: (input as { ref: string }).ref, binary_path: null, binary_sha256: null, exit_code: 0, value_visible_to_agent: false as const };
+    },
+  }));
+
+  assert.strictEqual(generateCalled, 0, "source step must not re-run when prior ref exists");
+  assert.strictEqual(templateCalls.length, 1, "only the previously-failed destination must be re-attempted");
+  assert.strictEqual(templateCalls[0]!.id, "github-actions-secret-set", "the retried destination must be the one that previously failed");
+  assert.strictEqual(result.completed, 1);
+  assert.strictEqual(result.failed, 0);
+  const final = await store.get("retry");
+  assert.strictEqual(final?.status, "completed");
+  // Merged destinations preserve both: dest1 from prior (ok=true), dest2 from new (ok=true).
+  const finalDests = final?.step_results["API_KEY"]?.destinations_pushed;
+  assert.strictEqual(finalDests?.length, 2);
+  assert.strictEqual(finalDests?.[0]?.destination, "vercel:production");
+  assert.strictEqual(finalDests?.[0]?.ok, true);
+  assert.strictEqual(finalDests?.[1]?.destination, "github-actions:acme/widgets");
+  assert.strictEqual(finalDests?.[1]?.ok, true);
+});
+
+test("executeBatch: retry that fails again preserves prior ref + destinations_pushed", async () => {
+  const store = await setupStore();
+  await store.save({
+    batch_id: "retry-again",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [{
+      secret: "API_KEY",
+      ref: "ss://local/prod/API_KEY",
+      source: { kind: "random_32_bytes" },
+      destinations: [
+        { shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" },
+      ],
+    }],
+    step_results: {
+      API_KEY: {
+        ok: false,
+        ref: "ss://local/prod/API_KEY",
+        destinations_pushed: [{ destination: "vercel:production", ok: false, error_code: "template_exec_failed", message: "exit 1" }],
+        error_code: "destination_partial_failure",
+      },
+    },
+    created_at: Date.now(),
+    status: "failed_partial",
+  });
+
+  // Destination fails again on retry.
+  await executeBatch(store, "retry-again", makeDeps({
+    runTemplate: async () => ({ executed: false, template_id: "vercel-env-add", secret_ref: "ss://local/prod/API_KEY", binary_path: null, binary_sha256: null, exit_code: 1, value_visible_to_agent: false as const }),
+  }));
+
+  const final = await store.get("retry-again");
+  // Ref must still be preserved across the failed retry.
+  assert.strictEqual(final?.step_results["API_KEY"]?.ref, "ss://local/prod/API_KEY", "prior ref must survive a second failed run");
+  // destinations_pushed must reflect the latest attempt.
+  assert.strictEqual(final?.step_results["API_KEY"]?.destinations_pushed?.[0]?.ok, false);
+});
+
+test("executeBatch: no prior ref → source step still runs as before", async () => {
+  // Regression guard: existing single-run path must still work.
+  const store = await setupStore();
+  await store.save({
+    batch_id: "fresh",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [{
+      secret: "API_KEY",
+      ref: "ss://local/prod/API_KEY",
+      source: { kind: "random_32_bytes" },
+      destinations: [{ shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" }],
+    }],
+    step_results: {},
+    created_at: Date.now(),
+    status: "pending",
+  });
+
+  let generateCalled = 0;
+  await executeBatch(store, "fresh", makeDeps({
+    generateSecret: async () => {
+      generateCalled += 1;
+      return { generated: true, secret_ref: "ss://local/prod/API_KEY", name: "API_KEY", environment: "production", fingerprint: "fp", value_visible_to_agent: false as const };
+    },
+  }));
+  assert.strictEqual(generateCalled, 1, "source step must run on first attempt");
+});

@@ -1,6 +1,6 @@
 import { ShuttleError } from "../../shared/errors.js";
 import { writeDaemonAudit } from "../audit.js";
-import type { BootstrapStore, BatchState, PlanEntry } from "./store.js";
+import type { BootstrapStore, BatchState, PlanEntry, ResolvedDestination } from "./store.js";
 import type { DaemonServices } from "../services.js";
 import type { BootstrapAuthority } from "./authority.js";
 import type {
@@ -92,33 +92,68 @@ export async function executeBatch(
   const authority: BootstrapAuthority = { batchId };
 
   for (const entry of state.plan) {
-    if (state.step_results[entry.secret]?.ok === true) {
+    const prior = state.step_results[entry.secret];
+    if (prior?.ok === true) {
       continue;
     }
 
     try {
-      const ref = await runSourceStep(entry, deps, authority);
-      const destinationsPushed = await runDestinationSteps(entry, ref, deps, authority);
-      const anyDestFailed = destinationsPushed.some((d) => !d.ok);
+      // Reuse prior ref if the source step already completed in an earlier run.
+      // This makes destination-only retries safe: we don't re-call
+      // generateSecretCore (which would either throw secret_exists or, with
+      // --force, clobber a value that downstream destinations may have already
+      // consumed correctly).
+      const ref =
+        prior?.ref !== undefined
+          ? prior.ref
+          : await runSourceStep(entry, deps, authority);
+
+      // Carry forward any destinations that previously succeeded — they must NOT
+      // be re-pushed. Run only the destinations that previously failed or were
+      // never attempted.
+      const priorDestinations = prior?.destinations_pushed ?? [];
+      const successfulPriorByShorthand = new Map<
+        string,
+        { destination: string; ok: boolean; error_code?: string; message?: string }
+      >();
+      for (const p of priorDestinations) {
+        if (p.ok === true) successfulPriorByShorthand.set(p.destination, p);
+      }
+      const destinationsToAttempt = entry.destinations.filter(
+        (d) => !successfulPriorByShorthand.has(d.shorthand),
+      );
+      const newAttempts = await runDestinationSteps(destinationsToAttempt, ref, deps, authority);
+
+      // Merge in the ORDER from entry.destinations so downstream consumers see a
+      // consistent shape across runs.
+      const merged: Array<{ destination: string; ok: boolean; error_code?: string; message?: string }> = entry.destinations.map(
+        (d) => successfulPriorByShorthand.get(d.shorthand) ?? newAttempts.find((n) => n.destination === d.shorthand)!,
+      );
+
+      const anyDestFailed = merged.some((d) => !d.ok);
       state.step_results[entry.secret] = {
         ok: !anyDestFailed,
         ref,
-        destinations_pushed: destinationsPushed,
+        destinations_pushed: merged,
         ...(anyDestFailed ? { error_code: "destination_partial_failure" } : {}),
       };
       await writeDaemonAudit({ action: "bootstrap_step", ok: !anyDestFailed, ref });
     } catch (e) {
       const errorCode = e instanceof ShuttleError ? e.code : "unexpected_error";
       const message = e instanceof Error ? e.message : String(e);
+      // If we already had a ref from a prior run, preserve it so subsequent
+      // retries can still reuse it (don't reset to the source step on a third try).
       state.step_results[entry.secret] = {
         ok: false,
         error_code: errorCode,
         message,
+        ...(prior?.ref !== undefined ? { ref: prior.ref } : {}),
+        ...(prior?.destinations_pushed !== undefined ? { destinations_pushed: prior.destinations_pushed } : {}),
       };
       await writeDaemonAudit({
         action: "bootstrap_step",
         ok: false,
-        ref: entry.ref,
+        ref: prior?.ref ?? entry.ref,
         error_code: errorCode,
       });
     }
@@ -185,13 +220,13 @@ async function runSourceStep(
 }
 
 async function runDestinationSteps(
-  entry: PlanEntry,
+  destinations: ResolvedDestination[],
   ref: string,
   deps: ExecutorDeps,
   authority: BootstrapAuthority,
 ): Promise<Array<{ destination: string; ok: boolean; error_code?: string; message?: string }>> {
   const results: Array<{ destination: string; ok: boolean; error_code?: string; message?: string }> = [];
-  for (const dest of entry.destinations) {
+  for (const dest of destinations) {
     try {
       const result = await deps.runTemplate(
         deps.services,
