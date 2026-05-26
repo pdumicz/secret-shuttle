@@ -78,4 +78,14 @@ export class WindowsKeychain implements KeychainAdapter {
       );
     }
   }
+
+  /**
+   * Passive existence check. Windows DPAPI unlock is transparent (no UI
+   * prompt), so a get() + null-check is safe here. Passwords are discarded
+   * immediately; the return value is boolean only.
+   */
+  async hasEntry(service: string, account: string): Promise<boolean> {
+    const result = await this.get(service, account);
+    return result !== null;
+  }
 }

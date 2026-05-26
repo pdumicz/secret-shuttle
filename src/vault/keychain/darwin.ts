@@ -4,6 +4,7 @@ import type { KeychainAdapter } from "./types.js";
 // Dynamic import so the module can be loaded on platforms where @napi-rs/keyring
 // fails (we want isAvailable() to return false rather than module-load throwing).
 let KeyringEntry: typeof import("@napi-rs/keyring").AsyncEntry | null = null;
+let findCredentialsAsyncFn: typeof import("@napi-rs/keyring").findCredentialsAsync | null = null;
 let loadAttempted = false;
 
 async function loadKeyring(): Promise<typeof import("@napi-rs/keyring").AsyncEntry | null> {
@@ -12,6 +13,7 @@ async function loadKeyring(): Promise<typeof import("@napi-rs/keyring").AsyncEnt
   try {
     const mod = await import("@napi-rs/keyring");
     KeyringEntry = mod.AsyncEntry;
+    findCredentialsAsyncFn = mod.findCredentialsAsync;
     return KeyringEntry;
   } catch {
     return null;
@@ -85,6 +87,22 @@ export class DarwinKeychain implements KeychainAdapter {
         "keychain_unavailable",
         `Keychain delete failed: ${e instanceof Error ? e.message : String(e)}`,
       );
+    }
+  }
+
+  /**
+   * Passive existence check via findCredentialsAsync — enumerates entries by
+   * service name without triggering Touch ID or loading passwords into memory
+   * for comparison. Passwords in the returned array are discarded immediately.
+   */
+  async hasEntry(service: string, account: string): Promise<boolean> {
+    await loadKeyring();
+    if (findCredentialsAsyncFn === null) return false;
+    try {
+      const entries = await findCredentialsAsyncFn(service);
+      return entries.some((e) => e.account === account);
+    } catch {
+      return false;
     }
   }
 }

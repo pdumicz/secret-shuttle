@@ -167,7 +167,16 @@ export function initCommand(): Command {
       // Step 2: Ensure vault exists and is unlocked (open passphrase UI if needed).
       const vaultJustCreated = await ensureVaultUnlocked();
 
-      // Step 3: Keychain enrollment — only if vault was just created AND --no-keychain
+      // Step 3a: If --no-keychain was passed, persist the opt-out on the envelope
+      // so that the C2 opportunistic enrollment (which runs during the passphrase
+      // UI submit) is also suppressed on future unlocks. This calls
+      // /v1/keychain/disable which writes keychain_opt_out: true to the envelope
+      // and deletes any existing keychain entry — idempotent.
+      if (options.keychain === false) {
+        await daemonRequest("POST", "/v1/keychain/disable");
+      }
+
+      // Step 3b: Keychain enrollment — only if vault was just created AND --no-keychain
       // not set. Skip silently on unavailable platforms.
       const keychainEnrolled =
         options.keychain !== false && vaultJustCreated

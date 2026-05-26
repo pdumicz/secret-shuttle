@@ -27,7 +27,9 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
     // unavailable), fall through to the existing passphrase UI flow unchanged.
     if (envelope !== null) {
       const keychain = services.keychain ?? getKeychainAdapter();
-      if (await keychain.isAvailable()) {
+      // Respect the persistent opt-out: skip both the keychain-first read (C1)
+      // and the opportunistic write (C2) when opt_out === true.
+      if (envelope.keychain_opt_out !== true && await keychain.isAvailable()) {
         const cached = await keychain.get("secret-shuttle", envelope.id);
         if (cached !== null) {
           try {
@@ -138,16 +140,22 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
       await writeDaemonAudit({ action: "unlock", ok: true });
 
       // Plan 5b/5f-impl C2: opportunistic keychain enrollment. If keychain is
-      // available, cache the master key so the next unlock can skip the
-      // passphrase UI. Failures are swallowed — unlock has already succeeded;
-      // this is best-effort caching, not a hard requirement.
+      // available AND the vault has not opted out, cache the master key so the
+      // next unlock can skip the passphrase UI. Failures are swallowed — unlock
+      // has already succeeded; this is best-effort caching, not a requirement.
+      //
+      // Re-read the envelope to get the current opt-out flag (it may have been
+      // written to disk moments ago if this was a create=1 flow).
       if (enrollEnvelopeId !== null) {
-        const keychain = services.keychain ?? getKeychainAdapter();
-        if (await keychain.isAvailable()) {
-          try {
-            await keychain.set("secret-shuttle", enrollEnvelopeId, masterKey);
-          } catch {
-            // Best-effort; do not surface to caller.
+        const currentEnvelope = await readEnvelope();
+        if (currentEnvelope === null || currentEnvelope.keychain_opt_out !== true) {
+          const keychain = services.keychain ?? getKeychainAdapter();
+          if (await keychain.isAvailable()) {
+            try {
+              await keychain.set("secret-shuttle", enrollEnvelopeId, masterKey);
+            } catch {
+              // Best-effort; do not surface to caller.
+            }
           }
         }
       }

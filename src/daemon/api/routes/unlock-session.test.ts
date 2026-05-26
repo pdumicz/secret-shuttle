@@ -25,6 +25,9 @@ class MockKeychain implements KeychainAdapter {
   async delete(service: string, account: string): Promise<void> {
     this.entries.delete(`${service}:${account}`);
   }
+  async hasEntry(service: string, account: string): Promise<boolean> {
+    return this.entries.has(`${service}:${account}`);
+  }
 }
 
 // ── shared test harness ─────────────────────────────────────────────────────
@@ -339,6 +342,7 @@ test("unlock-session: keychain.set failure does NOT block unlock", async () => {
     },
     async get(svc, acct) { return base.get(svc, acct); },
     async delete(svc, acct) { return base.delete(svc, acct); },
+    async hasEntry(svc, acct) { return base.hasEntry(svc, acct); },
   };
 
   await withUnlockUiDaemon(async (ctx) => {
@@ -409,4 +413,128 @@ test("unlock-session: keychain unavailable → no enrollment, no error", async (
     // keychain.set must NOT have been called (enrollment skipped when unavailable).
     assert.equal(setCalled, 0, "keychain.set must NOT be called when keychain is unavailable");
   }, { keychain });
+});
+
+// ── P1.1 opt-out regression tests ──────────────────────────────────────────
+
+test("unlock-session: opt-out vault skips keychain (no read, no enroll)", async () => {
+  const keychain = new MockKeychain();
+  let getCalled = 0;
+  let setCalled = 0;
+  const counting: KeychainAdapter = {
+    async isAvailable() { return keychain.isAvailable(); },
+    async set(s, a, v) { setCalled++; return keychain.set(s, a, v); },
+    async get(s, a) { getCalled++; return keychain.get(s, a); },
+    async delete(s, a) { return keychain.delete(s, a); },
+    async hasEntry(s, a) { return keychain.hasEntry(s, a); },
+  };
+
+  await withUnlockUiDaemon(async (ctx) => {
+    // Bootstrap: create vault via passphrase (which may call set via C2).
+    const { envelopeId } = await bootstrapVaultWithPassphrase(ctx.port, ctx.services);
+
+    // Set opt-out flag on the envelope directly.
+    const env = await (await import("../../../vault/envelope.js")).readEnvelope();
+    assert.ok(env !== null);
+    await (await import("../../../vault/envelope.js")).writeEnvelope({ ...env, keychain_opt_out: true });
+    // Also clear any keychain entry that C2 may have written during bootstrap.
+    keychain.entries.clear();
+    getCalled = 0;
+    setCalled = 0;
+
+    // Now POST /v1/unlock/start — should skip keychain read entirely.
+    const res = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as Record<string, unknown>;
+
+    // Must fall through to passphrase UI (no keychain fast-path).
+    assert.equal(typeof body.session_id, "string", "session_id must be present (skipped keychain)");
+    assert.equal(getCalled, 0, "keychain.get must NOT be called when opt-out is set");
+
+    // Submit passphrase to unlock.
+    const session = ctx.services.unlockSessions.get(body.session_id as string);
+    assert.ok(session, "session must exist");
+    const submitUrl = `http://127.0.0.1:${ctx.port}/ui/unlock/${body.session_id}?token=${session.ui_token}`;
+    const submitRes = await fetch(submitUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "test-passphrase-bootstrap", set_passphrase: false }),
+    });
+    assert.equal(submitRes.status, 200, "passphrase unlock must succeed");
+
+    // C2 enroll must NOT have been called.
+    assert.equal(setCalled, 0, "keychain.set must NOT be called when opt-out is set (C2 suppressed)");
+    // Keychain must still be empty.
+    const entry = keychain.entries.get(`secret-shuttle:${envelopeId}`);
+    assert.equal(entry, undefined, "keychain must remain empty when opt-out is set");
+  }, { keychain: counting });
+});
+
+test("unlock-session: clearing opt-out (enable) resumes keychain caching", async () => {
+  const keychain = new MockKeychain();
+  let setCalled = 0;
+  const counting: KeychainAdapter = {
+    async isAvailable() { return keychain.isAvailable(); },
+    async set(s, a, v) { setCalled++; return keychain.set(s, a, v); },
+    async get(s, a) { return keychain.get(s, a); },
+    async delete(s, a) { return keychain.delete(s, a); },
+    async hasEntry(s, a) { return keychain.hasEntry(s, a); },
+  };
+
+  await withUnlockUiDaemon(async (ctx) => {
+    // Bootstrap with opt-out flag set.
+    await bootstrapVaultWithPassphrase(ctx.port, ctx.services);
+    const env = await (await import("../../../vault/envelope.js")).readEnvelope();
+    assert.ok(env !== null);
+    await (await import("../../../vault/envelope.js")).writeEnvelope({ ...env, keychain_opt_out: true });
+    keychain.entries.clear();
+    setCalled = 0;
+
+    // Confirm that with opt-out, set is not called on next passphrase unlock.
+    ctx.services.lock.lock();
+    const startRes = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(startRes.status, 200);
+    const startBody = await startRes.json() as { session_id: string };
+    const session = ctx.services.unlockSessions.get(startBody.session_id);
+    assert.ok(session, "session must exist");
+    const submitUrl = `http://127.0.0.1:${ctx.port}/ui/unlock/${startBody.session_id}?token=${session.ui_token}`;
+    await fetch(submitUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "test-passphrase-bootstrap", set_passphrase: false }),
+    });
+    assert.equal(setCalled, 0, "keychain.set must NOT be called when opt-out is still set");
+
+    // Now clear the opt-out by writing the envelope without the flag.
+    const envAfter = await (await import("../../../vault/envelope.js")).readEnvelope();
+    assert.ok(envAfter !== null);
+    await (await import("../../../vault/envelope.js")).writeEnvelope({ ...envAfter, keychain_opt_out: false });
+    setCalled = 0;
+
+    // Re-lock and unlock via passphrase — C2 should now enroll.
+    ctx.services.lock.lock();
+    const startRes2 = await fetch(`http://127.0.0.1:${ctx.port}/v1/unlock/start`, {
+      method: "POST",
+      headers: { authorization: "Bearer t", "content-type": "application/json" },
+      body: "{}",
+    });
+    const startBody2 = await startRes2.json() as { session_id: string };
+    const session2 = ctx.services.unlockSessions.get(startBody2.session_id);
+    assert.ok(session2, "session must exist after opt-out cleared");
+    const submitUrl2 = `http://127.0.0.1:${ctx.port}/ui/unlock/${startBody2.session_id}?token=${session2.ui_token}`;
+    await fetch(submitUrl2, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ passphrase: "test-passphrase-bootstrap", set_passphrase: false }),
+    });
+    assert.ok(setCalled > 0, "keychain.set must be called after opt-out is cleared (C2 resumed)");
+  }, { keychain: counting });
 });

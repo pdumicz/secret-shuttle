@@ -22,6 +22,7 @@ import { registerHealth } from "../../daemon/api/routes/health.js";
 import { registerUnlockSession } from "../../daemon/api/routes/unlock-session.js";
 import { registerKeychainRoutes } from "../../daemon/api/routes/keychain.js";
 import { writeSocketFile } from "../../daemon/socket-file.js";
+import { readEnvelope } from "../../vault/envelope.js";
 import { initCommand } from "./init.js";
 import type { KeychainAdapter } from "../../vault/keychain/types.js";
 
@@ -43,6 +44,10 @@ class MockKeychain implements KeychainAdapter {
   async delete(service: string, account: string): Promise<void> {
     if (!this.available) throw new Error("keychain unavailable");
     this.entries.delete(`${service}:${account}`);
+  }
+  async hasEntry(service: string, account: string): Promise<boolean> {
+    if (!this.available) return false;
+    return this.entries.has(`${service}:${account}`);
   }
 }
 
@@ -242,8 +247,7 @@ test("init: vault locked + keychain has key → keychain fast-path, no UI needed
 
 test("init: --no-keychain skips keychain enrollment even when vault just created", async () => {
   // Use a keychain that starts empty (no entries) so unlock/start falls through
-  // to the passphrase UI. C2 would normally write an entry, but with --no-keychain
-  // the explicit keychain/enable route is not called.
+  // to the passphrase UI.
   //
   // Strategy: run init and awaitAndSubmitPendingSession concurrently. Init
   // calls /v1/unlock/start (creates a session), then polls /v1/unlock/poll.
@@ -262,9 +266,16 @@ test("init: --no-keychain skips keychain enrollment even when vault just created
     assert.equal(result.ok, true);
     assert.equal(result.vault_just_created, true);
     // --no-keychain: the explicit keychain/enable route must NOT have been called.
-    // C2 still may write via opportunistic enrollment during the UI submit — but
-    // the init step (step 3: maybeEnrollKeychain) is what we're testing is skipped.
     assert.equal(result.keychain_enrolled, false);
+
+    // P1.1: --no-keychain must persist the opt-out flag on the envelope so that
+    // C2 opportunistic enrollment is also suppressed on future unlocks.
+    const env = await readEnvelope();
+    assert.ok(env !== null, "envelope must exist after init");
+    assert.equal(env.keychain_opt_out, true, "keychain_opt_out must be true after --no-keychain");
+
+    // Keychain entries must be empty (C2 was suppressed).
+    assert.equal(keychain.entries.size, 0, "keychain must be empty after --no-keychain init");
   }, { keychain });
 });
 

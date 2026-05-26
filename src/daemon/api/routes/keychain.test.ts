@@ -8,7 +8,7 @@ import { DaemonServer } from "../../server.js";
 import { DaemonServices } from "../../services.js";
 import type { KeychainAdapter } from "../../../vault/keychain/types.js";
 import { registerKeychainRoutes } from "./keychain.js";
-import { encryptEnvelope, writeEnvelope } from "../../../vault/envelope.js";
+import { encryptEnvelope, writeEnvelope, readEnvelope } from "../../../vault/envelope.js";
 
 // ── shared mock keychain ────────────────────────────────────────────────────
 
@@ -28,6 +28,10 @@ class MockKeychain implements KeychainAdapter {
   async delete(service: string, account: string): Promise<void> {
     if (!this.available) throw new Error("keychain unavailable");
     this.entries.delete(`${service}:${account}`);
+  }
+  async hasEntry(service: string, account: string): Promise<boolean> {
+    if (!this.available) return false;
+    return this.entries.has(`${service}:${account}`);
   }
 }
 
@@ -114,6 +118,11 @@ test("POST /v1/keychain/enable: stores master key in keychain when unlocked", as
     const cached = await keychain.get("secret-shuttle", envelopeId);
     assert.ok(cached !== null, "keychain must have an entry");
     assert.deepEqual(cached, masterKey, "cached key must match master key");
+
+    // opt-out flag must NOT be set (enable clears it).
+    const env = await readEnvelope();
+    assert.ok(env !== null, "envelope must exist");
+    assert.notEqual(env.keychain_opt_out, true, "keychain_opt_out must not be true after enable");
   }, keychain);
 });
 
@@ -215,4 +224,76 @@ test("GET /v1/keychain/status: envelope + enrolled → enrolled: true, vault_id 
     assert.equal((r.body as { enrolled: boolean }).enrolled, true);
     assert.equal((r.body as { vault_id: string }).vault_id, envelopeId);
   }, keychain);
+});
+
+// ── P1.1 opt-out regression tests ──────────────────────────────────────────
+
+test("keychain disable persists opt-out flag in envelope", async () => {
+  const keychain = new MockKeychain();
+  await withKeychainDaemon(async (ctx) => {
+    const { masterKey, envelopeId } = await bootstrapVault(ctx.services);
+    // Pre-enroll.
+    await keychain.set("secret-shuttle", envelopeId, masterKey);
+
+    const r = await call(ctx.port, "POST", "/v1/keychain/disable");
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { ok: boolean }).ok, true);
+
+    // Envelope must have the opt-out flag set.
+    const env = await readEnvelope();
+    assert.ok(env !== null, "envelope must exist");
+    assert.equal(env.keychain_opt_out, true, "keychain_opt_out must be true after disable");
+
+    // Keychain entry must be gone.
+    const after = await keychain.get("secret-shuttle", envelopeId);
+    assert.equal(after, null, "keychain entry must be removed after disable");
+  }, keychain);
+});
+
+test("keychain enable clears opt-out flag", async () => {
+  const keychain = new MockKeychain();
+  await withKeychainDaemon(async (ctx) => {
+    const { masterKey, envelopeId } = await bootstrapVault(ctx.services);
+    // Write envelope with opt-out already set.
+    const env = await readEnvelope();
+    assert.ok(env !== null);
+    await writeEnvelope({ ...env, keychain_opt_out: true });
+
+    // Call enable — should write the key AND clear the flag.
+    const r = await call(ctx.port, "POST", "/v1/keychain/enable");
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { enrolled: boolean }).enrolled, true);
+
+    // Envelope opt-out must be cleared.
+    const after = await readEnvelope();
+    assert.ok(after !== null, "envelope must exist");
+    assert.notEqual(after.keychain_opt_out, true, "keychain_opt_out must not be true after enable");
+
+    // Key must be in keychain.
+    const cached = await keychain.get("secret-shuttle", envelopeId);
+    assert.ok(cached !== null, "keychain entry must exist after enable");
+    assert.deepEqual(cached, masterKey, "cached key must match master key");
+  }, keychain);
+});
+
+test("GET /v1/keychain/status: never calls keychain.get (uses hasEntry passively)", async () => {
+  // Wrap MockKeychain to count get() calls.
+  const base = new MockKeychain();
+  let getCalled = 0;
+  const counting: KeychainAdapter = {
+    async isAvailable() { return base.isAvailable(); },
+    async set(s, a, v) { return base.set(s, a, v); },
+    async get(s, a) { getCalled++; return base.get(s, a); },
+    async delete(s, a) { return base.delete(s, a); },
+    async hasEntry(s, a) { return base.hasEntry(s, a); },
+  };
+
+  await withKeychainDaemon(async (ctx) => {
+    const { masterKey, envelopeId } = await bootstrapVault(ctx.services);
+    await base.set("secret-shuttle", envelopeId, masterKey);
+
+    await call(ctx.port, "GET", "/v1/keychain/status");
+
+    assert.equal(getCalled, 0, "keychain.get must NOT be called by status route");
+  }, counting);
 });

@@ -34,4 +34,14 @@ export interface KeychainAdapter {
    * @throws ShuttleError("keychain_unavailable") if isAvailable() is false.
    */
   delete(service: string, account: string): Promise<void>;
+
+  /**
+   * Return true if an entry exists for (service, account) WITHOUT retrieving
+   * the secret value. Never triggers OS credential UI (Touch ID, libsecret
+   * prompt, DPAPI). Returns false on any lookup failure (not found, unavailable).
+   *
+   * Used by GET /v1/keychain/status to determine enrollment without pulling
+   * plaintext into memory or triggering OS UI.
+   */
+  hasEntry(service: string, account: string): Promise<boolean>;
 }

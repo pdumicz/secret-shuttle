@@ -62,4 +62,8 @@ class UnsupportedKeychain implements KeychainAdapter {
       `Keychain not supported on platform: ${this.platform}`,
     );
   }
+
+  async hasEntry(): Promise<boolean> {
+    return false;
+  }
 }

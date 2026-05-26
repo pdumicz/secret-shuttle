@@ -26,6 +26,16 @@ export interface EnvelopeFile {
    * readEnvelope.
    */
   id: string;
+  /**
+   * If true, the unlock flow MUST NOT read from or write to the OS keychain
+   * for this vault. Set by `secret-shuttle keychain disable` (and by
+   * `init --no-keychain`); cleared by `keychain enable`. Persists across
+   * daemon restarts.
+   *
+   * Optional for backward compatibility — absent or false means the
+   * keychain is enabled (enrolled-by-default).
+   */
+  keychain_opt_out?: boolean;
   kdf: "scrypt";
   kdfParams: { N: number; r: number; p: number };
   salt: string;
