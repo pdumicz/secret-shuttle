@@ -13,6 +13,10 @@ import type { Baseline, BackendNodeRef } from "../../chrome/internal-ops.js";
 import { enforceDomain } from "./secrets.js";
 import { autoResumeBlind } from "../../blind-auto-resume.js";
 import type { BrowserHandle } from "../../browser-handles.js";
+import {
+  assertBootstrapAuthorityValid,
+  type BootstrapAuthority,
+} from "../../bootstrap/authority.js";
 
 interface RevealCaptureBody {
   name: string;
@@ -46,15 +50,115 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
     const captureOpt = optString(o, "capture");
     const approvalIds = optApprovalIds(o);
     const b = raw as RevealCaptureBody;
-    let plannedRef: string | undefined;
-    // Hoisted OUTSIDE the try so a post-mint failure (e.g. pre-action
-    // revalidateHandle throws AFTER requireApproval consumed the session)
-    // still carries grant.session_id into the failure audit.  Optional-chained
-    // at use site because grant remains undefined if requireApproval itself
-    // threw (pre-mint failure), in which case no session was consumed and
-    // audit MUST NOT carry session_id.
-    let grant: ApprovalGrant | undefined;
-    try {
+    // SECURITY: HTTP shell constructs opts WITHOUT propagating any
+    // `bootstrap_authority` field. Authority is server-internal only.
+    const input: RevealCaptureInput = {
+      name,
+      environment,
+      source,
+      revealHandleLabel,
+      ...(fieldHandleLabel !== undefined ? { fieldHandleLabel } : {}),
+      ...(containerHandleLabel !== undefined ? { containerHandleLabel } : {}),
+      ...(hideHandleLabel !== undefined ? { hideHandleLabel } : {}),
+      ...(captureOpt !== undefined ? { captureOpt } : {}),
+      ...(b.domain !== undefined ? { domain: b.domain } : {}),
+      ...(b.allowed_domains !== undefined ? { allowedDomains: b.allowed_domains } : {}),
+      ...(b.description !== undefined ? { description: b.description } : {}),
+      ...(b.force !== undefined ? { force: b.force } : {}),
+    };
+    const opts: RevealCaptureOpts = {
+      ...(approvalIds !== undefined ? { approvalIds } : {}),
+      ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
+      ...(b.wait_for_approval !== undefined ? { waitForApproval: b.wait_for_approval } : {}),
+    };
+    return await revealCaptureCore(services, daemonPortRef, input, opts);
+  });
+}
+
+/** Inputs for {@link revealCaptureCore}. Mirrors the route body shape. */
+export interface RevealCaptureInput {
+  name: string;
+  environment: string;
+  source: string;
+  revealHandleLabel: string;
+  fieldHandleLabel?: string;
+  containerHandleLabel?: string;
+  hideHandleLabel?: string;
+  captureOpt?: string;
+  domain?: string;
+  allowedDomains?: string[];
+  description?: string;
+  force?: boolean;
+}
+
+/** Optional opts for {@link revealCaptureCore}. */
+export interface RevealCaptureOpts {
+  approvalIds?: string[];
+  sessionId?: string;
+  waitForApproval?: boolean;
+  /**
+   * Server-internal: when set, the inner requireApprovals call is replaced
+   * with a BootstrapStore validation check. NEVER accepted from HTTP body.
+   */
+  bootstrapAuthority?: BootstrapAuthority;
+}
+
+/** Return shape from {@link revealCaptureCore}. Mirrors the route response. */
+export type RevealCaptureResult =
+  | {
+      captured: true;
+      secret_ref: string;
+      fingerprint: string;
+      absence_proof: "passed";
+      blind_mode: false;
+      value_visible_to_agent: false;
+    }
+  | {
+      captured: "unknown";
+      blind_mode: true;
+      next: "manual_recovery_required";
+      value_visible_to_agent: false;
+    };
+
+/**
+ * Core of the /v1/secrets/reveal-capture route. Exposed so the bootstrap
+ * executor (Plan 5g) can drive reveal-capture under a single human-approved
+ * bootstrap authority.
+ *
+ * Behavior preservation: when called WITHOUT `opts.bootstrapAuthority`, this
+ * function is equivalent to the previous inline route handler.
+ *
+ * Authority bypass: when called WITH a valid `opts.bootstrapAuthority`, the
+ * inner requireApprovals call is replaced with a BootstrapStore validation.
+ * Blind-mode start, sever, deadline-wrapped reveal/resolve/hide, absence
+ * proof, and auto-resume all proceed identically.
+ */
+export async function revealCaptureCore(
+  services: DaemonServices,
+  daemonPortRef: () => number,
+  input: RevealCaptureInput,
+  opts: RevealCaptureOpts = {},
+): Promise<RevealCaptureResult> {
+  services.lock.requireKey();
+  const {
+    name,
+    environment,
+    source,
+    revealHandleLabel,
+    fieldHandleLabel,
+    containerHandleLabel,
+    hideHandleLabel,
+    captureOpt,
+  } = input;
+  let plannedRef: string | undefined;
+  // Hoisted OUTSIDE the try so a post-mint failure (e.g. pre-action
+  // revalidateHandle throws AFTER requireApproval consumed the session)
+  // still carries grant.session_id into the failure audit.  Optional-chained
+  // at use site because grant remains undefined if requireApproval itself
+  // threw (pre-mint failure), in which case no session was consumed and
+  // audit MUST NOT carry session_id.
+  let grant: ApprovalGrant | undefined;
+  try {
       if (services.browser === null) {
         throw new ShuttleError("browser_not_started", "Run `secret-shuttle browser start` first.");
       }
@@ -128,11 +232,11 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
           "field/container and hide handles must share the reveal handle's page/target and domain.",
         );
       }
-      if (b.domain !== undefined && !domainMatches(domain, b.domain)) {
-        throw new ShuttleError("domain_mismatch", `Reveal handle domain ${domain} != ${b.domain}.`);
+      if (input.domain !== undefined && !domainMatches(domain, input.domain)) {
+        throw new ShuttleError("domain_mismatch", `Reveal handle domain ${domain} != ${input.domain}.`);
       }
 
-      const effectiveAllowed = (b.allowed_domains ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean);
+      const effectiveAllowed = (input.allowedDomains ?? []).map((d) => d.trim().toLowerCase()).filter(Boolean);
       if (env === "production" && effectiveAllowed.length === 0) {
         throw new ShuttleError("missing_allow_domain", "Production secrets require at least one allowed domain.");
       }
@@ -176,24 +280,31 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
         ...(targetHandle.page_title !== "" ? { page_title: targetHandle.page_title } : {}),
         ...(targetHandle.page_url_host !== "" ? { page_url_host: targetHandle.page_url_host } : {}),
       };
-      // Single requireApproval call — handles both the initial (no approval_id)
-      // and the retry (approval_id supplied) paths.  When session_id is set and
-      // the binding matches a reveal-capture session pattern (planned_ref +
-      // destination_domain), the call mints a used grant from the session and
-      // the audits emitted below carry grant.session_id; otherwise the call
-      // falls back to the single-use flow and grant.session_id is undefined.
-      const grants = await requireApprovals({
-        store: services.approvals,
-        bindings: [binding],
-        daemonPort: daemonPortRef(),
-        force: true,
-        sessionStore: services.sessionStore,
-        openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
-        ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
-        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
-        ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
-      });
-      grant = grants[0]!
+      if (opts.bootstrapAuthority !== undefined) {
+        // Bootstrap executor path: human already approved the bootstrap binding.
+        // Validate the authority is for an in-progress batch, then skip the
+        // inner requireApprovals call.
+        await assertBootstrapAuthorityValid(opts.bootstrapAuthority, services.bootstrapStore);
+      } else {
+        // Single requireApproval call — handles both the initial (no approval_id)
+        // and the retry (approval_id supplied) paths.  When session_id is set and
+        // the binding matches a reveal-capture session pattern (planned_ref +
+        // destination_domain), the call mints a used grant from the session and
+        // the audits emitted below carry grant.session_id; otherwise the call
+        // falls back to the single-use flow and grant.session_id is undefined.
+        const grants = await requireApprovals({
+          store: services.approvals,
+          bindings: [binding],
+          daemonPort: daemonPortRef(),
+          force: true,
+          sessionStore: services.sessionStore,
+          openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
+          ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+          ...(opts.approvalIds !== undefined ? { approvalIdsFromClient: opts.approvalIds } : {}),
+          ...(opts.waitForApproval === false ? { waitMs: 0 } : {}),
+        });
+        grant = grants[0]!;
+      }
 
       // Daemon OWNS the blind window: black out the agent BEFORE reveal.
       services.blind.start(domain, "reveal_capture");
@@ -298,7 +409,7 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
         await writeDaemonAudit({
           action: "reveal_capture", ok: false, planned_ref: plannedRef, environment: env,
           domain, captured: "unknown", blind_mode: true,
-          ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
+          ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
         });
         return {
           captured: "unknown", blind_mode: true,
@@ -313,8 +424,8 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
         meta = await services.vault.upsertSecret({
           name, environment: env, source, value: capturedValue,
           allowedDomains: effectiveAllowed,
-          ...(b.description !== undefined ? { description: b.description } : {}),
-          ...(b.force !== undefined ? { force: b.force } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.force !== undefined ? { force: input.force } : {}),
         });
       }
 
@@ -339,7 +450,7 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
           await writeDaemonAudit({
             action: "reveal_capture", ok: true, planned_ref: plannedRef, ref: meta.ref, environment: env,
             domain, captured: true, success_signal: "secret_captured", absence_proof: "passed", blind_mode: false,
-            ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
+            ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
           });
           return {
             captured: true, secret_ref: meta.ref,
@@ -355,7 +466,7 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
         action: "reveal_capture", ok: true, planned_ref: plannedRef,
         ...(meta !== undefined ? { ref: meta.ref } : {}),
         environment: env, domain, captured: "unknown", blind_mode: true,
-        ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
+        ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       return {
         captured: "unknown", blind_mode: true,
@@ -375,9 +486,8 @@ export function registerRevealCapture(server: DaemonServer, services: DaemonServ
         // the binding matched the session pattern.
         ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
-      throw err;
-    }
-  });
+    throw err;
+  }
 }
 
 // Mirrors inject-submit.ts's withDeadline. Races `p` against a deadline; clears

@@ -1,4 +1,5 @@
 // src/daemon/services.ts
+import path from "node:path";
 import { ApprovalStore } from "./approvals/store.js";
 import { SessionStore } from "./approvals/session-store.js";
 import { LockedVaultState } from "../vault/locked-state.js";
@@ -14,6 +15,7 @@ import { writeDaemonAudit } from "./audit.js";
 import { getShuttlePaths } from "../shared/config.js";
 import { HubBroker } from "./hub/hub-broker.js";
 import { openUrl } from "./approvals/open-url.js";
+import { BootstrapStore } from "./bootstrap/store.js";
 import type { KeychainAdapter } from "../vault/keychain/types.js";
 
 export interface UnlockSession {
@@ -93,6 +95,9 @@ export class DaemonServices {
   readonly compareLimiter = new RateLimiter(5, 60_000);
   readonly unlockSessions = new UnlockSessions();
   readonly sessionStore = new SessionStore();
+  readonly bootstrapStore = new BootstrapStore({
+    rootDir: path.join(getShuttlePaths().homeDir, "bootstrap-batches"),
+  });
   browser: BrowserOps | null = null;
   browserSessionId: string | null = null;
   /** Internal CDP client for the running Chrome process; null before browser start. */

@@ -15,6 +15,10 @@ import { ALL_SECRET_ACTIONS, type SecretAction } from "../../../vault/types.js";
 import { asObject, optApprovalIds, reqString } from "../validate.js";
 import { disableObservationDomains } from "../../chrome/internal-ops.js";
 import type { InjectResult } from "../../chrome/internal-ops.js";
+import {
+  assertBootstrapAuthorityValid,
+  type BootstrapAuthority,
+} from "../../bootstrap/authority.js";
 
 interface ListBody { environment?: string; source?: string; include_deleted?: boolean; }
 interface GenerateBody {
@@ -65,6 +69,182 @@ function validatedActions(raw: unknown): SecretAction[] | undefined {
   return raw as SecretAction[];
 }
 
+/** Inputs for {@link generateSecretCore}. Mirrors GenerateBody minus opt fields. */
+export interface GenerateSecretInput {
+  name: string;
+  environment: string;
+  source?: string;
+  kind?: string;
+  allowedDomains?: string[];
+  /**
+   * Pass-through of body.allowed_actions (unknown shape) so the validation
+   * happens INSIDE the core's try block — matching the previous handler's
+   * audit behavior where a bad allowed_actions emits a failure audit.
+   * The bootstrap executor passes already-validated SecretAction[].
+   */
+  allowedActions?: unknown;
+  description?: string;
+  force?: boolean;
+}
+
+/** Optional opts for {@link generateSecretCore}. */
+export interface GenerateSecretOpts {
+  approvalIds?: string[];
+  sessionId?: string;
+  waitForApproval?: boolean;
+  /**
+   * Server-internal: when set, the inner requireApprovals call is replaced
+   * with a BootstrapStore validation check. NEVER accepted from HTTP body.
+   */
+  bootstrapAuthority?: BootstrapAuthority;
+}
+
+/** Return shape from {@link generateSecretCore}. Mirrors the route response. */
+export interface GenerateSecretResult {
+  generated: true;
+  secret_ref: string;
+  name: string;
+  environment: string;
+  fingerprint: string;
+  value_visible_to_agent: false;
+}
+
+/**
+ * Core of the /v1/secrets/generate route. Exposed so the bootstrap executor
+ * (Plan 5g) can drive secret generation under a single human-approved
+ * bootstrap authority without prompting for an inner approval per step.
+ *
+ * Behavior preservation: when called WITHOUT `opts.bootstrapAuthority`, this
+ * function is byte-for-byte equivalent to the previous inline route handler.
+ * Same binding, same requireApprovals call, same audit, same return shape.
+ *
+ * Authority bypass: when called WITH a valid `opts.bootstrapAuthority`, the
+ * inner requireApprovals call is replaced with a BootstrapStore validation;
+ * the rest of the flow (upsertSecret, audit, return) is unchanged. Audit
+ * never carries session_id under bootstrap-authority (no grant is minted).
+ */
+export async function generateSecretCore(
+  services: DaemonServices,
+  daemonPortRef: () => number,
+  input: GenerateSecretInput,
+  opts: GenerateSecretOpts = {},
+): Promise<GenerateSecretResult> {
+  services.lock.requireKey();
+  // Hoisted OUTSIDE the try so a post-mint failure (e.g. vault.upsertSecret
+  // throws secret_exists AFTER requireApprovals consumed the session) still
+  // carries grant.session_id into the failure audit.  Optional-chained at
+  // use site because grant remains undefined if requireApprovals itself threw
+  // (pre-mint failure), in which case no session was consumed and audit
+  // MUST NOT carry session_id. Under bootstrap-authority no grant is minted
+  // so this stays undefined and audit omits session_id (correct).
+  let grant: ApprovalGrant | undefined;
+  try {
+    const env = canonicalEnvironment(input.environment);
+    const plannedRef = buildSecretRef(input.source ?? "local", env, input.name);
+    const effectiveAllowed = (input.allowedDomains ?? []).map(normalizeDomain);
+
+    // Validate BEFORE building the binding / requireApprovals (§4.4): a bad
+    // action set must fail fast, never after a human has approved.
+    const requestedActions = validatedActions(input.allowedActions);
+    // Effective scope shown in the approval == what will actually be stored
+    // (mirrors vault.upsertSecret's own resolution, §4.4): explicit wins; else
+    // preserve an existing record's actions on overwrite; else the default set.
+    let existingActions: SecretAction[] | undefined;
+    try {
+      existingActions = [...(await services.vault.getSecret(plannedRef)).allowed_actions];
+    } catch {
+      existingActions = undefined;
+    }
+    const effectiveActions = requestedActions ?? existingActions ?? [...DEFAULT_ACTIONS];
+
+    if (canonicalEnvironment(env) === "production" && effectiveAllowed.length === 0) {
+      throw new ShuttleError("missing_allow_domain", "Production secrets require at least one allowed domain.");
+    }
+
+    const binding: ApprovalBinding = {
+      action: "generate",
+      ref: null,
+      planned_ref: plannedRef,
+      environment: env,
+      destination_domain: null,
+      target_id: null,
+      field_fingerprint: null,
+      template_id: null,
+      template_params: null,
+      allowed_domains: effectiveAllowed,
+      allowed_actions: effectiveActions,
+    };
+
+    if (opts.bootstrapAuthority !== undefined) {
+      // Bootstrap executor path: human already approved the bootstrap binding.
+      // Validate the authority is for an in-progress batch, then skip the
+      // inner requireApprovals call (which would otherwise prompt the human
+      // again for this step).
+      await assertBootstrapAuthorityValid(opts.bootstrapAuthority, services.bootstrapStore);
+    } else {
+      // Standard HTTP path: single requireApprovals call — handles both the
+      // initial (no approval_ids) and the retry (approval_ids supplied) paths.
+      // When session_id is set and the binding matches the session pattern,
+      // the call mints a used grant from the session and the audit emitted
+      // below will carry grant.session_id; otherwise the call falls back to
+      // the single-use flow and grant.session_id is undefined.
+      const grants = await requireApprovals({
+        store: services.approvals,
+        bindings: [binding],
+        daemonPort: daemonPortRef(),
+        sessionStore: services.sessionStore,
+        openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
+        ...(opts.sessionId !== undefined ? { sessionId: opts.sessionId } : {}),
+        ...(opts.approvalIds !== undefined ? { approvalIdsFromClient: opts.approvalIds } : {}),
+        ...(opts.waitForApproval === false ? { waitMs: 0 } : {}),
+      });
+      grant = grants[0]!;
+    }
+
+    const value = generateSecretValue(input.kind ?? "random_32_bytes");
+    const meta = await services.vault.upsertSecret({
+      name: input.name,
+      environment: env,
+      source: input.source ?? "local",
+      value,
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      allowedDomains: effectiveAllowed,
+      allowedActions: effectiveActions,
+      ...(input.force !== undefined ? { force: input.force } : {}),
+    });
+    await writeDaemonAudit({
+      action: "generate",
+      ok: true,
+      ref: meta.ref,
+      environment: meta.environment,
+      ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
+    });
+    return {
+      generated: true,
+      secret_ref: meta.ref,
+      name: meta.name,
+      environment: meta.environment,
+      fingerprint: meta.fingerprint,
+      value_visible_to_agent: false,
+    };
+  } catch (err) {
+    await writeDaemonAudit({
+      action: "generate",
+      ok: false,
+      error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+      ...(input.name !== undefined && input.environment !== undefined
+        ? { ref: buildSecretRef(input.source ?? "local", input.environment, input.name) }
+        : {}),
+      // Optional-chain: grant is undefined if requireApprovals itself threw
+      // (pre-mint failure — no session consumed → audit MUST NOT carry
+      // session_id).  Otherwise grant.session_id is the source session iff
+      // the binding matched the session pattern.
+      ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
+    });
+    throw err;
+  }
+}
+
 export function registerSecrets(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/secrets/list", async (_req, raw) => {
     services.lock.requireKey();
@@ -86,111 +266,36 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
   });
 
   server.addRoute("POST", "/v1/secrets/generate", async (_req, raw) => {
+    // Preserve the previous ordering: vault-lock check first, then body
+    // parsing. Both throw outside the audit-on-failure block, so the order
+    // determines which error code surfaces when both conditions hold.
     services.lock.requireKey();
     const o = asObject(raw);
     const approvalIds = optApprovalIds(o);
     const b = raw as GenerateBody;
-    // Hoisted OUTSIDE the try so a post-mint failure (e.g. vault.upsertSecret
-    // throws secret_exists AFTER requireApprovals consumed the session) still
-    // carries grant.session_id into the failure audit.  Optional-chained at
-    // use site because grant remains undefined if requireApprovals itself threw
-    // (pre-mint failure), in which case no session was consumed and audit
-    // MUST NOT carry session_id.
-    let grant: ApprovalGrant | undefined;
-    try {
-      const env = canonicalEnvironment(b.environment);
-      const plannedRef = buildSecretRef(b.source ?? "local", env, b.name);
-      const effectiveAllowed = (b.allowed_domains ?? []).map(normalizeDomain);
-
-      // Validate BEFORE building the binding / requireApprovals (§4.4): a bad
-      // action set must fail fast, never after a human has approved.
-      const requestedActions = validatedActions(b.allowed_actions);
-      // Effective scope shown in the approval == what will actually be stored
-      // (mirrors vault.upsertSecret's own resolution, §4.4): explicit wins; else
-      // preserve an existing record's actions on overwrite; else the default set.
-      let existingActions: SecretAction[] | undefined;
-      try {
-        existingActions = [...(await services.vault.getSecret(plannedRef)).allowed_actions];
-      } catch {
-        existingActions = undefined;
-      }
-      const effectiveActions = requestedActions ?? existingActions ?? [...DEFAULT_ACTIONS];
-
-      if (canonicalEnvironment(env) === "production" && effectiveAllowed.length === 0) {
-        throw new ShuttleError("missing_allow_domain", "Production secrets require at least one allowed domain.");
-      }
-
-      const binding: ApprovalBinding = {
-        action: "generate",
-        ref: null,
-        planned_ref: plannedRef,
-        environment: env,
-        destination_domain: null,
-        target_id: null,
-        field_fingerprint: null,
-        template_id: null,
-        template_params: null,
-        allowed_domains: effectiveAllowed,
-        allowed_actions: effectiveActions,
-      };
-      // Single requireApprovals call — handles both the initial (no approval_ids)
-      // and the retry (approval_ids supplied) paths.  When session_id is set and
-      // the binding matches the session pattern, the call mints a used grant
-      // from the session and the audit emitted below will carry
-      // grant.session_id; otherwise the call falls back to the single-use flow
-      // and grant.session_id is undefined.
-      const grants = await requireApprovals({
-        store: services.approvals,
-        bindings: [binding],
-        daemonPort: daemonPortRef(),
-        sessionStore: services.sessionStore,
-        openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
-        ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
-        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
-        ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
-      });
-      grant = grants[0]!;
-
-      const value = generateSecretValue(b.kind ?? "random_32_bytes");
-      const meta = await services.vault.upsertSecret({
-        name: b.name,
-        environment: env,
-        source: b.source ?? "local",
-        value,
-        ...(b.description !== undefined ? { description: b.description } : {}),
-        allowedDomains: effectiveAllowed,
-        allowedActions: effectiveActions,
-        ...(b.force !== undefined ? { force: b.force } : {}),
-      });
-      await writeDaemonAudit({
-        action: "generate",
-        ok: true,
-        ref: meta.ref,
-        environment: meta.environment,
-        ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
-      });
-      return {
-        generated: true,
-        secret_ref: meta.ref,
-        name: meta.name,
-        environment: meta.environment,
-        fingerprint: meta.fingerprint,
-        value_visible_to_agent: false,
-      };
-    } catch (err) {
-      await writeDaemonAudit({
-        action: "generate",
-        ok: false,
-        error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
-        ...(b.name !== undefined && b.environment !== undefined ? { ref: buildSecretRef(b.source ?? "local", b.environment, b.name) } : {}),
-        // Optional-chain: grant is undefined if requireApprovals itself threw
-        // (pre-mint failure — no session consumed → audit MUST NOT carry
-        // session_id).  Otherwise grant.session_id is the source session iff
-        // the binding matched the session pattern.
-        ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
-      });
-      throw err;
-    }
+    // SECURITY: do NOT propagate any `bootstrap_authority` field from the
+    // request body. The authority is a server-internal capability the
+    // bootstrap executor constructs in-process. Accepting it from HTTP
+    // would let any caller skip the inner approval gate.
+    const input: GenerateSecretInput = {
+      name: b.name,
+      environment: b.environment,
+      ...(b.source !== undefined ? { source: b.source } : {}),
+      ...(b.kind !== undefined ? { kind: b.kind } : {}),
+      ...(b.allowed_domains !== undefined ? { allowedDomains: b.allowed_domains } : {}),
+      // Pass-through unknown; validation happens inside the core so a bad
+      // allowed_actions emits the same failure audit the previous inline
+      // handler did.
+      ...(b.allowed_actions !== undefined ? { allowedActions: b.allowed_actions } : {}),
+      ...(b.description !== undefined ? { description: b.description } : {}),
+      ...(b.force !== undefined ? { force: b.force } : {}),
+    };
+    const opts: GenerateSecretOpts = {
+      ...(approvalIds !== undefined ? { approvalIds } : {}),
+      ...(b.session_id !== undefined ? { sessionId: b.session_id } : {}),
+      ...(b.wait_for_approval !== undefined ? { waitForApproval: b.wait_for_approval } : {}),
+    };
+    return await generateSecretCore(services, daemonPortRef, input, opts);
   });
 
   server.addRoute("POST", "/v1/secrets/capture", async (_req, raw) => {
