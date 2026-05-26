@@ -65,6 +65,11 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   reveal_baseline_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
   reveal_no_transition: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
   reveal_resolve_failed: { exitCode: EXIT_CODE_TRANSIENT, hint: () => null },
+  agent_token_required: {
+    exitCode: EXIT_CODE_TRANSIENT,
+    hint: () => "Re-run `secret-shuttle init` to install the agent token, or unset SECRET_SHUTTLE_REQUIRE_AGENT_TOKEN.",
+    nextAction: () => "secret-shuttle init",
+  },
 
   // ── Usage (fix argv; don't retry) ──────────────────────────────────────────
   invalid_ref: { exitCode: EXIT_CODE_USAGE, hint: () => null },
@@ -115,6 +120,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     hint: () =>
       "Non-root callers can only mint children under their own agent_id prefix (e.g., caller \"claude-7f2a\" can mint \"claude-7f2a.helper-3a1b\"). Re-run with --child-id starting with your own agent_id followed by a dot.",
   },
+  agent_id_invalid: { exitCode: EXIT_CODE_USAGE, hint: () => null },
 
   // ── Not found ──────────────────────────────────────────────────────────────
   not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -204,6 +210,11 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   session_pattern_no_match: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   session_revoked: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
   session_unauthorized: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },
+  agent_token_invalid: {
+    exitCode: EXIT_CODE_PERMISSION,
+    hint: () => "The agent token did not validate. Re-run `secret-shuttle init` after the daemon owner has rotated.",
+    nextAction: () => "secret-shuttle init",
+  },
 
   // ── Conflict ───────────────────────────────────────────────────────────────
   already_migrated: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
@@ -223,6 +234,22 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   template_env_file_collision: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   template_env_file_write_failed: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
   session_not_pending: { exitCode: EXIT_CODE_CONFLICT, hint: () => null },
+  machine_id_bad_mode: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "<SHUTTLE_HOME>/machine-id exists with the wrong mode. `chmod 600` it, or delete the file to regenerate.",
+  },
+  machine_id_malformed: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "<SHUTTLE_HOME>/machine-id content is not a 43-char base64url-no-pad string. Delete it to regenerate, or restore from a backup.",
+  },
+  root_token_bad_mode: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "<SHUTTLE_HOME>/root-token exists with the wrong mode. `chmod 600` it.",
+  },
+  root_token_malformed: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "<SHUTTLE_HOME>/root-token content is not a 43-char base64url-no-pad string. Delete it to regenerate (note: this also invalidates all derived agent tokens).",
+  },
 
   // ── Keychain (Part B; full implementations come in Plan 5a) ────────────────
   keychain_not_implemented: {
