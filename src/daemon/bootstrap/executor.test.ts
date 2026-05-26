@@ -224,6 +224,72 @@ test("executeBatch: non-zero template exit_code marks destination as failed", as
   assert.match(destResult?.message ?? "", /exit.*1/i);
 });
 
+test("executeBatch: PlanEntry.force=true propagates to generateSecret input", async () => {
+  const store = await setupStore();
+  await store.save({
+    batch_id: "force",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [{
+      secret: "API_KEY",
+      ref: "ss://local/prod/API_KEY",
+      source: { kind: "random_32_bytes" },
+      destinations: [{
+        shorthand: "vercel:production",
+        template_id: "vercel-env-add",
+        template_params: {},
+        domain: "vercel.com",
+      }],
+      force: true,
+    }],
+    step_results: {},
+    created_at: Date.now(),
+    status: "pending",
+  });
+
+  let observedForce: unknown = "unset";
+  await executeBatch(store, "force", makeDeps({
+    generateSecret: async (_s, _p, input) => {
+      observedForce = (input as { force?: boolean }).force;
+      return { generated: true, secret_ref: "ss://local/prod/API_KEY", name: "API_KEY", environment: "production", fingerprint: "fp", value_visible_to_agent: false as const };
+    },
+  }));
+  assert.strictEqual(observedForce, true, "executor must propagate entry.force to generateSecret input");
+});
+
+test("executeBatch: PlanEntry.force=undefined → generateSecret input has no force key", async () => {
+  const store = await setupStore();
+  await store.save({
+    batch_id: "noforce",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [{
+      secret: "API_KEY",
+      ref: "ss://local/prod/API_KEY",
+      source: { kind: "random_32_bytes" },
+      destinations: [{
+        shorthand: "vercel:production",
+        template_id: "vercel-env-add",
+        template_params: {},
+        domain: "vercel.com",
+      }],
+      // force omitted
+    }],
+    step_results: {},
+    created_at: Date.now(),
+    status: "pending",
+  });
+
+  let observedKeys: string[] = [];
+  await executeBatch(store, "noforce", makeDeps({
+    generateSecret: async (_s, _p, input) => {
+      observedKeys = Object.keys(input as unknown as Record<string, unknown>);
+      return { generated: true, secret_ref: "ss://local/prod/API_KEY", name: "API_KEY", environment: "production", fingerprint: "fp", value_visible_to_agent: false as const };
+    },
+  }));
+  assert.strictEqual(observedKeys.includes("force"), false, "force key must be absent when entry.force is undefined");
+});
+
 test("executeBatch: existing source skips source step", async () => {
   const store = await setupStore();
   await store.save({

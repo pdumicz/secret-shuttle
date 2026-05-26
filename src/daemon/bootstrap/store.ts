@@ -19,6 +19,13 @@ export interface PlanEntry {
   ref: string;          // ss://source/env/name
   source: BootstrapSource;
   destinations: ResolvedDestination[];
+  /**
+   * Set when the user passed --force AND the ref exists in the vault at
+   * plan time. Propagates to generateSecretCore so upsertSecret will
+   * overwrite the existing entry instead of throwing secret_exists.
+   * Always false for source: existing (no generation step runs).
+   */
+  force?: boolean;
 }
 
 export interface StepResult {

@@ -151,6 +151,7 @@ async function runSourceStep(
         source: refSourceFromRef(entry.ref),
         kind: entry.source.kind,
         allowedDomains: entry.destinations.map((d) => d.domain),
+        ...(entry.force === true ? { force: true } : {}),
       },
       { bootstrapAuthority: authority },
     );

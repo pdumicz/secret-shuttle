@@ -48,6 +48,11 @@ export function computeBootstrapPlan(
       ref,
       source: { ...s.source } as BootstrapSource,
       destinations,
+      // Only set force when the entry would have been filtered out without
+      // --force. For source: existing, force is irrelevant (no generation runs).
+      // For sources that create a secret: force=true only when the ref already
+      // exists in the vault and the user passed --force; otherwise omit.
+      ...(s.source.kind !== "existing" && ctx.force && vault.has(ref) ? { force: true } : {}),
     });
   }
   return out;

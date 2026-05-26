@@ -76,6 +76,44 @@ test("computeBootstrapPlan: source: existing — included when ref is NOT in vau
   assert.strictEqual(result[0]!.ref, "ss://upstream/prod/FOO");
 });
 
+test("computeBootstrapPlan: --force sets force: true on entries that would be filtered", () => {
+  const parsed: BootstrapPlan = {
+    version: 1,
+    secrets: [
+      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: ["vercel:production"] },
+    ],
+  };
+  const vault: MockVault = { has: (ref) => ref === "ss://local/prod/API_KEY" };
+  const result = computeBootstrapPlan(parsed, vault, { force: true, source: "local", environment: "production" });
+  assert.strictEqual(result.length, 1);
+  assert.strictEqual(result[0]!.force, true);
+});
+
+test("computeBootstrapPlan: --force on a secret that is NOT in the vault → force omitted (no-op)", () => {
+  const parsed: BootstrapPlan = {
+    version: 1,
+    secrets: [
+      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: ["vercel:production"] },
+    ],
+  };
+  const result = computeBootstrapPlan(parsed, { has: () => false }, { force: true, source: "local", environment: "production" });
+  assert.strictEqual(result.length, 1);
+  assert.strictEqual(result[0]!.force, undefined);
+});
+
+test("computeBootstrapPlan: --force is irrelevant for source: existing", () => {
+  const parsed: BootstrapPlan = {
+    version: 1,
+    secrets: [
+      { name: "FOO", source: { kind: "existing", ref: "ss://upstream/prod/FOO" }, destinations: ["vercel:production"] },
+    ],
+  };
+  const vault: MockVault = { has: () => true };
+  const result = computeBootstrapPlan(parsed, vault, { force: true, source: "local", environment: "production" });
+  assert.strictEqual(result.length, 1);
+  assert.strictEqual(result[0]!.force, undefined, "force never set on existing-source entries");
+});
+
 test("computeBootstrapPlan: destination shorthand resolved into ResolvedDestination[]", () => {
   const parsed: BootstrapPlan = {
     version: 1,
