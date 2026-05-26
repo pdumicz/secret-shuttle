@@ -193,7 +193,11 @@ export interface BrowserOps {
   resolveWithinContainer(ref: BackendNodeRef, mode: "field" | "container" | "focused-after-reveal", baseline: Baseline): Promise<{ value: string }>;
 }
 
-const READ_SCRIPT = `
+// Daemon-only focused-field/selection reader. Exported so the capture-target-ops
+// module (C6) can drive the SAME in-page script under a target-bound CDP
+// session — single source of truth for "what counts as a captured field/value"
+// across the live-mark flow (revealCaptureCore) and the bootstrap flow.
+export const READ_SCRIPT = `
 (() => {
   function meta(el){
     const i = el instanceof HTMLInputElement ? el : null;
@@ -719,7 +723,9 @@ export const RESOLVE_SCAN_FN = `function(baseline, focused){ /* __RESOLVE__ */
   } catch (e) { return null; }
 }`;
 
-function fieldFingerprint(domain: string, target: string, backendNodeId: number | null, field: FieldDescriptor): string {
+// Exported so the capture-target-ops module (C6) reuses the same seed/format
+// as live-mark capture — no parallel hashing scheme, no drift.
+export function fieldFingerprint(domain: string, target: string, backendNodeId: number | null, field: FieldDescriptor): string {
   const seed = JSON.stringify({ domain, target, backendNodeId, ...field });
   return `sha256:${createHash("sha256").update(seed).digest("hex").slice(0, 16)}`;
 }

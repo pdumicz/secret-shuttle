@@ -232,6 +232,16 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     hint: () => "The batch is already executing. Wait for the current run to finish, then retry.",
     nextAction: () => null, // retrying immediately is wrong; the user should wait
   },
+  bootstrap_capture_redirect_blocked: {
+    // CONFLICT (not USAGE): the user's argv is fine — the page state isn't
+    // what the yml said it would be. The recovery is for the human to
+    // navigate the capture tab back to the expected host and re-trigger
+    // capture; the daemon can't fix this automatically.
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () =>
+      "The capture tab is no longer on the host declared in secret-shuttle.yml. Navigate back to the expected host (or fix the yml) and retry the capture step.",
+    nextAction: () => null,
+  },
   secret_exists: {
     exitCode: EXIT_CODE_CONFLICT,
     hint: () => "Re-run with --force to overwrite.",
