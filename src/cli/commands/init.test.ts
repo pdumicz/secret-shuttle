@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile, readdir, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile, readdir, stat, chmod } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -606,6 +606,105 @@ test("init: claude config written to user-private path, NEVER repo-committed fil
     }
   }, { keychain });
 });
+
+test("init: pre-existing settings.json at 0644 is tightened to 0600 after token write (I2)", async () => {
+  // Regression for the I2 reviewer finding: writeFile({ mode }) only sets the
+  // mode at file CREATION. If ~/.claude/settings.json already exists at 0644
+  // (e.g. from a prior install or a pre-existing user edit), the token write
+  // silently leaves it 0644 — world-readable token. The fix adds an explicit
+  // chmod(file, 0o600) after each writeFile.
+  //
+  // This test pre-creates a 0644 settings.json with existing non-Secret-Shuttle
+  // JSON content, runs init, and asserts:
+  //   1. The file is now 0600.
+  //   2. The pre-existing JSON content was preserved (the spread merge works).
+  const keychain = new MockKeychain();
+  await withInitDaemon(async (ctx) => {
+    await bootstrapVault(ctx, "my-passphrase");
+
+    // Pre-create ~/.claude/settings.json (in the sandboxed userHome) with mode
+    // 0644 + some unrelated keys init must NOT clobber.
+    const settingsDir = path.join(ctx.userHome, ".claude");
+    const settingsPath = path.join(settingsDir, "settings.json");
+    await mkdir(settingsDir, { recursive: true });
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        env: { PRE_EXISTING_USER_KEY: "should-survive" },
+        unrelated_top_level_key: { nested: "value" },
+      }, null, 2),
+      "utf8",
+    );
+    // writeFile defaults to 0666 & ~umask. Force 0644 explicitly so the test is
+    // deterministic regardless of the developer's umask.
+    await chmod(settingsPath, 0o644);
+    const before = await stat(settingsPath);
+    assert.equal(
+      before.mode & 0o777, 0o644,
+      `pre-condition: file must be 0644 before init runs; got ${(before.mode & 0o777).toString(8)}`,
+    );
+
+    // Run init in a project with .claude/ so the claude runtime is detected
+    // and the token-install path triggers.
+    const projDir = await mkdtemp(path.join(os.tmpdir(), "ss-init-chmod-"));
+    await mkdir(path.join(projDir, ".claude"), { recursive: true });
+
+    const origCwd = process.cwd();
+    try {
+      process.chdir(projDir);
+      const result = await runInit(["--no-keychain"]);
+      assert.equal(result.ok, true);
+      assert.ok(
+        (result.agent_runtimes_configured as string[]).includes("claude"),
+        "claude must be configured (so the token-write path ran)",
+      );
+
+      // Core I2 assertion: the file mode is now 0600, NOT the original 0644.
+      const after = await stat(settingsPath);
+      assert.equal(
+        after.mode & 0o777, 0o600,
+        `pre-existing settings.json must be tightened to 0600 after init; got ${(after.mode & 0o777).toString(8)}`,
+      );
+
+      // Sanity: the spread-merge preserved both the pre-existing env key and
+      // the unrelated top-level key (i.e. we tightened mode without clobbering
+      // user content).
+      const merged = JSON.parse(await readFile(settingsPath, "utf8")) as {
+        env: Record<string, string>;
+        unrelated_top_level_key: { nested: string };
+      };
+      assert.equal(
+        merged.env.PRE_EXISTING_USER_KEY, "should-survive",
+        "pre-existing env key must survive the merge",
+      );
+      assert.equal(
+        merged.unrelated_top_level_key.nested, "value",
+        "pre-existing top-level key must survive the merge",
+      );
+      assert.ok(
+        typeof merged.env.SECRET_SHUTTLE_AGENT_TOKEN === "string",
+        "init must still have written the new token alongside",
+      );
+      assert.equal(
+        merged.env.SECRET_SHUTTLE_REQUIRE_AGENT_TOKEN, "1",
+        "init must still have written REQUIRE_AGENT_TOKEN=1 alongside",
+      );
+    } finally {
+      process.chdir(origCwd);
+      await rm(projDir, { recursive: true, force: true });
+    }
+  }, { keychain });
+});
+
+// I3 (cursor on Windows): the win32 branch in agent-token-installers.ts is
+// structurally distinct from the darwin/linux branches — it resolves the file
+// path via process.env.APPDATA (correct: %APPDATA%\Cursor\User\settings.json),
+// uses envKey "terminal.integrated.env.windows", and falls back to manual
+// instructions when APPDATA is unset. We do NOT execute it here because
+// Object.defineProperty(process, "platform", ...) is brittle across Node
+// versions and risks polluting global state for sibling tests. The branch is
+// covered by code-review/spec-review; if it ever needs runtime coverage,
+// extract installAgentToken into a unit test that injects platform + env.
 
 test("init: codex/copilot get manual-install instructions in the summary, not config writes", async () => {
   // claude + copilot both detected → claude gets a config write, copilot gets a

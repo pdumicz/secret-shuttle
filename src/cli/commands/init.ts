@@ -226,6 +226,10 @@ export function initCommand(): Command {
       if (runtimes.length > 0) {
         const machineId = await readMachineId(getSecretShuttleHome());
         if (machineId !== null) {
+          // TODO(post-launch): if one runtime's mint fails, accumulate the failure
+          // into `agent_runtimes_failed: [{runtime, error_code}]` and continue with
+          // the others. Currently a mid-loop failure halts init with a stack trace
+          // and leaves partial state. Tracked as a Phase-B follow-up.
           for (const runtime of runtimes) {
             const agentId = deriveAutoAgentId(runtime, machineId);
             const { token } = await daemonRequest<{ token: string; agent_id: string }>(
