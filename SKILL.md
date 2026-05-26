@@ -57,6 +57,23 @@ secret-shuttle status --json
 - **Every production-environment operation requires human approval** (one click in a browser window the daemon opens automatically). Dev/local ops auto-approve.
 - **Responses are JSON**. Errors are `{"ok": false, "error_code": "...", "message": "...", "hint": "...", "exit_code": N, "next_action": "<command or null>"}`. Always read `error_code` first. When `next_action` is a non-null string, run it for automatic recovery. When `next_action` is null, human intervention is required.
 
+## Authentication
+
+Every daemon request carries a bearer token of the shape `<agent_id>.<hmac>`, where `<hmac>` is HMAC-SHA256 derived from the daemon's root_token (stored at `<SHUTTLE_HOME>/root-token`, mode 0600). The agent_id is the attribution identity; the hmac proves the token was minted by something that had access to the root.
+
+- **Auto-derived agent_id per runtime.** Each agent runtime (e.g. `claude`, `codex`, `cursor`, `copilot`) gets a deterministic, per-(machine, runtime) agent_id via `deriveAutoAgentId(runtime, machine_id)`. Same machine + same runtime = same id; reinstalling the skill doesn't churn identities.
+- **`secret-shuttle init` writes per-runtime tokens** to user-private runtime config (e.g. `~/.claude/settings.json` for Claude, `~/.codex/config.toml` for Codex). Subsequent calls in that runtime auto-resolve the token via `resolveDaemonToken`.
+- **Sub-agents mint child tokens.** A parent agent spawning a sub-agent must call `POST /v1/tokens/mint` (or `secret-shuttle agent mint --child-id <id>`) so the sub-agent's calls attribute correctly. The mint endpoint derives the child token using the same HMAC scheme — no shared secret needed between parent and child.
+- **Threat model: attribution + hygiene, not hard isolation.** Tokens prevent accidental cross-agent confusion and give per-agent audit lines. They do NOT protect against a malicious local process running as the same user — anyone with read access to `<SHUTTLE_HOME>/root-token` can mint any agent_id they want. The OS user boundary is the real trust boundary.
+- **Revocation: `secret-shuttle daemon rotate`.** Regenerates the root_token on disk and hot-swaps it in memory. All previously derived tokens become invalid immediately; every agent runtime must re-init.
+- **machine-id reset: `secret-shuttle daemon reset-machine-id`.** Changes future agent_id derivation (e.g. after restoring from a backup onto new hardware) but does NOT invalidate existing tokens. To invalidate, run `daemon rotate`.
+
+## Memory hygiene (best-effort)
+
+The master key is zeroed on lock and on every in-flight crypto operation; copies are scrubbed synchronously before any async continuation. Byte buffers built for child-process stdin and tmp env-file writes are scrubbed after the consumer reads them. Masker pattern and lookback buffers are scrubbed on stream dispose.
+
+Secret values returned by the vault AND captured values from the browser are JS strings, which V8 does not let us proactively zero — they linger in heap until garbage collection. A post-launch hardening plan (5q) refactors both to Buffer for end-to-end scrub; required for security-audit deployments.
+
 ## When NOT to use these commands
 
 - Never pass a secret you obtained as a bare argument — it would be in your context. Always use refs.
@@ -84,7 +101,7 @@ Every error JSON now includes a `next_action` field. When it is a non-null strin
 | `secret_exists` | null | Ref already exists. | Re-run with `--force` to overwrite. |
 | `keychain_key_invalid` | `secret-shuttle unlock` | Cached key didn't decrypt the vault (device-migration, corruption). | Daemon already falls back to passphrase UI automatically; run `unlock` if the browser window didn't open. |
 | `daemon_start_failed` | `secret-shuttle daemon status` | `init` spawned the daemon but it didn't respond within 5 s. | Run the next_action to check daemon logs, then retry `init`. |
-| `bootstrap_plan_invalid` | null | `secret-shuttle.yml` is malformed or uses an unsupported source kind (e.g. `capture`). | Read `message` for the exact field/line. Fix the yml and retry. |
+| `bootstrap_plan_invalid` | null | `secret-shuttle.yml` is malformed or uses an unsupported source kind. | Read `message` for the exact field/line. Fix the yml and retry. |
 | `bootstrap_batch_not_found` | null | `--batch <id>` refers to a batch that doesn't exist or was already abandoned. | Run `secret-shuttle bootstrap --list` to see current batches. |
 | `bootstrap_destination_unknown` | null | A destination shorthand in the yml couldn't be resolved to a known template. | Check the shorthand format: `vercel:<env>`, `github-actions:<owner/repo>`, `cloudflare:<env>`, `supabase:<project>`. |
 
@@ -114,7 +131,23 @@ secrets:
 
 Destination shorthands: `vercel:<env>`, `github-actions:<owner/repo>`, `cloudflare:<env>`, `supabase:<project>`.
 
-Note: `source: { kind: capture, url }` is **not yet supported** in bootstrap. For secrets that require a browser capture flow, run `secret-shuttle reveal-capture` manually first, then reference them via `kind: existing` in the yml.
+### Capture sources always require approval
+
+Any yml plan containing `source: { kind: capture, url }` always requires human approval, regardless of `--environment` and destination class — auto-approve is disabled for capture plans. The approval gate is needed so the hub URL is available for the capture coordinator UI; without it the user has no rendered surface to click Capture.
+
+### Blind-mode discipline for bootstrap captures
+
+When a capture step starts, the executor auto-starts blind mode pinned to the URL's expected host. The flow:
+
+- The daemon-owned browser navigates to the user's URL; the user focuses the secret field in that page and clicks Capture in the hub UI coordinator.
+- Capture re-verifies the host at capture time. If the page redirected mid-flow, the step records `bootstrap_capture_redirect_blocked` and the value is discarded.
+- After a successful capture: blank target → verify → close target → verify → blind auto-ends. Each verify confirms the page no longer holds the secret in DOM or CDP state.
+- If cleanup verification fails: blind STAYS active, the step records `bootstrap_capture_cleanup_failed`, the executor stops, and the batch ends in `status=failed_partial`. Human intervention is required.
+- If the bootstrap-owned browser is then stopped (in the route's `finally`), blind auto-resumes since no rendering process remains to observe.
+
+### Batch ownership
+
+Bootstrap batches are owned by the agent that called `/plan`. `owner_agent_id` is stamped from the ALS AuthContext at plan time. Only the owner (or root) can `/continue`, `/abandon`, or see the batch in `/list`. Cross-owner non-root access returns `bootstrap_batch_not_found` (existence non-disclosure — same code as a batch that genuinely doesn't exist). The same ownership model applies to `ApprovalGrant` and `SessionGrant` via `owner_agent_id`.
 
 ## Low-level surface (rare)
 
