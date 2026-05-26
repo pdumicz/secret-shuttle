@@ -2404,24 +2404,83 @@ git commit -m "feat(cdp): CdpClient.close() — single chokepoint for shutdown"
 
 The refactor MUST preserve all four field surfaces (read AND write). Strategy: keep the field NAMES, back them by `browserSession` via accessors. Accessor SETTERS compose the existing partial session rather than replacing — tests that assign just `services.browser` keep working; production code in `/v1/browser/start` constructs the full session atomically.
 
-- [ ] **Step 1: Define the BrowserSession type with the correct imports**
+- [ ] **Step 1a: Widen `ChromeSession.child` so it satisfies BrowserSessionChild**
+
+In `src/daemon/chrome/launch.ts:12-16`, replace the existing `ChromeSession.child` declaration. Current narrow type only exposes `.kill()`; the stop flow needs `.once("exit", ...)` too. Widen to a duck-typed interface that matches what `spawnChromePipe` actually returns:
+
+```ts
+// In launch.ts:
+export interface ChromeSession {
+  child: {
+    kill(signal?: NodeJS.Signals): boolean;
+    once(event: "exit", listener: (code: number | null) => void): unknown;
+  };
+  cdp: CdpClient;
+  transport: PipeTransport;
+}
+```
+
+(The actual Node `ChildProcess` returned by `spawnChromePipe` satisfies this. Existing call sites that only call `.kill()` continue to work.)
+
+- [ ] **Step 1b: Define the BrowserSession type + the concrete factory helper**
 
 ```ts
 // src/daemon/bootstrap/browser-session.ts
-import type { ChildProcess } from "node:child_process";
+import { launchChrome } from "../chrome/launch.js";
+import { CdpBrowserOps } from "../chrome/internal-ops.js";
+import { startCdpProxy } from "../proxy/cdp-proxy.js";
 import type { CdpClient } from "../chrome/cdp-client.js";        // CORRECT path
 import type { ProxyServer } from "../proxy/cdp-proxy.js";        // CORRECT type name
 import type { BrowserOps } from "../chrome/internal-ops.js";
+import type { DaemonBlindModeState } from "../services-blind.js";
+
+/**
+ * Minimal child-process surface BrowserSession needs. Matches what launchChrome
+ * returns after Step 1a's ChromeSession.child widening. Avoids a hard dep on
+ * the full `ChildProcess` type while still allowing kill + once("exit").
+ */
+export interface BrowserSessionChild {
+  kill(signal?: NodeJS.Signals): boolean;
+  once(event: "exit", listener: (code: number | null) => void): unknown;
+}
 
 export interface BrowserSession {
   owner: { kind: "user" } | { kind: "bootstrap"; batchId: string };
-  child: ChildProcess;
+  child: BrowserSessionChild;
   cdp: CdpClient;
   proxy: ProxyServer | null;
+  /** Equal to `proxy.url` when a proxy is present; matches the previous services.browserSessionId surface. */
   browserSessionId: string;
   browser: BrowserOps;
 }
+
+/**
+ * Single concrete factory used by BOTH /v1/browser/start AND ensureBootstrapBrowser.
+ * Composes: launchChrome → startCdpProxy → BrowserSession with proxy.url as the session id.
+ */
+export async function createBrowserSession(opts: {
+  profile: string;
+  blind: DaemonBlindModeState;
+  owner: { kind: "user" } | { kind: "bootstrap"; batchId: string };
+}): Promise<BrowserSession> {
+  const chrome = await launchChrome({ profile: opts.profile });
+  const proxy = await startCdpProxy({
+    transport: chrome.transport,
+    cdp: chrome.cdp,
+    blind: opts.blind,
+  });
+  return {
+    owner: opts.owner,
+    child: chrome.child,
+    cdp: chrome.cdp,
+    proxy,
+    browserSessionId: proxy.url,
+    browser: new CdpBrowserOps(chrome.cdp),
+  };
+}
 ```
+
+The factory is the single source of truth for "what does a started browser session look like." Both the user-driven `/v1/browser/start` route and the bootstrap-owned `ensureBootstrapBrowser` use it; the only difference is the `owner` argument.
 
 - [ ] **Step 2: Modify `src/daemon/services.ts` — drop the 4 raw fields, replace with accessors backed by `browserSession`**
 
@@ -2513,23 +2572,33 @@ set browserSessionId(v: string | null) {
 
 Add JSDoc above the accessor block stating: "Production code (`/v1/browser/start`, `ensureBootstrapBrowser`) constructs `browserSession` directly. The per-field accessors exist for test fixtures and back-compat; setting them composes the current session rather than replacing."
 
-- [ ] **Step 3: Refactor `/v1/browser/start` to construct + store the full session atomically**
+- [ ] **Step 3: Refactor `/v1/browser/start` to use createBrowserSession**
 
-In `src/daemon/api/routes/browser.ts` (around line 16-22), replace the existing field-by-field assignments with a single object construction:
+In `src/daemon/api/routes/browser.ts:15-33`, replace the existing inline launch + startCdpProxy + per-field assignments with a single factory call:
 
 ```ts
-if (services.browserSession !== null) { /* existing 'already started' error */ }
-services.browserSession = {
-  owner: { kind: "user" },
-  child: session.child,
-  cdp: session.cdp,
-  proxy: session.proxy ?? null,
-  browserSessionId: session.id,
-  browser: new CdpBrowserOps(session.cdp),
-};
+server.addRoute("POST", "/v1/browser/start", async (_req, raw) => {
+  if (services.browserSession !== null) {
+    throw new ShuttleError("browser_already_started", "Browser already started.");
+  }
+  const b = (raw ?? {}) as StartBody;
+  services.browserSession = await createBrowserSession({
+    profile: b.profile ?? "prod-config",
+    blind: services.blind,
+    owner: { kind: "user" },
+  });
+  // New browser session ⇒ a fresh handle namespace. Handles never persist.
+  services.handles.clear();
+  return {
+    started: true,
+    proxy_url: services.browserSession.proxy?.url ?? null,
+    raw_cdp_url: null,
+    value_visible_to_agent: false,
+  };
+});
 ```
 
-Audit the start route for any remaining `services.browser = ...`, `services.cdp = ...`, `services.cdpProxy = ...`, `services.browserSessionId = ...` and remove them — the single object assignment covers all four.
+Import `createBrowserSession` from `../../bootstrap/browser-session.js`. The previous separate assignments to `services.browser` / `services.cdp` / `services.cdpProxy` / `services.browserSessionId` are now covered by the single `browserSession` assignment — the accessors from Step 2 surface them to the existing read sites unchanged.
 
 - [ ] **Step 4: Audit ~15 read sites — verify they all keep working through getters**
 
@@ -2599,14 +2668,16 @@ test("stopBootstrapBrowser: returns { stopped: true } only when it actually kill
 - [ ] **Step 2: Implement**
 
 ```ts
-// In DaemonServices:
+// In DaemonServices, import the factory:
+import { createBrowserSession } from "./bootstrap/browser-session.js";
+
 async ensureBootstrapBrowser(batchId: string): Promise<BrowserSession> {
-  if (this.browserSession !== null) return this.browserSession; // reuse user session
-  const session = await launchBrowserSession(/* params */);
-  this.browserSession = {
-    ...session,
+  if (this.browserSession !== null) return this.browserSession; // reuse user session unchanged
+  this.browserSession = await createBrowserSession({
+    profile: "bootstrap",
+    blind: this.blind,
     owner: { kind: "bootstrap", batchId },
-  };
+  });
   return this.browserSession;
 }
 
