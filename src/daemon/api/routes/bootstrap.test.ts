@@ -1366,3 +1366,161 @@ secrets:
     );
   });
 });
+
+// ── R13: source-env gate (P0 security fix) ─────────────────────────────────
+// source: existing with ss://*/prod/* + --environment development + non-prod
+// destinations bypassed all existing gates (R10, R12). The plan entry ref IS
+// the production ref, but neither the request flag nor the destinations reflect
+// the secret's actual environment — so the prior two conditions returned false
+// and the dev-synth path ran, writing a production secret with zero clicks.
+
+test("POST /v1/bootstrap/plan: source: existing ss://*/prod/* + dev env + dev destination MUST require approval (P0 source bypass)", async () => {
+  // Exact reproducer from the user-confirmed bug report.
+  // Vault does NOT need to be preseeded: source: existing entries are always
+  // included in the plan (R3 fix), regardless of vault.has(). The executor's
+  // runSourceStep for existing kind would return entry.source.ref directly —
+  // it would only fail if the vault lookup at execution time threw.
+  // The gate runs BEFORE execution — we assert the gate fires (400 approval_required)
+  // and never reaches the executor.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    // Preseed vault with the production secret so the executor could run if the
+    // gate mistakenly lets it through. This makes the test exercise the real
+    // end-to-end path (not just a vault-miss bailout).
+    const genGrant = ctx.services.approvals.create({
+      action: "generate",
+      ref: null,
+      planned_ref: "ss://local/prod/EXISTING_PROD",
+      environment: "production",
+      destination_domain: null,
+      target_id: null,
+      field_fingerprint: null,
+      template_id: null,
+      template_params: null,
+      allowed_domains: ["vercel.com"],
+      allowed_actions: ["capture_from_page", "inject_into_field", "compare_fingerprint", "use_as_stdin", "inject_submit"],
+    });
+    ctx.services.approvals.approve(genGrant.id);
+    const gen = await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "EXISTING_PROD",
+      environment: "production",
+      source: "local",
+      allowed_domains: ["vercel.com"],
+      approval_id: genGrant.id,
+      wait_for_approval: false,
+    });
+    assert.equal(gen.status, 200, `pre-seed generate failed: ${JSON.stringify(gen.body)}`);
+
+    const yml = `
+version: 1
+secrets:
+  FOO:
+    source: { kind: existing, ref: "ss://local/prod/EXISTING_PROD" }
+    destinations: ["vercel:development"]
+`;
+    // environment: "development" + destinations: non-prod → both prior gates return false.
+    // The new R13 gate must catch this via the plan entry's ref.
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    // Must fail with approval_required — NOT succeed silently.
+    assert.equal(
+      r.status,
+      400,
+      `P0 SOURCE BYPASS: expected 400 approval_required (source ref is production), got ${r.status} body=${JSON.stringify(r.body)}. A production secret would be pushed with zero human clicks.`,
+    );
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(
+      error.code,
+      "approval_required",
+      `expected approval_required, got: ${error.code}`,
+    );
+
+    // batch_id must be present so the user can /continue after approving.
+    const details = r.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string } | undefined;
+    assert.ok(details !== undefined, `expected details in response: ${JSON.stringify(r.body)}`);
+    assert.ok(
+      typeof details!.batch_id === "string" && details!.batch_id.startsWith("bootstrap-"),
+      `expected batch_id starting with "bootstrap-" in details`,
+    );
+
+    // Batch must remain "pending" — executor must NOT have run.
+    const state = await ctx.services.bootstrapStore.get(details!.batch_id);
+    assert.ok(state !== null, "batch state must be persisted");
+    assert.equal(
+      state!.status,
+      "pending",
+      `batch must remain "pending" after /plan: executor must not push a production secret without approval`,
+    );
+  });
+});
+
+test("POST /v1/bootstrap/plan: source: existing ss://*/dev/* + dev env + dev destination still synth-executes (regression guard)", async () => {
+  // Control case: existing source with a development ref should still take the
+  // dev-synth path (no approval needed, inline execution).
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    // Preseed vault with a development secret.
+    const genGrant = ctx.services.approvals.create({
+      action: "generate",
+      ref: null,
+      planned_ref: "ss://local/dev/EXISTING_DEV",
+      environment: "development",
+      destination_domain: null,
+      target_id: null,
+      field_fingerprint: null,
+      template_id: null,
+      template_params: null,
+      allowed_domains: ["vercel.com"],
+      allowed_actions: ["capture_from_page", "inject_into_field", "compare_fingerprint", "use_as_stdin", "inject_submit"],
+    });
+    ctx.services.approvals.approve(genGrant.id);
+    const gen = await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "EXISTING_DEV",
+      environment: "development",
+      source: "local",
+      allowed_domains: ["vercel.com"],
+      approval_id: genGrant.id,
+      wait_for_approval: false,
+    });
+    assert.equal(gen.status, 200, `pre-seed generate failed: ${JSON.stringify(gen.body)}`);
+
+    const yml = `
+version: 1
+secrets:
+  BAR:
+    source: { kind: existing, ref: "ss://local/dev/EXISTING_DEV" }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    // Must succeed (200) — dev ref + dev env + dev destinations → synth path.
+    assert.equal(r.status, 200, `expected 200 inline-execute for dev existing source, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as { ok: boolean; batch_id?: string; completed: number; failed: number };
+    assert.equal(body.ok, true);
+    assert.ok(
+      typeof body.batch_id === "string" && body.batch_id.startsWith("bootstrap-"),
+      `expected batch_id in response, got: ${JSON.stringify(body.batch_id)}`,
+    );
+    // Executor ran: completed+failed >= 1 (processed at least one secret).
+    assert.ok(
+      body.completed + body.failed >= 1,
+      `expected executor to have run (completed+failed >= 1), got completed=${body.completed} failed=${body.failed}`,
+    );
+
+    // The batch state must be terminal (not pending — executor ran inline).
+    const state = await ctx.services.bootstrapStore.get(body.batch_id!);
+    assert.ok(state !== null, "batch state must be persisted");
+    assert.ok(
+      state!.status === "completed" || state!.status === "failed_partial",
+      `expected terminal status (completed or failed_partial), got: ${state!.status}`,
+    );
+  });
+});

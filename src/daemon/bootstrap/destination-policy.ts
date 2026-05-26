@@ -1,17 +1,19 @@
 import { registry } from "../api/routes/templates.js";
+import { parseSecretRef } from "../../shared/refs.js";
 import type { ResolvedDestination } from "./store.js";
 
 /**
- * Returns true if a bootstrap destination is "production-class" — i.e., its
- * push could write to a production-tier target.
+ * Policy decisions about a bootstrap plan's production-class — both the
+ * source-side (entry refs) and the destination-side (resolved destinations).
  *
  * Used by /v1/bootstrap/plan to decide the bootstrap-level approval binding's
- * environment. The bootstrap binding gate must reflect the destinations'
- * production-class because the inner per-template approval (in runTemplateCore)
- * is bypassed when bootstrap calls it with bootstrapAuthority — so the OUTER
- * binding is the only chance to require a human click.
+ * environment. The bootstrap binding gate must reflect the production-class of
+ * BOTH the plan entries' source refs AND the resolved destinations, because the
+ * inner per-template approval (in runTemplateCore) is bypassed when bootstrap
+ * calls it with bootstrapAuthority — so the OUTER binding is the only chance
+ * to require a human click.
  *
- * Per-template treatment:
+ * Per-template treatment for destination-side:
  * - vercel-env-add: destinationEnvironment returns environment param
  *   (production/preview/development). "production" → prod-class.
  * - cloudflare-secret-put: destinationEnvironment returns env param (default
@@ -48,4 +50,35 @@ export function planHasProductionDestination(
   plan: ReadonlyArray<{ destinations: ReadonlyArray<ResolvedDestination> }>,
 ): boolean {
   return plan.some((entry) => entry.destinations.some(isDestinationProductionClass));
+}
+
+/**
+ * Returns true if any PlanEntry's ref resolves to the production environment.
+ *
+ * Used by /v1/bootstrap/plan to elevate the bootstrap binding's approval gate
+ * when ANY plan entry sources a production secret. This is the third gate
+ * condition (alongside canonicalEnvironment(request) and
+ * planHasProductionDestination) needed to close the bootstrap-authority bypass.
+ *
+ * Why this is needed:
+ * - For source: existing entries, the ref comes verbatim from yml. Neither the
+ *   request flag nor destination class reflects the secret's actual environment.
+ * - The inner runTemplateCore would normally elevate the per-template approval
+ *   to production when secret.environment === "production" (templates.ts:148),
+ *   but bootstrap bypasses the inner requireApprovals via bootstrapAuthority.
+ *   The OUTER bootstrap binding is the only remaining gate.
+ *
+ * Unparseable refs fail closed (return true). A malformed ref in the plan is
+ * itself a sign that something is wrong; requiring approval is the safer default.
+ */
+export function planHasProductionSource(
+  plan: ReadonlyArray<{ ref: string }>,
+): boolean {
+  return plan.some((entry) => {
+    try {
+      return parseSecretRef(entry.ref).environment === "production";
+    } catch {
+      return true; // unparseable ref → fail closed
+    }
+  });
 }

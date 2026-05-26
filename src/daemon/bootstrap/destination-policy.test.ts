@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isDestinationProductionClass, planHasProductionDestination } from "./destination-policy.js";
+import { isDestinationProductionClass, planHasProductionDestination, planHasProductionSource } from "./destination-policy.js";
 import type { ResolvedDestination } from "./store.js";
 
 // ── isDestinationProductionClass unit tests ──────────────────────────────────
@@ -148,4 +148,56 @@ test("planHasProductionDestination: all-dev plan → false", () => {
 
 test("planHasProductionDestination: empty plan → false", () => {
   assert.equal(planHasProductionDestination([]), false);
+});
+
+// ── planHasProductionSource unit tests (R13) ─────────────────────────────────
+
+test("planHasProductionSource: plan with one ss://local/prod/X entry → true", () => {
+  const plan = [
+    { ref: "ss://local/prod/API_KEY", destinations: [] },
+  ];
+  assert.strictEqual(planHasProductionSource(plan), true);
+});
+
+test("planHasProductionSource: all entries ss://local/dev/X → false", () => {
+  const plan = [
+    { ref: "ss://local/dev/API_KEY", destinations: [] },
+    { ref: "ss://local/dev/OTHER", destinations: [] },
+  ];
+  assert.strictEqual(planHasProductionSource(plan), false);
+});
+
+test("planHasProductionSource: mixed prod + dev → true (any-prod)", () => {
+  const plan = [
+    { ref: "ss://local/dev/A", destinations: [] },
+    { ref: "ss://local/prod/B", destinations: [] },
+  ];
+  assert.strictEqual(planHasProductionSource(plan), true);
+});
+
+test("planHasProductionSource: empty plan → false", () => {
+  assert.strictEqual(planHasProductionSource([]), false);
+});
+
+test("planHasProductionSource: unparseable ref → true (fail closed)", () => {
+  const plan = [
+    { ref: "not-a-real-ref", destinations: [] },
+  ];
+  assert.strictEqual(planHasProductionSource(plan), true);
+});
+
+test("planHasProductionSource: custom env (ss://local/staging/X) → false", () => {
+  // Documents that only literal "production" triggers; "staging" and custom
+  // envs do not. (They may still trigger the gate via destination class.)
+  const plan = [
+    { ref: "ss://local/staging/A", destinations: [] },
+  ];
+  assert.strictEqual(planHasProductionSource(plan), false);
+});
+
+test("planHasProductionSource: ss://upstream/prod/X (non-local source) → true", () => {
+  const plan = [
+    { ref: "ss://upstream/prod/A", destinations: [] },
+  ];
+  assert.strictEqual(planHasProductionSource(plan), true);
 });

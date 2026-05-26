@@ -16,7 +16,7 @@ import type { BatchState, PlanEntry } from "../../bootstrap/store.js";
 import { generateSecretCore } from "./secrets.js";
 import { revealCaptureCore } from "./reveal-capture.js";
 import { runTemplateCore } from "./templates.js";
-import { planHasProductionDestination } from "../../bootstrap/destination-policy.js";
+import { planHasProductionDestination, planHasProductionSource } from "../../bootstrap/destination-policy.js";
 import { canonicalEnvironment } from "../../../shared/refs.js";
 
 export function registerBootstrapRoutes(
@@ -68,15 +68,19 @@ export function registerBootstrapRoutes(
     const batchId = `bootstrap-${randomUUID()}`;
     const planSummary = buildPlanSummary(plan);
 
-    // Bootstrap binding gate: production-class if EITHER --environment is "production"
-    // OR any resolved destination is production-class. The destinations check is the
-    // security boundary — without it, a yml with environment:"development" +
-    // destinations:[vercel:production] would auto-approve (dev-env synth) and the
-    // executor would push to production via bootstrapAuthority, bypassing the inner
-    // template approval. The user would see no human-clicked approval for a write
-    // to vercel.com/<team>/production.
+    // Bootstrap binding gate: production-class if ANY of:
+    //   (1) --environment canonicalizes to "production" (R12), OR
+    //   (2) any resolved destination is production-class (R10), OR
+    //   (3) any plan entry's source ref resolves to production (R13).
+    //
+    // All three are needed because bootstrap calls inner cores under
+    // bootstrapAuthority, which bypasses the inner per-template/per-secret
+    // approval gates. The outer bootstrap binding is the only chance to
+    // require a human click.
     const requiresProductionGate =
-      canonicalEnvironment(environment) === "production" || planHasProductionDestination(plan);
+      canonicalEnvironment(environment) === "production" ||
+      planHasProductionDestination(plan) ||
+      planHasProductionSource(plan);
     const bindingEnvironment = requiresProductionGate ? "production" : "development";
 
     const binding: ApprovalBinding = {
