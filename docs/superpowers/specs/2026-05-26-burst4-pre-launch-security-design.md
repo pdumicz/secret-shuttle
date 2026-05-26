@@ -82,6 +82,20 @@ Examples:
 - Daemon refuses to start if the file exists but is not mode 0600 (matches `root-token` fail-closed policy)
 - Reset is explicit: `secret-shuttle daemon reset-machine-id` (root-only, separate from `daemon rotate`) — operator opt-in, not implicit. Re-running `init` after reset re-derives all agent_ids and rewrites runtime configs.
 
+**Important — `reset-machine-id` does NOT revoke existing tokens.** Token validation is `HMAC(root_token, agent_id) === incoming_hmac`; it never consults `machine_id`. Changing `machine_id` only affects the agent_id DERIVATION for future auto-installs. Tokens minted under the old agent_ids stay valid against the same root_token.
+
+For actual revocation, use `secret-shuttle daemon rotate` — it regenerates the root_token, which invalidates every derived token (HMAC mismatch on the new key) immediately via hot-swap (§1 daemon rotate). The CLI's reset-machine-id help text says this explicitly:
+
+```
+$ secret-shuttle daemon reset-machine-id --help
+Generates a new <SHUTTLE_HOME>/machine-id. Future `init` runs will
+derive different per-runtime agent_ids.
+
+This does NOT revoke existing tokens. Tokens are HMAC-bound to the
+root_token, not the machine_id. To revoke all derived tokens, use:
+  secret-shuttle daemon rotate
+```
+
 Why this rather than OS-provided machine IDs (e.g., `/etc/machine-id`, ioreg, registry):
 - Cross-platform consistency (one path, one format, one permission rule)
 - No leakage of host fingerprint across daemon installs
@@ -192,8 +206,8 @@ The cross-owner non-disclosure rule applies uniformly to session routes:
 |---|---|---|
 | `POST /v1/approvals/session` create | N/A (no existing session referenced) | N/A |
 | Session fast-path use via supplied `session_id` | `session_not_found` if owner mismatch | Allowed |
-| `GET /v1/approvals/session` list | Returns only sessions where `owner_agent_id === caller_agent_id` | Returns all sessions |
-| `POST /v1/approvals/session/revoke` with `session_id` | `session_not_found` if owner mismatch (no state change) | Revokes any session |
+| `GET /v1/approvals/sessions` list | Returns only sessions where `owner_agent_id === caller_agent_id` | Returns all sessions |
+| `POST /v1/approvals/sessions/revoke` with `session_id` | `session_not_found` if owner mismatch (no state change) | Revokes any session |
 
 ### Schema additions
 
@@ -894,7 +908,7 @@ Suggested task ordering for the writing-plans phase. Each phase is independently
 8. Mint endpoint: `/v1/tokens/mint` with namespace restriction.
 9. `daemon rotate`: hot-swap + atomic file rewrite.
 10. Init: `agent_id` derivation (per-machine-per-runtime, NO cwd); per-runtime config writes (claude, cursor); manual instructions for codex/copilot. Runtime name spelling: `claude` NOT `claude-code`.
-11. Tests: token parse/validation, ALS propagation, owner enforcement at every requireApprovals step, BatchState owner across all bootstrap routes, mint namespace, rotate invalidation, init idempotency under re-runs from different cwds.
+11. Tests: token parse/validation, ALS propagation, owner enforcement at every requireApprovals step, BatchState owner across all bootstrap routes, mint namespace, rotate invalidation, init idempotency under re-runs from different cwds, `machine-id` generation on first daemon start (file created, 0600, 32 bytes), `machine-id` preserved across daemon restart (read, not regenerated), `daemon reset-machine-id` regenerates file but does NOT invalidate existing tokens (token minted under old agent_id still validates against the unchanged root_token), `daemon rotate` invalidates ALL derived tokens (HMAC mismatch under new root_token), daemon refuses to start when `machine-id` exists with wrong mode.
 
 ### Phase B — Memory hygiene (5o-core)
 1. Audit `requireKey()` callers; wrap each in try/finally with `.fill(0)`; ensure no key held across async continuation.
