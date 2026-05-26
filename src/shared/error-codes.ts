@@ -100,6 +100,16 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   env_file_parse_error: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   inject_template_parse_error: { exitCode: EXIT_CODE_USAGE, hint: () => null },
   session_pattern_invalid_glob: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  bootstrap_plan_invalid: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Edit secret-shuttle.yml to fix the schema error, then re-run.",
+    nextAction: () => "secret-shuttle bootstrap",
+  },
+  bootstrap_destination_unknown: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Edit secret-shuttle.yml: replace the unknown destination shorthand with one of: vercel:<env>, github-actions:owner/repo, cloudflare:<env>, supabase:<projectref>.",
+    nextAction: () => "secret-shuttle bootstrap",
+  },
 
   // ── Not found ──────────────────────────────────────────────────────────────
   not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -134,6 +144,11 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   template_tmpdir_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   env_file_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   session_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
+  bootstrap_batch_not_found: {
+    exitCode: EXIT_CODE_NOT_FOUND,
+    hint: () => "The batch was pruned or never existed. Generate a fresh batch:",
+    nextAction: () => "secret-shuttle bootstrap",
+  },
 
   // ── Permission ─────────────────────────────────────────────────────────────
   bad_host: { exitCode: EXIT_CODE_PERMISSION, hint: () => null },

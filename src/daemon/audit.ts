@@ -9,7 +9,8 @@ export type DaemonAuditAction =
   | "template_run" | "template_tmp_sweep"
   | "approval_created" | "approval_granted" | "approval_denied"
   | "approval_expired" | "approval_used" | "approval_cancelled" | "approval_mismatch"
-  | "import";
+  | "import"
+  | "bootstrap_plan" | "bootstrap_step";
 
 export interface DaemonAuditEvent {
   action: DaemonAuditAction;
