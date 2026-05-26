@@ -139,11 +139,13 @@ test("registry total entry count (sanity check)", () => {
   // Plan 4a Task C1 adds 7 more session-related codes = 117 total.
   // Plan 4a post-review P1 adds 1 more (session_revoked) = 118 total.
   // Plan 4c Task A adds 1 more (stdin_ref_in_env_file) = 119 total.
-  // Plan 5b/5f Task E adds 2 more (keychain_key_invalid, daemon_start_failed) = 121 total.
+  // Plan 5b/5f Task E adds 1 more (keychain_key_invalid) = 120 total.
+  // Note: daemon_start_failed was removed (P3.1) — it was registered but never
+  // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 121, `expected 121 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 120, `expected 120 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -183,13 +185,6 @@ test("error-codes: keychain_key_invalid registered with PERMISSION exit code + n
   assert.ok(entry, "keychain_key_invalid must be registered");
   assert.strictEqual(entry.exitCode, EXIT_CODE_PERMISSION);
   assert.strictEqual(entry.nextAction!(""), "secret-shuttle unlock");
-});
-
-test("error-codes: daemon_start_failed registered with TRANSIENT exit code + nextAction", () => {
-  const entry = lookupErrorCode("daemon_start_failed");
-  assert.ok(entry, "daemon_start_failed must be registered");
-  assert.strictEqual(entry.exitCode, EXIT_CODE_TRANSIENT);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle daemon status");
 });
 
 test("error-codes: daemon_not_running has nextAction (mechanical recovery)", () => {

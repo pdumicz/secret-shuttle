@@ -216,12 +216,6 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     nextAction: () => "secret-shuttle unlock",
   },
 
-  // ── Daemon init ─────────────────────────────────────────────────────────────
-  daemon_start_failed: {
-    exitCode: EXIT_CODE_TRANSIENT,
-    hint: () => "Daemon failed to start. Try: secret-shuttle daemon status",
-    nextAction: () => "secret-shuttle daemon status",
-  },
 };
 
 export function lookupErrorCode(code: string): ErrorCodeEntry | null {

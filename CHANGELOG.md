@@ -154,7 +154,7 @@
 
 - Envelope file gains a stable `id` field (UUID). Used as the keychain account key (`("secret-shuttle", <vault_id>)`), so multiple Secret Shuttle vaults can coexist on one machine via different `SHUTTLE_HOME` dirs without collision. Legacy envelopes are transparently upgraded on first read.
 
-- Error codes: `keychain_key_invalid` (cached key didn't unlock the vault — falls back to passphrase) and `daemon_start_failed` (spawn timeout during init). Both include `next_action` (Plan 5d pattern).
+- Error codes: `keychain_key_invalid` (cached key didn't unlock the vault — falls back to passphrase). Includes `next_action` (Plan 5d pattern). The `daemon_start_timeout` code (existing) covers init startup failures — no new daemon init code was added.
 
 **Changed:**
 
