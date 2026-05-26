@@ -12,6 +12,18 @@ export class DaemonBlindModeState {
   private active: ActiveBlind | null = null;
 
   start(domain: string, reason: string): ActiveBlind {
+    // Defensive hardening: refuse to overwrite an active blind window.
+    // All 4 production callers (inject, inject_submit, reveal_capture, and
+    // /v1/blind/start) MUST pre-check via current() and reject with a
+    // tailored message; this throw is the class-level safety net so a future
+    // caller that forgets the pre-check fails loudly instead of silently
+    // corrupting the active-blind invariant.
+    if (this.active !== null) {
+      throw new ShuttleError(
+        "blind_mode_already_active",
+        `Cannot start blind mode for ${normalizeDomain(domain)} (${reason}); already active for ${this.active.domain} (${this.active.reason}).`,
+      );
+    }
     this.active = {
       domain: normalizeDomain(domain),
       reason,
