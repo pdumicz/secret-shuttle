@@ -28,22 +28,28 @@ const UNLOCK_TIMEOUT_MS = 2 * 60 * 1000;
 const POLL_INTERVAL_MS = 300;
 
 /**
- * Ensure the daemon is running. If a socket file already exists, return the
- * port without spawning. Otherwise call startDaemon() which handles spawn +
- * wait-for-socket internally (15 s timeout, throws daemon_start_timeout on
- * failure).
+ * Ensure the daemon is running. Delegates entirely to startDaemon() which
+ * already handles three cases:
+ *   1. Daemon is running and alive → returns existing socket (no spawn).
+ *   2. Socket file is stale (PID not alive) → removes it, spawns fresh.
+ *   3. No socket file → spawns fresh.
+ *
+ * Using startDaemon() here prevents the previous bug where init returned a
+ * stale port from a crashed daemon, causing subsequent HTTP requests to fail.
  *
  * Returns { daemonSpawned, port }.
  */
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
 async function ensureDaemonRunning(): Promise<{ daemonSpawned: boolean; port: number }> {
-  const existing = await readSocketFile();
-  if (existing !== null) {
-    return { daemonSpawned: false, port: existing.port };
-  }
-  // startDaemon() is idempotent (returns existing if running) and handles the
-  // full spawn + poll-for-socket cycle with a 15 s timeout.
+  // Check the pre-spawn state so we can set daemonSpawned accurately.
+  // startDaemon() is idempotent and handles stale-socket cleanup internally.
+  const priorSocket = await readSocketFile();
+  const alreadyAlive = priorSocket !== null && pidAlive(priorSocket.pid);
   const sf = await startDaemon();
-  return { daemonSpawned: true, port: sf.port };
+  return { daemonSpawned: !alreadyAlive, port: sf.port };
 }
 
 /**
