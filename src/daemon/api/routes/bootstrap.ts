@@ -10,7 +10,7 @@ import { executeBatch, type ExecutorDeps } from "../../bootstrap/executor.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import type { ApprovalBinding } from "../../approvals/store.js";
-import type { BatchState } from "../../bootstrap/store.js";
+import type { BatchState, PlanEntry } from "../../bootstrap/store.js";
 
 // Cores from Task I:
 import { generateSecretCore } from "./secrets.js";
@@ -64,11 +64,7 @@ export function registerBootstrapRoutes(
     // Build the batch_id and binding before minting. We save state first so
     // /ui can look it up if it needs to render context while the user is deciding.
     const batchId = `bootstrap-${randomUUID()}`;
-    const planSummary = plan.map((e) => ({
-      name: e.secret,
-      source: e.source.kind === "capture" ? `capture:${(e.source as { url: string }).url}` : e.source.kind,
-      destinations: e.destinations.map((d) => d.shorthand),
-    }));
+    const planSummary = buildPlanSummary(plan);
     const binding: ApprovalBinding = {
       action: "bootstrap",
       ref: null,
@@ -151,11 +147,7 @@ export function registerBootstrapRoutes(
 
     // Rebuild the same binding shape that /plan minted, so requireApprovals'
     // equality check passes when consuming the pre-minted approval.
-    const planSummary = state.plan.map((e) => ({
-      name: e.secret,
-      source: e.source.kind === "capture" ? `capture:${(e.source as { url: string }).url}` : e.source.kind,
-      destinations: e.destinations.map((d) => d.shorthand),
-    }));
+    const planSummary = buildPlanSummary(state.plan);
     const binding: ApprovalBinding = {
       action: "bootstrap",
       ref: null,
@@ -218,6 +210,19 @@ export function registerBootstrapRoutes(
       })),
     };
   });
+}
+
+function buildPlanSummary(plan: PlanEntry[]): Array<{ name: string; source: string; destinations: string[] }> {
+  return plan.map((e) => ({
+    name: e.secret,
+    source:
+      e.source.kind === "capture"
+        ? `capture:${(e.source as { url: string }).url}`
+        : e.source.kind === "existing"
+          ? `existing:${e.ref}`
+          : e.source.kind,
+    destinations: e.destinations.map((d) => d.shorthand),
+  }));
 }
 
 function summarizeFromState(state: BatchState): {

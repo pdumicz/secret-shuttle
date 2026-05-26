@@ -312,3 +312,54 @@ secrets:
     assert.ok(typeof batch.plan_length === "number", "plan_length must be a number");
   });
 });
+
+test("POST /v1/bootstrap/plan: plan_summary includes ss:// ref for source: existing", async () => {
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    // source: existing with a ref whose name (stripe) differs from the yml key (STRIPE_KEY).
+    // This is the canonical case where hiding the ref breaks human review.
+    const yml = `
+version: 1
+secrets:
+  STRIPE_KEY:
+    source: { kind: existing, ref: "ss://upstream/prod/stripe" }
+    destinations: ["vercel:production"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml });
+    assert.equal(r.status, 400, `expected 400 approval_required, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(error.code, "approval_required");
+
+    const details = r.body.details as { approvals: unknown[]; batch_id: string } | undefined;
+    assert.ok(details !== undefined, `expected details in response: ${JSON.stringify(r.body)}`);
+
+    // Look up the saved BatchState and inspect the persisted plan entry ref.
+    const state = await ctx.services.bootstrapStore.get(details!.batch_id);
+    assert.ok(state !== null, "batch state must be persisted in bootstrap store");
+
+    const entry = state!.plan[0]!;
+    assert.equal(entry.secret, "STRIPE_KEY", "plan entry secret name must be the yml key");
+    assert.equal(entry.ref, "ss://upstream/prod/stripe", "plan entry ref must be the existing source ref");
+    assert.equal(entry.source.kind, "existing", "plan entry source kind must be existing");
+
+    // The approval was minted with template_params.plan_summary.
+    // Retrieve it from the approval store and assert the source string includes the ref.
+    const approvalId = state!.approval_id;
+    assert.ok(approvalId.length > 0, "approval_id must be set on saved state");
+
+    const grant = ctx.services.approvals.get(approvalId);
+    assert.ok(grant !== undefined, `approval ${approvalId} must exist in approvals store`);
+    const planSummaryRaw = grant!.template_params?.["plan_summary"];
+    assert.ok(typeof planSummaryRaw === "string", "template_params.plan_summary must be a JSON string");
+    const planSummary = JSON.parse(planSummaryRaw!) as Array<{ name: string; source: string; destinations: string[] }>;
+    assert.equal(planSummary.length, 1, "plan_summary must have one entry");
+    assert.equal(planSummary[0]!.name, "STRIPE_KEY");
+    assert.equal(
+      planSummary[0]!.source,
+      "existing:ss://upstream/prod/stripe",
+      `plan_summary source must include the ss:// ref, got: ${planSummary[0]!.source}`,
+    );
+    assert.deepEqual(planSummary[0]!.destinations, ["vercel:production"]);
+  });
+});
