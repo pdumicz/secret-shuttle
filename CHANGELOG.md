@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added (Burst 4 — Pre-launch security hardening)
+
+- **Per-agent token isolation (5m):** HMAC-derived per-agent tokens (`<agent_id>.<hmac>`), persistent root_token + machine-id files under `<SHUTTLE_HOME>` at mode 0600. `secret-shuttle daemon rotate` invalidates all derived tokens; `secret-shuttle daemon reset-machine-id` refreshes agent_id derivation without revocation. `secret-shuttle agent mint --child-id <id>` for manual sub-agent token mint. `secret-shuttle init` now writes per-runtime tokens to `~/.claude/settings.json` and Cursor's user settings (NEVER to repo-committed files); codex/copilot get manual install instructions.
+- **AsyncLocalStorage audit context:** every daemon call records `actor_agent_id` automatically. New audit fields `parent_agent_id`, `child_agent_id` for sessions/grants/batches/mint chains.
+- **Owner-enforced consumption:** `ApprovalGrant`, `SessionGrant`, `BatchState` all carry `owner_agent_id`. Non-root cross-owner access returns `approval_not_found` / `session_not_found` / `bootstrap_batch_not_found` (existence non-disclosure). Root bypasses every check.
+- **Memory hygiene (5o-core, best-effort):** `requireKey()` copies scrubbed synchronously before any async continuation in `Vault.read`/`write`/`fingerprintKey`. Masker patterns + lookback scrubbed on dispose. Child stdin Buffer scrubbed in write callback.
+- **Capture-from-URL in bootstrap (5p):** yml `source: { kind: capture, url: "https://..." }` now drives a daemon-owned browser through the URL under a single approval. Strict URL validation (https / no creds / `node:net.isIP` for IPv4+IPv6 / localhost variants). Capture binds to target_id with at-capture-time host re-verification. Tokenized raw UI routes (`/ui/bootstrap/{capture-step,skip-step,abandon}`) coordinate dev clicks without exposing the agent token to the browser. Cleanup state machine auto-resumes blind on verified-clean target close (or after Chrome death for bootstrap-owned browsers).
+
+### Changed — Burst 4 (breaking)
+
+- `secret-shuttle daemon rotate` is now the canonical token revocation operation. Previously every daemon restart silently regenerated the token; now the root_token persists and rotation is explicit.
+- `DaemonBlindModeState.start()` throws `blind_mode_already_active` instead of silently overwriting state.
+- Bootstrap plans with capture sources always require approval, regardless of `--environment`.
+
+### Known limitations — Burst 4
+
+- `Secret.value` and `CaptureResult.value` remain JS strings, lingering in heap until GC. End-to-end Buffer refactor is the named follow-up plan 5q.
+- Per-(machine, runtime) agent_ids — all of a user's projects share the same daemon-perspective identity per runtime. Per-project granularity is opt-in via `secret-shuttle agent mint`; auto-derived per-project support is plan 5s.
+- No per-agent token denylist or expiry; revocation is global via `daemon rotate`. Plan 5r covers granular revocation.
+
 ### Added
 - Structured error contract: every CLI error now emits both the legacy nested `error: { code, message }` block AND flat agent-friendly fields (`error_code`, `message`, `hint`, `exit_code`). `hint` is the literal recovery command (or null when the human must intervene); `exit_code` follows Sol convention (0 success, 1 transient, 2 usage, 3 not-found, 4 permission, 5 conflict).
 - `src/shared/error-codes.ts`: central registry seeded with real codes from the current codebase (`secret_not_found`, `missing_param`, `domain_mismatch`, `approval_*`, `browser_not_started`, `vault_unlock_failed`, etc.). The audit of remaining throw sites continues incrementally across Plans 2–5.
