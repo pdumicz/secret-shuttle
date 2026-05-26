@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,8 @@ import { DaemonServer } from "../../server.js";
 import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
 import { PENDING_TTL_MS } from "../../approvals/session.js";
+import { withAuthContext } from "../../auth/auth-context.js";
+import { deriveHmac, formatBearer } from "../../auth/token-derive.js";
 
 async function withDaemon<T>(
   fn: (ctx: { port: number; token: string; services: DaemonServices }) => Promise<T>,
@@ -16,13 +19,16 @@ async function withDaemon<T>(
   const prevSecure = process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
   process.env.SECRET_SHUTTLE_HOME = home;
   process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
-  const server = new DaemonServer({ token: "t" });
+  // 32-byte base64url root token. The owner-filtering tests below derive
+  // agent HMACs from this, which require a 32-byte key (see token-derive.ts).
+  const rootToken = randomBytes(32).toString("base64url");
+  const server = new DaemonServer({ token: rootToken });
   const services = new DaemonServices();
   let port = 0;
   registerRoutes(server, services, () => port);
   ({ port } = await server.listen(0));
   try {
-    return await fn({ port, token: "t", services });
+    return await fn({ port, token: rootToken, services });
   } finally {
     await server.close();
     if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
@@ -39,13 +45,27 @@ async function call(
   p: string,
   body?: unknown,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  return await callWithBearer(ctx, ctx.token, method, p, body);
+}
+
+async function callWithBearer(
+  ctx: { port: number },
+  bearer: string,
+  method: string,
+  p: string,
+  body?: unknown,
+): Promise<{ status: number; body: Record<string, unknown> }> {
   const init: RequestInit = {
     method,
-    headers: { Authorization: `Bearer ${ctx.token}`, "content-type": "application/json" },
+    headers: { Authorization: `Bearer ${bearer}`, "content-type": "application/json" },
   };
   if (body !== undefined) init.body = JSON.stringify(body);
   const res = await fetch(`http://127.0.0.1:${ctx.port}${p}`, init);
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
+function agentBearer(rootToken: string, agentId: string): string {
+  return formatBearer(agentId, deriveHmac(rootToken, agentId));
 }
 
 test("POST /v1/approvals/session with wait_for_approval=false returns session_id + status:pending", async () => {
@@ -245,5 +265,107 @@ test("POST /v1/approvals/session: wait flow — approve via HTTP UI route → re
     // expires_at is now TTL_ms past approval (not creation).
     const granted = ctx.services.sessionStore.get(body.session_id)!;
     assert.equal(granted.expires_at, granted.approved_at! + 5000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Owner-filtered list + owner-checked revoke (Task A10).
+//
+// Mint sessions directly under each agent's AuthContext via the store
+// (simpler than driving the full HTTP create flow which requires UI
+// approval to reach the "granted" state). The HTTP GET/revoke routes
+// are exercised with agent-derived bearer tokens.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_PATTERN = {
+  actions: ["template-run"] as const,
+  ref_glob: "ss://x/prod/*",
+  destination_domains: [] as string[],
+  template_ids: ["vercel-env-add"],
+  ttl_ms: 60_000,
+};
+
+test("GET /v1/approvals/sessions: non-root sees only own sessions", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Mint S_A as agent A, S_B as agent B. Direct store calls under
+    // withAuthContext set owner_agent_id; HTTP create would also work
+    // but adds approval-flow complexity unrelated to this test.
+    let idA = "";
+    let idB = "";
+    await withAuthContext({ agent_id: "claude-aaa", isRoot: false }, () => {
+      idA = ctx.services.sessionStore.create({ ...SAMPLE_PATTERN, actions: ["template-run"] }).id;
+    });
+    await withAuthContext({ agent_id: "claude-bbb", isRoot: false }, () => {
+      idB = ctx.services.sessionStore.create({ ...SAMPLE_PATTERN, actions: ["template-run"] }).id;
+    });
+    // GET as agent A → only S_A.
+    const aBearer = agentBearer(ctx.token, "claude-aaa");
+    const listAsA = await callWithBearer(ctx, aBearer, "GET", "/v1/approvals/sessions");
+    assert.equal(listAsA.status, 200);
+    const sessionsA = (listAsA.body as { sessions: Array<{ id: string }> }).sessions;
+    const idsA = sessionsA.map((s) => s.id);
+    assert.ok(idsA.includes(idA), "agent A should see S_A");
+    assert.ok(!idsA.includes(idB), "agent A should NOT see S_B");
+    assert.equal(sessionsA.length, 1);
+    // GET as root → both.
+    const listAsRoot = await call(ctx, "GET", "/v1/approvals/sessions");
+    assert.equal(listAsRoot.status, 200);
+    const sessionsRoot = (listAsRoot.body as { sessions: Array<{ id: string }> }).sessions;
+    const idsRoot = sessionsRoot.map((s) => s.id);
+    assert.ok(idsRoot.includes(idA), "root should see S_A");
+    assert.ok(idsRoot.includes(idB), "root should see S_B");
+    assert.equal(sessionsRoot.length, 2);
+  });
+});
+
+test("POST /v1/approvals/sessions/revoke: non-root cross-owner returns session_not_found", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Agent A creates S. Agent B tries to revoke by id.
+    let sessionId = "";
+    await withAuthContext({ agent_id: "claude-aaa", isRoot: false }, () => {
+      sessionId = ctx.services.sessionStore.create({
+        ...SAMPLE_PATTERN,
+        actions: ["template-run"],
+      }).id;
+    });
+    const bBearer = agentBearer(ctx.token, "claude-bbb");
+    const revokeRes = await callWithBearer(ctx, bBearer, "POST", "/v1/approvals/sessions/revoke", {
+      session_id: sessionId,
+    });
+    assert.equal(revokeRes.status, 400);
+    assert.equal((revokeRes.body as { error: { code: string } }).error.code, "session_not_found");
+    // S is still alive on subsequent agent-A GET (status pending, not revoked).
+    const aBearer = agentBearer(ctx.token, "claude-aaa");
+    const listAsA = await callWithBearer(ctx, aBearer, "GET", "/v1/approvals/sessions");
+    assert.equal(listAsA.status, 200);
+    const sessionsA = (listAsA.body as { sessions: Array<{ id: string; status: string }> }).sessions;
+    const s = sessionsA.find((x) => x.id === sessionId);
+    assert.ok(s, "session should still exist for owner");
+    assert.notEqual(s!.status, "revoked");
+  });
+});
+
+test("POST /v1/approvals/sessions/revoke as root: succeeds across owners", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Agent A creates S; root revokes.
+    let sessionId = "";
+    await withAuthContext({ agent_id: "claude-aaa", isRoot: false }, () => {
+      sessionId = ctx.services.sessionStore.create({
+        ...SAMPLE_PATTERN,
+        actions: ["template-run"],
+      }).id;
+    });
+    const revokeRes = await call(ctx, "POST", "/v1/approvals/sessions/revoke", {
+      session_id: sessionId,
+    });
+    assert.equal(revokeRes.status, 200);
+    assert.equal((revokeRes.body as { revoked: boolean }).revoked, true);
+    // S is gone (status revoked) — confirm via the store directly so we
+    // observe state independent of the GET filter.
+    const after = ctx.services.sessionStore.get(sessionId)!;
+    assert.equal(after.status, "revoked");
   });
 });

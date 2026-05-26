@@ -5,6 +5,7 @@ import {
   type SessionAction,
   type SessionPattern,
 } from "../../approvals/session.js";
+import { getCurrentAgentId } from "../../auth/auth-context.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { asObject, optBool, reqString } from "../validate.js";
@@ -55,22 +56,27 @@ export function registerApprovalsSessionRoutes(
 
   server.addRoute("GET", "/v1/approvals/sessions", () => {
     services.lock.requireKey();
+    const callerAgentId = getCurrentAgentId();
+    const isRoot = callerAgentId === "root";
     return {
-      sessions: services.sessionStore.list().map((g) => ({
-        id: g.id,
-        status: g.status,
-        actions: g.actions,
-        ref_glob: g.ref_glob,
-        destination_domains: g.destination_domains,
-        ...(g.template_ids !== undefined ? { template_ids: g.template_ids } : {}),
-        ...(g.allowed_actions !== undefined ? { allowed_actions: g.allowed_actions } : {}),
-        ttl_ms: g.ttl_ms,
-        ...(g.max_uses !== undefined ? { max_uses: g.max_uses } : {}),
-        created_at: g.created_at,
-        approved_at: g.approved_at,
-        expires_at: g.expires_at,
-        uses: g.uses,
-      })),
+      sessions: services.sessionStore
+        .list()
+        .filter((g) => isRoot || g.owner_agent_id === callerAgentId)
+        .map((g) => ({
+          id: g.id,
+          status: g.status,
+          actions: g.actions,
+          ref_glob: g.ref_glob,
+          destination_domains: g.destination_domains,
+          ...(g.template_ids !== undefined ? { template_ids: g.template_ids } : {}),
+          ...(g.allowed_actions !== undefined ? { allowed_actions: g.allowed_actions } : {}),
+          ttl_ms: g.ttl_ms,
+          ...(g.max_uses !== undefined ? { max_uses: g.max_uses } : {}),
+          created_at: g.created_at,
+          approved_at: g.approved_at,
+          expires_at: g.expires_at,
+          uses: g.uses,
+        })),
     };
   });
 
@@ -78,7 +84,18 @@ export function registerApprovalsSessionRoutes(
     services.lock.requireKey();
     const o = asObject(raw);
     const sessionId = reqString(o, "session_id");
-    services.sessionStore.revoke(sessionId); // throws session_not_found
+    // Owner check lives in the route (not the store) so direct-store callers
+    // keep their existing contract. Missing session and cross-owner session
+    // share the same error code so non-root callers can't probe for existence.
+    const callerAgentId = getCurrentAgentId();
+    const sess = services.sessionStore.get(sessionId);
+    if (
+      sess === undefined ||
+      (callerAgentId !== "root" && sess.owner_agent_id !== callerAgentId)
+    ) {
+      throw new ShuttleError("session_not_found", "Unknown session id.");
+    }
+    services.sessionStore.revoke(sessionId);
     return { revoked: true, session_id: sessionId };
   });
 }
