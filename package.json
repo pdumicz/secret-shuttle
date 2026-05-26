@@ -55,7 +55,8 @@
   "dependencies": {
     "@napi-rs/keyring": "^1.3.0",
     "commander": "^12.1.0",
-    "ws": "^8.20.1"
+    "ws": "^8.20.1",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",
