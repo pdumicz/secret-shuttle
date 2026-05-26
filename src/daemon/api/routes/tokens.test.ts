@@ -152,6 +152,27 @@ test("POST /v1/tokens/mint: non-root CANNOT mint own identity again", async () =
   });
 });
 
+test("POST /v1/tokens/mint: non-root CANNOT mint with trailing-dot-only suffix", async () => {
+  // Regression for M5: the regex /^[a-z][a-z0-9._-]{0,63}$/ accepts
+  // "claude-7f2a." (trailing dot, no suffix). assertAgentIdValid passes,
+  // and `requested.startsWith(requiredPrefix)` is also true — only the
+  // `length === requiredPrefix.length` guard rejects this. Without that
+  // guard a caller could mint a zero-suffix child token.
+  await withDaemon(async (ctx) => {
+    const callerBearer = agentBearer(ctx.token, "claude-7f2a");
+    const r = await callWithBearer(ctx, callerBearer, "POST", "/v1/tokens/mint", {
+      agent_id: "claude-7f2a.",
+    });
+    assert.equal(r.status, 400, `expected 400, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const error = (r.body as { error: { code: string } }).error;
+    assert.equal(
+      error.code,
+      "agent_id_namespace_violation",
+      `expected agent_id_namespace_violation for trailing-dot mint, got: ${error.code} body=${JSON.stringify(r.body)}`,
+    );
+  });
+});
+
 test("POST /v1/tokens/mint: returned token validates against current root_token", async () => {
   // End-to-end proof of stateless HMAC validity: take the returned token,
   // use it as the bearer for /v1/whoami, and confirm the server resolves

@@ -31,32 +31,46 @@ import { writeDaemonAudit } from "../../audit.js";
 export function registerTokens(server: DaemonServer, getRootToken: () => string): void {
   server.addRoute("POST", "/v1/tokens/mint", async (_req, raw) => {
     const ctx = getAuthContext();
+    // The `unauthorized` early-throw intentionally has no audit because there
+    // is no ALS context to identify the caller (matches the existing pattern
+    // across the codebase).
     if (ctx === undefined) throw new ShuttleError("unauthorized", "Missing auth context.");
     const o = asObject(raw);
     const requested = reqString(o, "agent_id");
-    // Validate charset + reserved-name rules BEFORE checking namespace so a
-    // junk agent_id surfaces the more specific `agent_id_invalid` code.
-    assertAgentIdValid(requested);
-    if (!ctx.isRoot) {
-      const requiredPrefix = `${ctx.agent_id}.`;
-      // Must start with "${caller}." AND have at least one character after
-      // the dot — minting `${caller}` itself (no trailing dot) or `${caller}.`
-      // (empty suffix) both fail.
-      if (!requested.startsWith(requiredPrefix) || requested.length === requiredPrefix.length) {
-        throw new ShuttleError(
-          "agent_id_namespace_violation",
-          `Caller ${ctx.agent_id} cannot mint ${requested} — child id must start with "${requiredPrefix}".`,
-        );
+    try {
+      // Validate charset + reserved-name rules BEFORE checking namespace so a
+      // junk agent_id surfaces the more specific `agent_id_invalid` code.
+      assertAgentIdValid(requested);
+      if (!ctx.isRoot) {
+        const requiredPrefix = `${ctx.agent_id}.`;
+        // Must start with "${caller}." AND have at least one character after
+        // the dot — minting `${caller}` itself (no trailing dot) or `${caller}.`
+        // (empty suffix) both fail.
+        if (!requested.startsWith(requiredPrefix) || requested.length === requiredPrefix.length) {
+          throw new ShuttleError(
+            "agent_id_namespace_violation",
+            `Caller ${ctx.agent_id} cannot mint ${requested} — child id must start with "${requiredPrefix}".`,
+          );
+        }
       }
+      const hmac = deriveHmac(getRootToken(), requested);
+      const token = formatBearer(requested, hmac);
+      await writeDaemonAudit({
+        action: "tokens_mint",
+        ok: true,
+        parent_agent_id: ctx.agent_id,
+        child_agent_id: requested,
+      });
+      return { token, agent_id: requested };
+    } catch (err) {
+      await writeDaemonAudit({
+        action: "tokens_mint",
+        ok: false,
+        parent_agent_id: ctx.agent_id,
+        child_agent_id: requested,
+        error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+      });
+      throw err;
     }
-    const hmac = deriveHmac(getRootToken(), requested);
-    const token = formatBearer(requested, hmac);
-    await writeDaemonAudit({
-      action: "tokens_mint",
-      ok: true,
-      parent_agent_id: ctx.agent_id,
-      child_agent_id: requested,
-    });
-    return { token, agent_id: requested };
   });
 }
