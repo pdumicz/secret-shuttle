@@ -30,9 +30,16 @@ test("github-actions:owner/repo → github-actions-secret-set", () => {
   assert.strictEqual(r.domain, "github.com");
 });
 
-test("cloudflare:production → cloudflare-secret-put", () => {
+test("cloudflare:production → cloudflare-secret-put with env=production", () => {
   const r = resolveDestinationShorthand("cloudflare:production", "API_KEY");
   assert.strictEqual(r.template_id, "cloudflare-secret-put");
+  assert.deepStrictEqual(r.template_params, { name: "API_KEY", env: "production" });
+  assert.strictEqual(r.domain, "cloudflare.com");
+});
+
+test("cloudflare:staging → env=staging (custom wrangler env)", () => {
+  const r = resolveDestinationShorthand("cloudflare:staging", "API_KEY");
+  assert.strictEqual(r.template_params["env"], "staging");
 });
 
 test("supabase:projectref → supabase-edge-secret-set", () => {

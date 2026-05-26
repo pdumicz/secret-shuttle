@@ -49,7 +49,7 @@ export function resolveDestinationShorthand(shorthand: string, secretName: strin
     case "cloudflare": {
       return {
         template_id: "cloudflare-secret-put",
-        template_params: { name: secretName, environment: scope },
+        template_params: { name: secretName, env: scope },
         domain: "cloudflare.com",
       };
     }
