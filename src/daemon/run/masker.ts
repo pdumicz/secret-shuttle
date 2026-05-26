@@ -13,6 +13,26 @@ export interface Masker {
    * flush the masker is unusable.
    */
   flush(): Buffer;
+
+  /**
+   * Zero out all internal Buffers holding secret bytes (the pattern buffers
+   * and the current lookback). After dispose() the masker is unusable —
+   * subsequent process() / flush() calls behave as if there were no secrets
+   * (i.e. they pass input through unchanged or return empty), but MUST NOT
+   * leak previously-held secret bytes. Idempotent: safe to call more than once.
+   *
+   * Defense-in-depth: even though Node will GC the buffers eventually, raw
+   * secret bytes can linger in heap for an unbounded time and can be exposed
+   * by core dumps, heap snapshots, or process introspection. Scrub eagerly.
+   */
+  dispose(): void;
+
+  /**
+   * Test-only introspection of the internal buffers. Do NOT use in
+   * production code; this exists so masker-scrub.test.ts can assert that
+   * dispose() / flush() actually zero the underlying bytes.
+   */
+  __testing_inspect(): { patterns: readonly Buffer[]; lookback: Buffer };
 }
 
 /**
@@ -37,7 +57,7 @@ export function createMasker(secrets: readonly string[]): Masker {
   const patterns: Buffer[] = deduped
     .map((s) => Buffer.from(s, "utf8"))
     .sort((a, b) => b.length - a.length);
-  const maxLen = patterns.length > 0 ? patterns[0]!.length : 0;
+  let maxLen = patterns.length > 0 ? patterns[0]!.length : 0;
   let lookback = Buffer.alloc(0);
 
   function replaceAll(buf: Buffer): Buffer {
@@ -62,16 +82,40 @@ export function createMasker(secrets: readonly string[]): Masker {
       // After replacement, hold back the trailing maxLen-1 bytes — they could
       // still be the prefix of a future match once the next chunk arrives.
       const safeEmitLen = Math.max(0, scanned.length - (maxLen - 1));
-      lookback = Buffer.from(scanned.subarray(safeEmitLen));
+      const newLookback = Buffer.from(scanned.subarray(safeEmitLen));
+      // Scrub the OLD lookback before reassigning. It may contain partial
+      // secret bytes carried over from the previous chunk boundary; once we
+      // drop the reference those bytes would linger until GC.
+      lookback.fill(0);
+      lookback = newLookback;
       return Buffer.from(scanned.subarray(0, safeEmitLen));
     },
     flush(): Buffer {
       const out = Buffer.from(lookback);
+      // Scrub the OLD lookback before reassigning to an empty buffer. The
+      // returned `out` is an independent copy, so this does not zero what
+      // the caller sees.
+      lookback.fill(0);
       lookback = Buffer.alloc(0);
       // No more bytes are coming, so anything in lookback is final — but
       // since replaceAll already ran on the combined buffer, it's already
       // had any matches stripped. Emit verbatim.
       return out;
+    },
+    dispose(): void {
+      // Zero every pattern buffer in place.
+      for (const p of patterns) p.fill(0);
+      // Zero the current lookback in place.
+      lookback.fill(0);
+      // Render the masker unusable: clear the patterns array so replaceAll
+      // becomes a no-op, force maxLen to 0 so process() short-circuits to
+      // pass-through, and reset lookback to a fresh empty buffer.
+      patterns.length = 0;
+      maxLen = 0;
+      lookback = Buffer.alloc(0);
+    },
+    __testing_inspect() {
+      return { patterns, lookback };
     },
   };
 }
