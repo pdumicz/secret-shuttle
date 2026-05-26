@@ -54,6 +54,19 @@ export function registerBootstrapRoutes(
       return { ok: true, completed: 0, failed: 0, refs: [], errors: [] };
     }
 
+    // C10: capture-conditional pre-flight blind guard. Runs AFTER plan compute
+    // (so we know if the plan contains a capture step) and BEFORE batchId
+    // allocation / bootstrapStore.save — a guarded /plan must leave no batch
+    // clutter behind. Non-capture plans skip this guard entirely.
+    if (planRequiresCapture(plan)) {
+      if (services.blind.current() !== null) {
+        throw new ShuttleError(
+          "blind_mode_already_active",
+          "Blind mode is currently active from a prior operation. Approve `blind end` before bootstrapping.",
+        );
+      }
+    }
+
     // Build the batch_id and binding before minting. We save state first so
     // /ui can look it up if it needs to render context while the user is deciding.
     const batchId = `bootstrap-${randomUUID()}`;
@@ -213,6 +226,20 @@ export function registerBootstrapRoutes(
     }
     if (state.status === "completed") {
       return { ok: true, ...summarizeFromState(state) };
+    }
+
+    // C10: capture-conditional pre-flight blind guard. Runs AFTER owner check
+    // + completed short-circuit, BEFORE requireApprovals — so the minted
+    // approval is preserved across the user's `blind end` + retry. Without
+    // this ordering, the user would be forced to mint a fresh approval every
+    // time they had blind active, which is a terrible UX.
+    if (planRequiresCapture(state.plan)) {
+      if (services.blind.current() !== null) {
+        throw new ShuttleError(
+          "blind_mode_already_active",
+          "Blind mode is currently active from a prior operation. Approve `blind end` before bootstrapping.",
+        );
+      }
     }
 
     // The bootstrap approval is single-use, but the executor is idempotent
