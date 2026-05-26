@@ -585,6 +585,26 @@ test("parseBearer: split on LAST dot (agent_id may contain dots)", () => {
 test("parseBearer: 'root.<anything>' is rejected (reserved)", () => {
   assert.throws(() => parseBearer("root.deadbeef"), /agent_token_invalid/);
 });
+
+test("parseBearer: ShuttleError code is agent_token_invalid (serializes correctly)", () => {
+  try {
+    parseBearer("root.deadbeef");
+    assert.fail("should throw");
+  } catch (e) {
+    assert.ok(e instanceof ShuttleError, "must be ShuttleError, not plain Error (otherwise errorToJson collapses to unexpected_error)");
+    assert.equal((e as ShuttleError).code, "agent_token_invalid");
+  }
+});
+
+test("parseBearer: malformed-agent_id bearer also throws ShuttleError(agent_token_invalid)", () => {
+  try {
+    parseBearer("BAD!CHARS.someHmac");
+    assert.fail("should throw");
+  } catch (e) {
+    assert.ok(e instanceof ShuttleError);
+    assert.equal((e as ShuttleError).code, "agent_token_invalid");
+  }
+});
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -597,12 +617,13 @@ Expected: FAIL (modules do not exist)
 ```ts
 // src/daemon/auth/agent-id.ts
 import { createHash } from "node:crypto";
+import { ShuttleError } from "../../shared/errors.js";
 
 const AGENT_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 export function assertAgentIdValid(id: string): void {
   if (!AGENT_ID_RE.test(id) || id === "root") {
-    throw new Error(`agent_id_invalid: ${JSON.stringify(id)}`);
+    throw new ShuttleError("agent_id_invalid", `agent_id ${JSON.stringify(id)} is invalid (must match ${AGENT_ID_RE}, and "root" is reserved).`);
   }
 }
 
@@ -610,6 +631,19 @@ export function deriveAutoAgentId(runtime: string, machineId: string): string {
   const digest = createHash("sha256").update(`${machineId}\x00${runtime}`).digest("hex");
   return `${runtime}-${digest.slice(0, 16)}`;
 }
+```
+
+Add JSON-error-code test:
+```ts
+test("assertAgentIdValid throws ShuttleError with code agent_id_invalid (serializes correctly)", () => {
+  try {
+    assertAgentIdValid("ROOT");
+    assert.fail("should throw");
+  } catch (e) {
+    assert.ok(e instanceof ShuttleError);
+    assert.equal((e as ShuttleError).code, "agent_id_invalid");
+  }
+});
 ```
 
 ```ts
@@ -645,12 +679,15 @@ export function parseBearer(bearer: string): ParsedBearer {
   const agentId = bearer.slice(0, lastDot);
   const hmac = bearer.slice(lastDot + 1);
   if (agentId === "root") {
-    throw new Error("agent_token_invalid: agent_id 'root' is reserved");
+    throw new ShuttleError("agent_token_invalid", "agent_id 'root' is reserved");
   }
   try {
     assertAgentIdValid(agentId);
   } catch {
-    throw new Error("agent_token_invalid: malformed agent_id");
+    // Re-throw as agent_token_invalid (not agent_id_invalid) — the caller
+    // supplied a malformed BEARER; surface that distinction. ShuttleError
+    // ensures JSON serialization carries the proper error_code.
+    throw new ShuttleError("agent_token_invalid", "bearer contains a malformed agent_id");
   }
   return { kind: "agent", agentId, hmac };
 }
@@ -2608,10 +2645,14 @@ test("owner_agent_id is recorded and exposed for audit", () => {});
 
 ```ts
 // src/daemon/bootstrap/pending-captures.ts
+import { ShuttleError } from "../../shared/errors.js";
+
 export interface PendingCaptureEntry {
   resolve: (val: { value: string; field_fingerprint: string }) => void;
   reject: (err: Error) => void;
   capture_token: string;
+  batchId: string;
+  secretName: string;
   target_id: string;
   expected_host: string;
   owner_agent_id: string;
@@ -2621,6 +2662,9 @@ export interface PendingCaptureEntry {
 
 export class PendingCapturesRegistry {
   private readonly byToken = new Map<string, PendingCaptureEntry>();
+  // Secondary index so a re-register for the same (batch, secret) can
+  // invalidate the prior token. Key shape: `${batchId}:${secretName}`.
+  private readonly byStep = new Map<string, PendingCaptureEntry>();
 
   /**
    * Synchronously creates a pending entry and returns the Promise the executor
@@ -2634,6 +2678,23 @@ export class PendingCapturesRegistry {
     target_id: string; expected_host: string; owner_agent_id: string;
     timeoutMs: number; onTimeout: (err: Error) => void;
   }): Promise<{ value: string; field_fingerprint: string }> {
+    const stepKey = `${opts.batchId}:${opts.secretName}`;
+
+    // If a prior pending entry exists for this (batch, secret), reject it
+    // before installing the new one. Leaving a live token in byToken would
+    // let a stale UI POST resolve/reject the WRONG executor run; clearing it
+    // also closes the old raw UI token immediately.
+    const prior = this.byStep.get(stepKey);
+    if (prior !== undefined) {
+      clearTimeout(prior.timer);
+      this.byToken.delete(prior.capture_token);
+      this.byStep.delete(stepKey);
+      prior.reject(new ShuttleError(
+        "bootstrap_capture_aborted",
+        `Pending capture for ${stepKey} replaced by a new register call.`,
+      ));
+    }
+
     let resolve!: (val: { value: string; field_fingerprint: string }) => void;
     let reject!: (err: Error) => void;
     const promise = new Promise<{ value: string; field_fingerprint: string }>((res, rej) => {
@@ -2641,19 +2702,24 @@ export class PendingCapturesRegistry {
     });
     const timer = setTimeout(() => {
       this.byToken.delete(opts.capture_token);
+      this.byStep.delete(stepKey);
       const err = new ShuttleError("bootstrap_capture_timeout", "5 minutes elapsed without a capture.");
       opts.onTimeout(err);
       reject(err);
     }, opts.timeoutMs);
-    this.byToken.set(opts.capture_token, {
+    const entry: PendingCaptureEntry = {
       resolve, reject,
       capture_token: opts.capture_token,
+      batchId: opts.batchId,
+      secretName: opts.secretName,
       target_id: opts.target_id,
       expected_host: opts.expected_host,
       owner_agent_id: opts.owner_agent_id,
       started_at: Date.now(),
       timer,
-    });
+    };
+    this.byToken.set(opts.capture_token, entry);
+    this.byStep.set(stepKey, entry);
     return promise;
   }
 
@@ -2666,6 +2732,7 @@ export class PendingCapturesRegistry {
     if (e === undefined) return false;
     clearTimeout(e.timer);
     this.byToken.delete(token);
+    this.byStep.delete(`${e.batchId}:${e.secretName}`);
     e.resolve(val);
     return true;
   }
@@ -2675,6 +2742,7 @@ export class PendingCapturesRegistry {
     if (e === undefined) return false;
     clearTimeout(e.timer);
     this.byToken.delete(token);
+    this.byStep.delete(`${e.batchId}:${e.secretName}`);
     e.reject(err);
     return true;
   }
@@ -2972,25 +3040,27 @@ test("normal completion + bootstrap-owned browser → Chrome cleanly stopped; bl
 
 - [ ] **Step 2: Implement BOTH the pre-executor auto-start AND the finally**
 
-In `/v1/bootstrap/continue` route, AFTER the owner check / blind guard / approval consume, BEFORE entering `executeBatch`:
+In `/v1/bootstrap/continue` route, AFTER the owner check / blind guard / approval consume, BEFORE any browser side-effects:
 
 ```ts
-// Auto-start a daemon-owned browser if this batch has capture steps and no
-// browser session is already running. The executor expects services.browserSession
-// to be non-null when it walks a capture entry.
 const hasCapture = state.plan.some((e) => e.source.kind === "capture");
-if (hasCapture) {
-  await services.ensureBootstrapBrowser(batchId);
-}
 
+// Acquire the per-batch execution lock FIRST. This guarantees that a second
+// concurrent /continue gets bootstrap_batch_busy before doing any browser
+// work — without this ordering, both callers would race into
+// ensureBootstrapBrowser and either fight over the BrowserSession slot
+// or both attach to the user's session before one gets rejected.
 if (!services.bootstrapStore.tryAcquireExecutionLock(batchId)) {
   throw new ShuttleError("bootstrap_batch_busy", "...");
 }
 try {
+  // Now that we hold the lock, it's safe to spawn/attach the browser.
+  if (hasCapture) {
+    await services.ensureBootstrapBrowser(batchId);
+  }
   const result = await executeBatch(...);
   return { ok: true, ...result };
 } finally {
-  services.bootstrapStore.releaseExecutionLock(batchId);
   if (hasCapture) {
     const { stopped } = await services.stopBootstrapBrowser(batchId);
     if (stopped && services.blind.current() !== null) {
@@ -3003,7 +3073,20 @@ try {
       });
     }
   }
+  // Release lock LAST — after browser cleanup. A second /continue retrying
+  // after we release should see a clean services.browserSession === null
+  // (or the user's pre-existing session, untouched).
+  services.bootstrapStore.releaseExecutionLock(batchId);
 }
+```
+
+Add a regression test:
+```ts
+test("concurrent /continue: second caller gets bootstrap_batch_busy WITHOUT spawning a second browser", async () => {
+  // Two /continue calls simultaneously on the same capture batch. The first
+  // proceeds; the second gets bootstrap_batch_busy. Assert services.browserSession
+  // was only set once (no race in ensureBootstrapBrowser).
+});
 ```
 
 The `ensureBootstrapBrowser` call is a no-op when a user-owned session exists (returns the existing session unchanged); for fresh-daemon paths it spawns Chrome and stores it with `owner: { kind: "bootstrap", batchId }`. The `stopBootstrapBrowser` call in the finally is also a no-op for user-owned sessions (returns `{ stopped: false }`); only bootstrap-owned sessions get torn down.
@@ -3233,7 +3316,7 @@ git commit -m "feat(error-codes): 6 new codes for Phase C (capture-from-URL)"
 1. **Per-agent token model** — under a new section "Authentication". Explain:
    - Tokens are `<agent_id>.<hmac>` derived from the daemon's root_token
    - Each agent runtime gets a deterministic per-(machine, runtime) agent_id
-   - Sub-agents must mint child tokens via `/v1/tokens/mint` (or `secret-shuttle agent-mint --child-id ...`)
+   - Sub-agents must mint child tokens via `/v1/tokens/mint` (or `secret-shuttle agent mint --child-id ...`)
    - Tokens are attribution + hygiene, NOT hard isolation against same-user attackers
    - Revocation: `secret-shuttle daemon rotate` (invalidates all derived tokens immediately)
 
@@ -3284,7 +3367,7 @@ Under "Unreleased":
 ### Known limitations
 
 - `Secret.value` and `CaptureResult.value` remain JS strings, lingering in heap until GC. End-to-end Buffer refactor is the named follow-up plan 5q.
-- Per-(machine, runtime) agent_ids — all of a user's projects share the same daemon-perspective identity per runtime. Per-project granularity is opt-in via `secret-shuttle agent-mint`; auto-derived per-project support is plan 5s.
+- Per-(machine, runtime) agent_ids — all of a user's projects share the same daemon-perspective identity per runtime. Per-project granularity is opt-in via `secret-shuttle agent mint`; auto-derived per-project support is plan 5s.
 - No per-agent token denylist or expiry; revocation is global via `daemon rotate`. Plan 5r covers granular revocation.
 ```
 
