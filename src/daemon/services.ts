@@ -18,6 +18,7 @@ import { openUrl } from "./approvals/open-url.js";
 import { BootstrapStore } from "./bootstrap/store.js";
 import { createBrowserSession as createBrowserSessionReal } from "./bootstrap/browser-session.js";
 import type { BrowserSession, BrowserSessionChild } from "./bootstrap/browser-session.js";
+import { PendingCapturesRegistry } from "./bootstrap/pending-captures.js";
 import type { KeychainAdapter } from "../vault/keychain/types.js";
 
 export interface UnlockSession {
@@ -109,6 +110,7 @@ export class DaemonServices {
   readonly bootstrapStore = new BootstrapStore({
     rootDir: path.join(getShuttlePaths().homeDir, "bootstrap-batches"),
   });
+  readonly pendingCaptures = new PendingCapturesRegistry();
   /**
    * Unified BrowserSession — source of truth. Production code constructs this
    * via `createBrowserSession()` (see bootstrap/browser-session.ts). The four
