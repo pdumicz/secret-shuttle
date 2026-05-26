@@ -22,6 +22,7 @@ import { registerInjectRenderRoute } from "./routes/inject-render.js";
 import { registerSecretsImportRoute } from "./routes/secrets-import.js";
 import { registerKeychainRoutes } from "./routes/keychain.js";
 import { registerHubRoutes } from "../hub/hub-server.js";
+import { registerBootstrapRoutes } from "./routes/bootstrap.js";
 
 export function registerRoutes(
   server: DaemonServer,
@@ -49,4 +50,5 @@ export function registerRoutes(
   registerInjectRenderRoute(server, services, daemonPortRef);
   registerSecretsImportRoute(server, services, daemonPortRef);
   registerKeychainRoutes(server, services);
+  registerBootstrapRoutes(server, services, daemonPortRef);
 }
