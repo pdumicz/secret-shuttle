@@ -336,7 +336,7 @@ test("init: agent runtime detected → skill file installed", async () => {
 
 // ── P1 post-ship: --no-keychain truly skips keychain during init run ─────────
 
-test("init: --no-keychain does NOT touch keychain even during the init run (P1 post-ship)", async () => {
+test("init: --no-keychain does NOT read or write the master key during the init run (P1 post-ship)", async () => {
   // Track every keychain.set and keychain.get call to verify nothing touches
   // the keychain during a --no-keychain init run.
   const base = new MockKeychain();
