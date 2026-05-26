@@ -25,9 +25,6 @@ class MockKeychain implements KeychainAdapter {
   async delete(service: string, account: string): Promise<void> {
     this.entries.delete(`${service}:${account}`);
   }
-  async hasEntry(service: string, account: string): Promise<boolean> {
-    return this.entries.has(`${service}:${account}`);
-  }
 }
 
 // ── shared test harness ─────────────────────────────────────────────────────
@@ -342,7 +339,6 @@ test("unlock-session: keychain.set failure does NOT block unlock", async () => {
     },
     async get(svc, acct) { return base.get(svc, acct); },
     async delete(svc, acct) { return base.delete(svc, acct); },
-    async hasEntry(svc, acct) { return base.hasEntry(svc, acct); },
   };
 
   await withUnlockUiDaemon(async (ctx) => {
@@ -426,7 +422,6 @@ test("unlock-session: opt-out vault skips keychain (no read, no enroll)", async 
     async set(s, a, v) { setCalled++; return keychain.set(s, a, v); },
     async get(s, a) { getCalled++; return keychain.get(s, a); },
     async delete(s, a) { return keychain.delete(s, a); },
-    async hasEntry(s, a) { return keychain.hasEntry(s, a); },
   };
 
   await withUnlockUiDaemon(async (ctx) => {
@@ -482,7 +477,6 @@ test("unlock-session: clearing opt-out (enable) resumes keychain caching", async
     async set(s, a, v) { setCalled++; return keychain.set(s, a, v); },
     async get(s, a) { return keychain.get(s, a); },
     async delete(s, a) { return keychain.delete(s, a); },
-    async hasEntry(s, a) { return keychain.hasEntry(s, a); },
   };
 
   await withUnlockUiDaemon(async (ctx) => {
@@ -549,7 +543,6 @@ test("unlock-session: skip_keychain=true → C1 keychain fast-path is skipped (n
     async set(s, a, v) { return keychain.set(s, a, v); },
     async get(s, a) { getCalled++; return keychain.get(s, a); },
     async delete(s, a) { return keychain.delete(s, a); },
-    async hasEntry(s, a) { return keychain.hasEntry(s, a); },
   };
 
   await withUnlockUiDaemon(async (ctx) => {
@@ -591,7 +584,6 @@ test("unlock-session: skip_keychain=true on create-vault flow → envelope has k
     async set(s, a, v) { setCalled++; return keychain.set(s, a, v); },
     async get(s, a) { return keychain.get(s, a); },
     async delete(s, a) { return keychain.delete(s, a); },
-    async hasEntry(s, a) { return keychain.hasEntry(s, a); },
   };
 
   await withUnlockUiDaemon(async (ctx) => {

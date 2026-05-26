@@ -45,10 +45,6 @@ class MockKeychain implements KeychainAdapter {
     if (!this.available) throw new Error("keychain unavailable");
     this.entries.delete(`${service}:${account}`);
   }
-  async hasEntry(service: string, account: string): Promise<boolean> {
-    if (!this.available) return false;
-    return this.entries.has(`${service}:${account}`);
-  }
 }
 
 // ── Shared harness ────────────────────────────────────────────────────────────
@@ -351,7 +347,6 @@ test("init: --no-keychain does NOT touch keychain even during the init run (P1 p
     async set(s: string, a: string, v: Buffer) { setCalled++; return base.set(s, a, v); },
     async get(s: string, a: string) { getCalled++; return base.get(s, a); },
     async delete(s: string, a: string) { return base.delete(s, a); },
-    async hasEntry(s: string, a: string) { return base.hasEntry(s, a); },
   };
 
   await withInitDaemon(async (ctx) => {

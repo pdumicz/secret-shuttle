@@ -169,6 +169,9 @@ export function registerUnlockSession(server: DaemonServer, services: DaemonServ
           if (await keychain.isAvailable()) {
             try {
               await keychain.set("secret-shuttle", enrollEnvelopeId, masterKey);
+              // P2: also write the non-secret marker so status checks don't need
+              // to call hasEntry (which may materialize all passwords in memory).
+              await keychain.set("secret-shuttle", `${enrollEnvelopeId}:enrolled`, Buffer.from("enrolled"));
             } catch {
               // Best-effort; do not surface to caller.
             }

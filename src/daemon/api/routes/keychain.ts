@@ -22,6 +22,12 @@ export function registerKeychainRoutes(server: DaemonServer, services: DaemonSer
       );
     }
     await keychain.set("secret-shuttle", envelope.id, masterKey);
+    // P2 post-ship fix: write a non-secret marker entry alongside the real key.
+    // Status checks read this marker instead of calling hasEntry (which in some
+    // adapter implementations materializes ALL passwords under the service into
+    // JS memory via findCredentialsAsync). The marker value is non-sensitive —
+    // knowing a vault is enrolled on this machine enables no attack.
+    await keychain.set("secret-shuttle", `${envelope.id}:enrolled`, Buffer.from("enrolled"));
     // Clear any prior opt-out so future unlocks resume keychain caching.
     if (envelope.keychain_opt_out === true) {
       const updated: EnvelopeFile = { ...envelope, keychain_opt_out: false };
@@ -45,6 +51,8 @@ export function registerKeychainRoutes(server: DaemonServer, services: DaemonSer
     const keychain = services.keychain ?? getKeychainAdapter();
     if (await keychain.isAvailable()) {
       await keychain.delete("secret-shuttle", envelope.id);
+      // P2: also delete the non-secret marker written by enable/C2.
+      await keychain.delete("secret-shuttle", `${envelope.id}:enrolled`);
     }
     return { ok: true, removed: true };
   });
@@ -58,11 +66,17 @@ export function registerKeychainRoutes(server: DaemonServer, services: DaemonSer
     if (envelope !== null) {
       vault_id = envelope.id;
       if (available) {
-        // Use hasEntry for a passive existence check — never retrieves the
-        // master key into daemon memory and never triggers OS UI (Touch ID,
-        // libsecret prompt). On Windows, DPAPI is transparent so get() is safe,
-        // but hasEntry delegates to the same call and discards the value.
-        enrolled = await keychain.hasEntry("secret-shuttle", envelope.id);
+        // P2 post-ship fix: read the non-secret marker entry instead of calling
+        // hasEntry(). Some adapter implementations of hasEntry() used
+        // findCredentialsAsync() which materializes ALL passwords under the
+        // "secret-shuttle" service into JS memory just to test existence.
+        //
+        // The marker entry (account = "<id>:enrolled", value = "enrolled") is
+        // non-sensitive by design: it reveals only that this vault is enrolled.
+        // The real master key entry's bytes never enter daemon memory for a
+        // status query.
+        const marker = await keychain.get("secret-shuttle", `${envelope.id}:enrolled`);
+        enrolled = marker !== null;
       }
     }
     return { available, enrolled, vault_id };

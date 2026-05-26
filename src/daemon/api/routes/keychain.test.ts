@@ -29,10 +29,6 @@ class MockKeychain implements KeychainAdapter {
     if (!this.available) throw new Error("keychain unavailable");
     this.entries.delete(`${service}:${account}`);
   }
-  async hasEntry(service: string, account: string): Promise<boolean> {
-    if (!this.available) return false;
-    return this.entries.has(`${service}:${account}`);
-  }
 }
 
 // ── shared test harness ─────────────────────────────────────────────────────
@@ -104,7 +100,7 @@ test("POST /v1/keychain/enable: requires unlocked vault", async () => {
   }, keychain);
 });
 
-test("POST /v1/keychain/enable: stores master key in keychain when unlocked", async () => {
+test("POST /v1/keychain/enable: stores master key AND marker in keychain when unlocked", async () => {
   const keychain = new MockKeychain();
   await withKeychainDaemon(async (ctx) => {
     const { masterKey, envelopeId } = await bootstrapVault(ctx.services);
@@ -114,10 +110,15 @@ test("POST /v1/keychain/enable: stores master key in keychain when unlocked", as
     assert.equal((r.body as { ok: boolean }).ok, true);
     assert.equal((r.body as { enrolled: boolean }).enrolled, true);
 
-    // MockKeychain must hold the entry.
+    // MockKeychain must hold the real key entry.
     const cached = await keychain.get("secret-shuttle", envelopeId);
-    assert.ok(cached !== null, "keychain must have an entry");
+    assert.ok(cached !== null, "keychain must have the real key entry");
     assert.deepEqual(cached, masterKey, "cached key must match master key");
+
+    // P2: MockKeychain must also hold the non-secret marker entry.
+    const marker = await keychain.get("secret-shuttle", `${envelopeId}:enrolled`);
+    assert.ok(marker !== null, "keychain must have the marker entry");
+    assert.equal(marker.toString(), "enrolled", "marker value must be 'enrolled'");
 
     // opt-out flag must NOT be set (enable clears it).
     const env = await readEnvelope();
@@ -140,23 +141,27 @@ test("POST /v1/keychain/enable: throws keychain_unavailable when no keychain", a
 
 // ── POST /v1/keychain/disable ───────────────────────────────────────────────
 
-test("POST /v1/keychain/disable: removes entry (idempotent)", async () => {
+test("POST /v1/keychain/disable: removes real key AND marker entries (idempotent)", async () => {
   const keychain = new MockKeychain();
   await withKeychainDaemon(async (ctx) => {
     const { masterKey, envelopeId } = await bootstrapVault(ctx.services);
 
-    // Pre-seed the keychain.
+    // Pre-seed both the real key and the marker.
     await keychain.set("secret-shuttle", envelopeId, masterKey);
-    assert.ok(await keychain.get("secret-shuttle", envelopeId) !== null, "entry must exist before disable");
+    await keychain.set("secret-shuttle", `${envelopeId}:enrolled`, Buffer.from("enrolled"));
+    assert.ok(await keychain.get("secret-shuttle", envelopeId) !== null, "real key must exist before disable");
+    assert.ok(await keychain.get("secret-shuttle", `${envelopeId}:enrolled`) !== null, "marker must exist before disable");
 
     const r = await call(ctx.port, "POST", "/v1/keychain/disable");
     assert.equal(r.status, 200);
     assert.equal((r.body as { ok: boolean }).ok, true);
     assert.equal((r.body as { removed: boolean }).removed, true);
 
-    // Entry must be gone.
-    const after = await keychain.get("secret-shuttle", envelopeId);
-    assert.equal(after, null, "keychain entry must be removed after disable");
+    // Both entries must be gone.
+    const afterKey = await keychain.get("secret-shuttle", envelopeId);
+    assert.equal(afterKey, null, "real key entry must be removed after disable");
+    const afterMarker = await keychain.get("secret-shuttle", `${envelopeId}:enrolled`);
+    assert.equal(afterMarker, null, "marker entry must also be removed after disable (P2)");
   }, keychain);
 });
 
@@ -212,17 +217,35 @@ test("GET /v1/keychain/status: envelope but no enrollment → enrolled: false, v
   }, keychain);
 });
 
-test("GET /v1/keychain/status: envelope + enrolled → enrolled: true, vault_id set", async () => {
+test("GET /v1/keychain/status: envelope + marker present → enrolled: true, vault_id set", async () => {
   const keychain = new MockKeychain();
   await withKeychainDaemon(async (ctx) => {
     const { masterKey, envelopeId } = await bootstrapVault(ctx.services);
+    // P2: status checks the marker, not the real key.
     await keychain.set("secret-shuttle", envelopeId, masterKey);
+    await keychain.set("secret-shuttle", `${envelopeId}:enrolled`, Buffer.from("enrolled"));
 
     const r = await call(ctx.port, "GET", "/v1/keychain/status");
     assert.equal(r.status, 200);
     assert.equal((r.body as { available: boolean }).available, true);
     assert.equal((r.body as { enrolled: boolean }).enrolled, true);
     assert.equal((r.body as { vault_id: string }).vault_id, envelopeId);
+  }, keychain);
+});
+
+test("GET /v1/keychain/status: real key present but no marker → enrolled: false (marker required)", async () => {
+  // P2 guard: if only the real key is present (e.g. legacy enrollment before P2),
+  // status should report not enrolled (marker is missing). This is a safe fallback:
+  // the next enable/C2 will write the marker.
+  const keychain = new MockKeychain();
+  await withKeychainDaemon(async (ctx) => {
+    const { masterKey, envelopeId } = await bootstrapVault(ctx.services);
+    // Only real key — no marker.
+    await keychain.set("secret-shuttle", envelopeId, masterKey);
+
+    const r = await call(ctx.port, "GET", "/v1/keychain/status");
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { enrolled: boolean }).enrolled, false, "no marker → enrolled must be false");
   }, keychain);
 });
 
@@ -276,24 +299,33 @@ test("keychain enable clears opt-out flag", async () => {
   }, keychain);
 });
 
-test("GET /v1/keychain/status: never calls keychain.get (uses hasEntry passively)", async () => {
-  // Wrap MockKeychain to count get() calls.
+test("GET /v1/keychain/status: reads ONLY the marker entry, never the real master key entry", async () => {
+  // P2: status uses keychain.get on the marker (<id>:enrolled), NOT on the real
+  // key entry (<id>). Track which accounts are read to verify the real key is
+  // never materialized into daemon memory by a status query.
   const base = new MockKeychain();
-  let getCalled = 0;
-  const counting: KeychainAdapter = {
+  const accountsRead: string[] = [];
+  const spying: KeychainAdapter = {
     async isAvailable() { return base.isAvailable(); },
     async set(s, a, v) { return base.set(s, a, v); },
-    async get(s, a) { getCalled++; return base.get(s, a); },
+    async get(s, a) { accountsRead.push(a); return base.get(s, a); },
     async delete(s, a) { return base.delete(s, a); },
-    async hasEntry(s, a) { return base.hasEntry(s, a); },
   };
 
   await withKeychainDaemon(async (ctx) => {
     const { masterKey, envelopeId } = await bootstrapVault(ctx.services);
+    // Seed both real key and marker.
     await base.set("secret-shuttle", envelopeId, masterKey);
+    await base.set("secret-shuttle", `${envelopeId}:enrolled`, Buffer.from("enrolled"));
+    accountsRead.length = 0; // reset after setup reads
 
-    await call(ctx.port, "GET", "/v1/keychain/status");
+    const r = await call(ctx.port, "GET", "/v1/keychain/status");
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { enrolled: boolean }).enrolled, true);
 
-    assert.equal(getCalled, 0, "keychain.get must NOT be called by status route");
-  }, counting);
+    // Status must have called get() exactly once, on the marker account.
+    assert.ok(accountsRead.includes(`${envelopeId}:enrolled`), "status must read the marker account");
+    // The real master key account must NOT have been read by status.
+    assert.ok(!accountsRead.includes(envelopeId), "status must NOT read the real master key account (P2)");
+  }, spying);
 });
