@@ -31,7 +31,7 @@ The spec intentionally bundles three subsystems per the brainstorming decision. 
 - `src/daemon/api/routes/daemon-admin.ts` — `POST /v1/daemon/rotate` + `POST /v1/daemon/reset-machine-id`
 - `src/cli/commands/daemon-rotate.ts` — CLI front-end for rotate
 - `src/cli/commands/daemon-reset-machine-id.ts` — CLI front-end for reset
-- `src/cli/commands/agent-mint.ts` — CLI front-end for manual mint
+- (REMOVED: top-level `agent-mint.ts` would conflict with the existing `agent` command group; `mint` is added as a subcommand to `src/cli/commands/agent.ts`)
 - `src/cli/init/agent-token-installers.ts` — runtime-specific config writers (claude, cursor)
 
 **Phase C (capture-from-URL):**
@@ -67,7 +67,7 @@ The spec intentionally bundles three subsystems per the brainstorming decision. 
 - `src/daemon/services-blind.ts` — `start()` throws on already-active (hardening)
 - `src/daemon/services.ts` — `browserSession` field; `ensureBootstrapBrowser`, `stopBootstrapBrowser` methods
 - `src/daemon/api/routes/browser.ts` — migrate to `BrowserSession`
-- `src/daemon/chrome/internal-ops.ts` — `CdpClient.close()` method
+- `src/daemon/chrome/cdp-client.ts` — `CdpClient.close()` method
 - `src/daemon/bootstrap/destination-policy.ts` — `planRequiresCapture(plan)` helper
 - `src/daemon/api/routes/bootstrap.ts` — capture-always-requires-approval; pre-flight blind guard; outer finally
 - `src/daemon/bootstrap/executor.ts` — capture branch state machine
@@ -156,16 +156,36 @@ Expected: FAIL (module does not exist)
 ```ts
 // src/daemon/machine-id.ts
 import { randomBytes } from "node:crypto";
-import { readFile, writeFile, stat, unlink, mkdir } from "node:fs/promises";
+import { readFile, writeFile, stat, unlink, mkdir, rename } from "node:fs/promises";
 import path from "node:path";
+import { ShuttleError } from "../shared/errors.js";
 
 const MACHINE_ID_FILE = "machine-id";
 
+function assertValidContent(s: string, file: string): void {
+  // 32 random bytes base64url-encoded with no padding is exactly 43 chars.
+  if (s.length !== 43 || !/^[A-Za-z0-9_-]+$/.test(s)) {
+    throw new ShuttleError(
+      "machine_id_malformed",
+      `${file} content is not a 43-char base64url-no-pad string.`,
+    );
+  }
+  // Sanity check: decoded length must be 32 bytes.
+  if (Buffer.from(s, "base64url").byteLength !== 32) {
+    throw new ShuttleError(
+      "machine_id_malformed",
+      `${file} decodes to wrong length; expected 32 bytes.`,
+    );
+  }
+}
+
 export async function readMachineId(shuttleHome: string): Promise<string | null> {
   try {
-    const buf = await readFile(path.join(shuttleHome, MACHINE_ID_FILE), "utf8");
-    return buf.trim();
-  } catch {
+    const buf = (await readFile(path.join(shuttleHome, MACHINE_ID_FILE), "utf8")).trim();
+    assertValidContent(buf, path.join(shuttleHome, MACHINE_ID_FILE));
+    return buf;
+  } catch (e) {
+    if (e instanceof ShuttleError) throw e;
     return null;
   }
 }
@@ -175,17 +195,23 @@ export async function ensureMachineId(shuttleHome: string): Promise<string> {
   try {
     const st = await stat(file);
     if ((st.mode & 0o777) !== 0o600) {
-      throw new Error(`machine_id_bad_mode: ${file} is mode ${(st.mode & 0o777).toString(8)}, expected 0600`);
+      throw new ShuttleError(
+        "machine_id_bad_mode",
+        `${file} is mode ${(st.mode & 0o777).toString(8)}, expected 0600`,
+      );
     }
-    return (await readFile(file, "utf8")).trim();
+    const content = (await readFile(file, "utf8")).trim();
+    assertValidContent(content, file);
+    return content;
   } catch (e) {
+    if (e instanceof ShuttleError) throw e;
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
   await mkdir(shuttleHome, { recursive: true });
   const id = randomBytes(32).toString("base64url");
   const tmp = `${file}.tmp`;
   await writeFile(tmp, id, { mode: 0o600 });
-  await import("node:fs/promises").then((m) => m.rename(tmp, file));
+  await rename(tmp, file);
   return id;
 }
 
@@ -197,6 +223,17 @@ export async function resetMachineId(shuttleHome: string): Promise<void> {
   }
 }
 ```
+
+Add corresponding test case:
+```ts
+test("ensureMachineId: throws machine_id_malformed when content is wrong length/charset", async () => {
+  const home = freshHome();
+  await writeFile(path.join(home, "machine-id"), "not-base64url!", { mode: 0o600 });
+  await assert.rejects(() => ensureMachineId(home), /machine_id_malformed/);
+});
+```
+
+Add error codes `machine_id_bad_mode` and `machine_id_malformed` (both `EXIT_CODE_CONFLICT`) to the error-codes additions in Task A15.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -283,18 +320,40 @@ Expected: FAIL (module does not exist)
 import { randomBytes } from "node:crypto";
 import { readFile, writeFile, stat, rename, mkdir } from "node:fs/promises";
 import path from "node:path";
+import { ShuttleError } from "../shared/errors.js";
 
 const ROOT_TOKEN_FILE = "root-token";
+
+function assertValidContent(s: string, file: string): void {
+  if (s.length !== 43 || !/^[A-Za-z0-9_-]+$/.test(s)) {
+    throw new ShuttleError(
+      "root_token_malformed",
+      `${file} content is not a 43-char base64url-no-pad string.`,
+    );
+  }
+  if (Buffer.from(s, "base64url").byteLength !== 32) {
+    throw new ShuttleError(
+      "root_token_malformed",
+      `${file} decodes to wrong length; expected 32 bytes.`,
+    );
+  }
+}
 
 export async function ensureRootToken(shuttleHome: string): Promise<string> {
   const file = path.join(shuttleHome, ROOT_TOKEN_FILE);
   try {
     const st = await stat(file);
     if ((st.mode & 0o777) !== 0o600) {
-      throw new Error(`root_token_bad_mode: ${file} is mode ${(st.mode & 0o777).toString(8)}, expected 0600`);
+      throw new ShuttleError(
+        "root_token_bad_mode",
+        `${file} is mode ${(st.mode & 0o777).toString(8)}, expected 0600`,
+      );
     }
-    return (await readFile(file, "utf8")).trim();
+    const content = (await readFile(file, "utf8")).trim();
+    assertValidContent(content, file);
+    return content;
   } catch (e) {
+    if (e instanceof ShuttleError) throw e;
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
   await mkdir(shuttleHome, { recursive: true });
@@ -315,6 +374,17 @@ export async function rotateRootToken(shuttleHome: string): Promise<string> {
 }
 ```
 
+Add corresponding test case:
+```ts
+test("ensureRootToken: throws root_token_malformed when content is wrong length/charset", async () => {
+  const home = freshHome();
+  await writeFile(path.join(home, "root-token"), "not-base64url!", { mode: 0o600 });
+  await assert.rejects(() => ensureRootToken(home), /root_token_malformed/);
+});
+```
+
+Add error codes `root_token_bad_mode` and `root_token_malformed` (both `EXIT_CODE_CONFLICT`) to Task A15.
+
 - [ ] **Step 4: Run tests to verify they pass + integrate into main.ts**
 
 Run: `npx tsx --test src/daemon/root-token.test.ts`
@@ -327,7 +397,7 @@ const token = process.env.SECRET_SHUTTLE_DAEMON_TOKEN ?? randomBytes(32).toStrin
 With:
 ```ts
 const { ensureRootToken } = await import("./root-token.js");
-const { getShuttlePaths } = await import("../shared/paths.js");
+const { getShuttlePaths } = await import("../shared/config.js");
 const paths = getShuttlePaths();
 const token = process.env.SECRET_SHUTTLE_DAEMON_TOKEN ?? await ensureRootToken(paths.homeDir);
 ```
@@ -546,9 +616,16 @@ export function deriveAutoAgentId(runtime: string, machineId: string): string {
 // src/daemon/auth/token-derive.ts
 import { createHmac } from "node:crypto";
 import { assertAgentIdValid } from "./agent-id.js";
+import { ShuttleError } from "../../shared/errors.js";
 
 export function deriveHmac(rootTokenB64url: string, agentId: string): string {
   const key = Buffer.from(rootTokenB64url, "base64url");
+  if (key.byteLength !== 32) {
+    throw new ShuttleError(
+      "root_token_malformed",
+      `root_token must be a base64url-no-pad 32-byte value (decoded ${key.byteLength} bytes).`,
+    );
+  }
   return createHmac("sha256", key).update(agentId).digest("base64url");
 }
 
@@ -1021,9 +1098,9 @@ test("ApprovalStore.mint: stamps owner_agent_id from ALS context", async () => {
   const store = new ApprovalStore();
   let id = "";
   await withAuthContext({ agent_id: "claude-abc", isRoot: false }, () => {
-    id = store.mint(binding).id;
+    id = store.create(binding).id;
   });
-  const grant = store.peek(id);
+  const grant = store.get(id);
   assert.equal(grant?.owner_agent_id, "claude-abc");
 });
 
@@ -1031,15 +1108,15 @@ test("ApprovalStore.mint: stamps 'root' when ALS is root", async () => {
   const store = new ApprovalStore();
   let id = "";
   await withAuthContext({ agent_id: "root", isRoot: true }, () => {
-    id = store.mint(binding).id;
+    id = store.create(binding).id;
   });
-  assert.equal(store.peek(id)?.owner_agent_id, "root");
+  assert.equal(store.get(id)?.owner_agent_id, "root");
 });
 
 test("ApprovalStore.mint: stamps 'daemon' if no ALS context (defensive)", () => {
   const store = new ApprovalStore();
-  const id = store.mint(binding).id;
-  assert.equal(store.peek(id)?.owner_agent_id, "daemon");
+  const id = store.create(binding).id;
+  assert.equal(store.get(id)?.owner_agent_id, "daemon");
 });
 
 test("SessionStore equivalent: owner stamped from ALS at create time", async () => {
@@ -1138,7 +1215,7 @@ const binding: ApprovalBinding = {
 function mintAs(store: ApprovalStore, owner: string, b = binding): string {
   let id = "";
   withAuthContext({ agent_id: owner, isRoot: owner === "root" }, () => {
-    id = store.mint(b).id;
+    id = store.create(b).id;
   });
   // Grants minted in tests are pending; "approve" via the store's internal grant transition.
   // Adapt to whatever the test-helper API actually is — possibly store.testApprove(id).
@@ -1409,7 +1486,7 @@ R7 skip-approval path' hole."
 - Create: `src/daemon/api/routes/tokens.ts`
 - Modify: `src/daemon/api/router.ts` (register)
 - Test: `src/daemon/api/routes/tokens.test.ts` (new)
-- Create: `src/cli/commands/agent-mint.ts`
+- Modify: `src/cli/commands/agent.ts` (add `mint` subcommand to the existing `agent` command group)
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1484,26 +1561,23 @@ export function registerTokens(server: DaemonServer, getRootToken: () => string)
 
 Then in `src/daemon/api/router.ts`, register the route (pass a function returning the current root token; DaemonServer.replaceRootToken will swap it in place).
 
-- [ ] **Step 4: Add the CLI front-end + run tests**
+- [ ] **Step 4: Add `mint` as a subcommand of the existing `agent` command group + run tests**
 
-Create `src/cli/commands/agent-mint.ts`:
+The CLI already has an `agent` command group at `src/cli/commands/agent.ts`. Add the new `mint` subcommand to it (NOT a top-level `agent-mint`):
+
 ```ts
-import { Command } from "commander";
-import { daemonRequest } from "../../client/daemon-client.js";
-import { ok, outputJson } from "../../shared/result.js";
-
-export function agentMintCommand(): Command {
-  return new Command("agent-mint")
-    .description("Mint a child agent token (namespace-restricted to caller, or root mints anything).")
-    .requiredOption("--child-id <id>", "Requested child agent_id")
-    .action(async (options: { childId: string }) => {
-      const r = await daemonRequest("POST", "/v1/tokens/mint", { agent_id: options.childId });
-      outputJson(ok(r));
-    });
-}
+// In src/cli/commands/agent.ts (add inside the existing agent.command(...) chain):
+agent
+  .command("mint")
+  .description("Mint a child agent token (namespace-restricted to caller; root mints any agent_id).")
+  .requiredOption("--child-id <id>", "Requested child agent_id (e.g., claude-7f2a.proj-acme-prod)")
+  .action(async (options: { childId: string }) => {
+    const r = await daemonRequest("POST", "/v1/tokens/mint", { agent_id: options.childId });
+    outputJson(ok(r));
+  });
 ```
 
-(And register the command in the main CLI dispatcher.)
+User-visible invocation: `secret-shuttle agent mint --child-id <id>` (matches the approved spec wording).
 
 Run: `npx tsx --test src/daemon/api/routes/tokens.test.ts && npm test`
 Expected: PASS.
@@ -1511,13 +1585,15 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/daemon/api/routes/tokens.ts src/daemon/api/routes/tokens.test.ts src/daemon/api/router.ts src/cli/commands/agent-mint.ts
-git commit -m "feat(tokens): POST /v1/tokens/mint with namespace restriction + CLI
+git add src/daemon/api/routes/tokens.ts src/daemon/api/routes/tokens.test.ts src/daemon/api/router.ts src/cli/commands/agent.ts
+git commit -m "feat(tokens): POST /v1/tokens/mint with namespace restriction + agent mint subcommand
 
 Root can mint any agent_id; non-root callers can only mint children
 under their own agent_id prefix (claude-X can mint claude-X.helper-Y
 but not cursor-Z). Returned token validates against current root_token
-(stateless HMAC). Audit: tokens_mint { parent_agent_id, child_agent_id }."
+(stateless HMAC). Audit: tokens_mint { parent_agent_id, child_agent_id }.
+CLI: \`secret-shuttle agent mint --child-id <id>\` (subcommand of the
+existing agent command group)."
 ```
 
 ---
@@ -1566,7 +1642,7 @@ import { rotateRootToken } from "../../root-token.js";
 import { resetMachineId } from "../../machine-id.js";
 import { writeSocketFile } from "../../socket-file.js";
 import { writeDaemonAudit } from "../../audit.js";
-import { getShuttlePaths } from "../../../shared/paths.js";
+import { getShuttlePaths } from "../../../shared/config.js";
 
 export function registerDaemonAdmin(server: DaemonServer, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/daemon/rotate", async () => {
@@ -1759,9 +1835,9 @@ export async function installAgentToken(
 Then in `src/cli/commands/init.ts`:
 
 After `detectAgentRuntimes(cwd)`, for each detected runtime:
-1. Get the persistent machine_id via `daemonRequest("POST", "/v1/whoami")` or via a small new internal route, OR by reading `<SHUTTLE_HOME>/machine-id` directly from the CLI (CLI runs as the same user so 0600 is fine).
+1. **Read machine_id directly from `<SHUTTLE_HOME>/machine-id`** via the existing `readMachineId(home)` helper from Task A1 — the CLI runs as the same user as the daemon, so the 0600 file is readable. (No new `/v1/whoami` route needed; daemonRequest layer is reserved for actions that mutate daemon state.)
 2. Compute `agentId = deriveAutoAgentId(runtime, machineId)`.
-3. Mint a token: `await daemonRequest("POST", "/v1/tokens/mint", { agent_id: agentId })`.
+3. Mint a token: `await daemonRequest("POST", "/v1/tokens/mint", { agent_id: agentId })`. The daemon's /v1/tokens/mint route validates that the caller (root, via the CLI's socket-file fallback) has authority to mint arbitrary agent_ids.
 4. Call `installAgentToken(runtime, agentId, token)`.
 5. Push result into summary.
 
@@ -1820,6 +1896,22 @@ agent_id_invalid: { exitCode: EXIT_CODE_USAGE, hint: () => null },
 agent_id_namespace_violation: {
   exitCode: EXIT_CODE_USAGE,
   hint: (msg) => `Child agent_id must start with the caller's agent_id followed by a dot. ${msg}`,
+},
+machine_id_bad_mode: {
+  exitCode: EXIT_CODE_CONFLICT,
+  hint: () => "<SHUTTLE_HOME>/machine-id exists with the wrong mode. `chmod 600` it, or delete the file to regenerate.",
+},
+machine_id_malformed: {
+  exitCode: EXIT_CODE_CONFLICT,
+  hint: () => "<SHUTTLE_HOME>/machine-id content is not a 43-char base64url-no-pad string. Delete it to regenerate, or restore from a backup.",
+},
+root_token_bad_mode: {
+  exitCode: EXIT_CODE_CONFLICT,
+  hint: () => "<SHUTTLE_HOME>/root-token exists with the wrong mode. `chmod 600` it.",
+},
+root_token_malformed: {
+  exitCode: EXIT_CODE_CONFLICT,
+  hint: () => "<SHUTTLE_HOME>/root-token content is not a 43-char base64url-no-pad string. Delete it to regenerate (note: this also invalidates all derived agent tokens).",
 },
 ```
 
@@ -2214,8 +2306,8 @@ clear error instead of corrupting state."
 ### Task C3: `CdpClient.close()` method
 
 **Files:**
-- Modify: `src/daemon/chrome/internal-ops.ts` (or wherever CdpClient lives)
-- Test: extend internal-ops tests
+- Modify: `src/daemon/chrome/cdp-client.ts`
+- Test: extend `src/daemon/chrome/cdp-client.test.ts` (or co-located if no test file exists)
 
 - [ ] **Step 1: Write failing test**
 
@@ -2248,7 +2340,7 @@ async close(): Promise<void> {
 - [ ] **Step 3: Run tests + commit**
 
 ```bash
-git add src/daemon/chrome/internal-ops.ts src/daemon/chrome/internal-ops.test.ts
+git add src/daemon/chrome/cdp-client.ts src/daemon/chrome/cdp-client.test.ts
 git commit -m "feat(cdp): CdpClient.close() — single chokepoint for shutdown"
 ```
 
@@ -2530,28 +2622,39 @@ export interface PendingCaptureEntry {
 export class PendingCapturesRegistry {
   private readonly byToken = new Map<string, PendingCaptureEntry>();
 
+  /**
+   * Synchronously creates a pending entry and returns the Promise the executor
+   * awaits. CRITICAL: must be synchronous (not async) — the caller emits the
+   * SSE event with `capture_token` AFTER calling register() but BEFORE awaiting
+   * the returned Promise. An async register would deadlock because the UI
+   * can't resolve the Promise until it receives the SSE carrying the token.
+   */
   register(opts: {
     batchId: string; secretName: string; capture_token: string;
     target_id: string; expected_host: string; owner_agent_id: string;
     timeoutMs: number; onTimeout: (err: Error) => void;
   }): Promise<{ value: string; field_fingerprint: string }> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.byToken.delete(opts.capture_token);
-        const err = new Error("bootstrap_capture_timeout");
-        opts.onTimeout(err);
-        reject(err);
-      }, opts.timeoutMs);
-      this.byToken.set(opts.capture_token, {
-        resolve, reject,
-        capture_token: opts.capture_token,
-        target_id: opts.target_id,
-        expected_host: opts.expected_host,
-        owner_agent_id: opts.owner_agent_id,
-        started_at: Date.now(),
-        timer,
-      });
+    let resolve!: (val: { value: string; field_fingerprint: string }) => void;
+    let reject!: (err: Error) => void;
+    const promise = new Promise<{ value: string; field_fingerprint: string }>((res, rej) => {
+      resolve = res; reject = rej;
     });
+    const timer = setTimeout(() => {
+      this.byToken.delete(opts.capture_token);
+      const err = new ShuttleError("bootstrap_capture_timeout", "5 minutes elapsed without a capture.");
+      opts.onTimeout(err);
+      reject(err);
+    }, opts.timeoutMs);
+    this.byToken.set(opts.capture_token, {
+      resolve, reject,
+      capture_token: opts.capture_token,
+      target_id: opts.target_id,
+      expected_host: opts.expected_host,
+      owner_agent_id: opts.owner_agent_id,
+      started_at: Date.now(),
+      timer,
+    });
+    return promise;
   }
 
   lookup(token: string): PendingCaptureEntry | undefined {
@@ -2767,23 +2870,30 @@ if (entry.source.kind === "capture") {
   const target = await openCaptureTarget(services.browserSession!.cdp, entry.source.url);
   const capture_token = randomBytes(32).toString("base64url");
 
+  // CRITICAL ORDERING: register the Promise SYNCHRONOUSLY (returns the Promise
+  // immediately), THEN emit the SSE event (which carries capture_token to the UI),
+  // THEN await. The previous order (`await register(); emit;`) deadlocks because
+  // the UI cannot resolve the Promise until it has seen the SSE event carrying the
+  // token — and the SSE never fires while register is awaited.
+  const pendingPromise = services.pendingCaptures.register({
+    batchId, secretName: entry.secret, capture_token,
+    target_id: target.target_id,
+    expected_host: entry.source.expected_host,
+    owner_agent_id: state.owner_agent_id,
+    timeoutMs: 5 * 60 * 1000,
+    onTimeout: () => {/* nothing extra — executor catches the reject */},
+  });
+
+  // Emit hub SSE event so the UI renders the capture-step card with the token.
+  services.hubBroker.emitBootstrapCaptureStep({
+    batch_id: batchId, secret_name: entry.secret,
+    url: entry.source.url, step_idx, step_total,
+    capture_token,
+  });
+
   let captureResult: { value: string; field_fingerprint: string };
   try {
-    captureResult = await services.pendingCaptures.register({
-      batchId, secretName: entry.secret, capture_token,
-      target_id: target.target_id,
-      expected_host: entry.source.expected_host,
-      owner_agent_id: state.owner_agent_id,
-      timeoutMs: 5 * 60 * 1000,
-      onTimeout: () => {/* nothing extra — executor catches the reject */},
-    });
-    // Emit hub SSE event so the UI renders the capture-step card.
-    services.hubBroker.emitBootstrapCaptureStep({
-      batch_id: batchId, secret_name: entry.secret,
-      url: entry.source.url, step_idx, step_total,
-      capture_token,
-    });
-    // The Promise resolves only when /ui/bootstrap/capture-step is called.
+    captureResult = await pendingPromise; // resolves when /ui/bootstrap/capture-step posts
   } catch (err) {
     // Failure branch — proceed to cleanup with error preserved.
     await cleanupCaptureTarget(/* state machine for failure path */);
@@ -2833,28 +2943,55 @@ cleanup_failed + STOP. Matches spec §3 v5.3."
 
 ---
 
-### Task C12: Outer finally — stopBootstrapBrowser + post-Chrome-death blind auto-resume
+### Task C12: /continue browser auto-start + outer finally cleanup
 
 **Files:**
-- Modify: `src/daemon/api/routes/bootstrap.ts` (the /continue handler's finally)
+- Modify: `src/daemon/api/routes/bootstrap.ts` (the /continue handler's pre-executor step AND finally)
 - Test: `src/daemon/api/routes/bootstrap-cleanup.test.ts` (new)
 
 - [ ] **Step 1: Write failing tests**
 
 ```ts
+test("capture batch: /continue with NO existing browser auto-starts a bootstrap-owned one", async () => {
+  // Pre-condition: services.browserSession === null. Seed an approved capture batch.
+  // POST /v1/bootstrap/continue. After the call: services.browserSession was non-null
+  // during execution AND was torn down by the finally (back to null after the call returns).
+});
+
+test("capture batch: /continue with a pre-existing user browser reuses it (owner stays 'user')", async () => {
+  // Pre-condition: services.browserSession.owner.kind === 'user'. After /continue returns,
+  // services.browserSession is STILL the user session (not torn down).
+});
+
+test("non-capture batch: /continue does NOT start a browser", async () => {});
+
 test("cleanup-failed + bootstrap-owned browser → Chrome killed → blind auto-resumes", async () => {});
 test("cleanup-failed + user-owned browser → Chrome stays → blind stays active (manual recovery)", async () => {});
 test("normal completion + bootstrap-owned browser → Chrome cleanly stopped; blind already ended", async () => {});
 ```
 
-- [ ] **Step 2: Implement**
+- [ ] **Step 2: Implement BOTH the pre-executor auto-start AND the finally**
 
-In `/v1/bootstrap/continue` route's `finally` block:
+In `/v1/bootstrap/continue` route, AFTER the owner check / blind guard / approval consume, BEFORE entering `executeBatch`:
 
 ```ts
+// Auto-start a daemon-owned browser if this batch has capture steps and no
+// browser session is already running. The executor expects services.browserSession
+// to be non-null when it walks a capture entry.
+const hasCapture = state.plan.some((e) => e.source.kind === "capture");
+if (hasCapture) {
+  await services.ensureBootstrapBrowser(batchId);
+}
+
+if (!services.bootstrapStore.tryAcquireExecutionLock(batchId)) {
+  throw new ShuttleError("bootstrap_batch_busy", "...");
+}
+try {
+  const result = await executeBatch(...);
+  return { ok: true, ...result };
 } finally {
   services.bootstrapStore.releaseExecutionLock(batchId);
-  if (state.plan.some((e) => e.source.kind === "capture")) {
+  if (hasCapture) {
     const { stopped } = await services.stopBootstrapBrowser(batchId);
     if (stopped && services.blind.current() !== null) {
       services.blind.end();
@@ -2869,16 +3006,20 @@ In `/v1/bootstrap/continue` route's `finally` block:
 }
 ```
 
+The `ensureBootstrapBrowser` call is a no-op when a user-owned session exists (returns the existing session unchanged); for fresh-daemon paths it spawns Chrome and stores it with `owner: { kind: "bootstrap", batchId }`. The `stopBootstrapBrowser` call in the finally is also a no-op for user-owned sessions (returns `{ stopped: false }`); only bootstrap-owned sessions get torn down.
+
 - [ ] **Step 3: Run tests + commit**
 
 ```bash
 git add src/daemon/api/routes/bootstrap.ts src/daemon/api/routes/bootstrap-cleanup.test.ts
-git commit -m "feat(bootstrap): outer finally stops bootstrap-owned Chrome + auto-resumes blind
+git commit -m "feat(bootstrap): /continue auto-starts bootstrap-owned browser + cleanup in finally
 
-When stopBootstrapBrowser returns { stopped: true } and blind is still
-active (from a cleanup-failed step), there's no rendering process to
-observe so we end blind. Audit blind_auto_resume_after_browser_stop.
-User-owned browsers stay untouched → manual blind end via existing flow."
+Pre-executor: ensureBootstrapBrowser(batchId) for capture plans —
+no-op when a user session already exists. Finally:
+stopBootstrapBrowser is no-op for user sessions; for bootstrap-owned,
+SIGTERM → SIGKILL Chrome, then if blind is still active (from a
+cleanup-failed step) auto-end it (no rendering process left to observe).
+Audit blind_auto_resume_after_browser_stop."
 ```
 
 ---
@@ -3026,22 +3167,24 @@ matches the route shapes the executor emits."
 
 ---
 
-### Task C15: CLI `bootstrap --continue` browser auto-start integration
+### Task C15: CLI `bootstrap --continue` capture-flow output
 
 **Files:**
 - Modify: `src/cli/commands/bootstrap.ts`
 
-- [ ] **Step 1: Wire the auto-start at the CLI level (so users running --continue against a daemon get the browser without manual `browser start`)**
+The actual server-side auto-start lives in Task C12's `/continue` pre-executor step (NOT in the route's finally — that's stop, not start). The CLI's responsibility is purely cosmetic: clearer output when the batch contains capture sources.
 
-The actual auto-start happens server-side inside the /continue handler — but the CLI should print informative output ("Opening capture browser; the daemon-owned tab will navigate to <url>...").
+- [ ] **Step 1: Update the CLI output for capture-aware batches**
 
-The /continue route already calls `ensureBootstrapBrowser` inside its finally guard for capture plans. The CLI doesn't need to do anything new beyond pretty output.
+When the daemon response carries a capture-step hint (e.g., included in the approval_required details for the first /plan call, or in a future progress field on /continue), the CLI prints a short instruction pointing the user at the hub URL where the capture coordinator will render the per-step cards.
+
+If your CLI surface doesn't already have a "the daemon is driving a browser; watch the hub URL" line, add one for capture-containing batches.
 
 - [ ] **Step 2: Commit**
 
 ```bash
 git add src/cli/commands/bootstrap.ts
-git commit -m "feat(cli/bootstrap): pretty output for capture flow steps"
+git commit -m "feat(cli/bootstrap): output guides user to hub for capture-step coordination"
 ```
 
 ---
@@ -3126,7 +3269,7 @@ Under "Unreleased":
 ```markdown
 ### Added (Burst 4 — Pre-launch security hardening)
 
-- **Per-agent token isolation (5m):** HMAC-derived per-agent tokens (`<agent_id>.<hmac>`), persistent root_token + machine-id files under `<SHUTTLE_HOME>` at mode 0600. `secret-shuttle daemon rotate` invalidates all derived tokens; `secret-shuttle daemon reset-machine-id` refreshes agent_id derivation without revocation. `secret-shuttle agent-mint --child-id <id>` for manual sub-agent token mint. Init now writes per-runtime tokens to `~/.claude/settings.json` and Cursor's user settings (NEVER to repo-committed files); codex/copilot get manual install instructions.
+- **Per-agent token isolation (5m):** HMAC-derived per-agent tokens (`<agent_id>.<hmac>`), persistent root_token + machine-id files under `<SHUTTLE_HOME>` at mode 0600. `secret-shuttle daemon rotate` invalidates all derived tokens; `secret-shuttle daemon reset-machine-id` refreshes agent_id derivation without revocation. `secret-shuttle agent mint --child-id <id>` for manual sub-agent token mint. Init now writes per-runtime tokens to `~/.claude/settings.json` and Cursor's user settings (NEVER to repo-committed files); codex/copilot get manual install instructions.
 - **AsyncLocalStorage audit context:** every daemon call records `actor_agent_id` automatically. New audit fields `subject_agent_id`, `parent_agent_id`, `child_agent_id` for sessions/grants/batches/mint chains.
 - **Owner-enforced consumption:** `ApprovalGrant`, `SessionGrant`, `BatchState` all carry `owner_agent_id`. Non-root cross-owner access returns `approval_not_found` / `session_not_found` / `bootstrap_batch_not_found` (existence non-disclosure). Root bypasses every check.
 - **Memory hygiene (5o-core, best-effort):** `requireKey()` copies scrubbed synchronously before any async continuation in `Vault.read`/`write`/`fingerprintKey`. Masker patterns + lookback scrubbed on dispose. Child stdin Buffer scrubbed in write callback.
