@@ -325,14 +325,14 @@ Add new error codes if not already present:
 
 - `keychain_unavailable` — keychain operation failed (other than "no entry"). Used by `set` / `delete` exceptions.
 - `keychain_key_invalid` — cached key didn't unlock the vault. Used by the unlock fall-through path.
-- `daemon_start_failed` — daemon spawn timed out during `init`.
+- `daemon_start_timeout` — daemon spawn timed out during `init`. (Note: the original plan named this `daemon_start_failed`; implementation uses `daemon_start_timeout` from `lifecycle.ts` instead, which is already in the error registry.)
 
 `keychain_not_implemented` already exists (stub throws). Keep it for the `UnsupportedKeychain` platforms.
 
 Add `nextAction` to keychain codes per Plan 5d's pattern:
 - `keychain_unavailable` → `nextAction: () => "secret-shuttle unlock"` (fall back to passphrase).
 - `keychain_key_invalid` → `nextAction: () => "secret-shuttle unlock"`.
-- `daemon_start_failed` → `nextAction: () => "secret-shuttle daemon status"`.
+- `daemon_start_timeout` → `nextAction: () => "secret-shuttle daemon status"`.
 
 ---
 

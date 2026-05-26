@@ -33,7 +33,7 @@
 - `src/cli/index.ts` — register the keychain command group.
 - `src/cli/commands/init.ts` — real init command body (today: ~24-line status wrapper).
 - `src/cli/commands/init.test.ts` — new tests.
-- `src/shared/error-codes.ts` — add `keychain_unavailable`, `keychain_key_invalid`, `daemon_start_failed`.
+- `src/shared/error-codes.ts` — add `keychain_unavailable`, `keychain_key_invalid`. (`daemon_start_failed` was renamed to `daemon_start_timeout` in implementation — already exists in the registry.)
 - `src/shared/error-codes.test.ts` — count + assertions.
 - `docs/cli-reference.md` — add `init`, `keychain {enable,disable,status}` sections.
 - `CHANGELOG.md` — Plan 5b + 5f-impl entry.
@@ -1241,7 +1241,7 @@ EOF
 - [ ] **Step 1: Inspect current registry**
 
 ```bash
-grep -n "keychain_unavailable\|keychain_not_implemented\|keychain_key_invalid\|daemon_start_failed" src/shared/error-codes.ts
+grep -n "keychain_unavailable\|keychain_not_implemented\|keychain_key_invalid\|daemon_start_timeout" src/shared/error-codes.ts
 ```
 
 `keychain_not_implemented` and `keychain_unavailable` may already exist (the existing stub throws `keychain_not_implemented`, and Plan 5d's nextAction work added `keychain_unavailable`). Verify.
@@ -1256,11 +1256,9 @@ keychain_key_invalid: {
   hint: () => "Cached keychain entry doesn't unlock the vault. Run: secret-shuttle unlock",
   nextAction: () => "secret-shuttle unlock",
 },
-daemon_start_failed: {
-  exitCode: EXIT_CODE_TRANSIENT,
-  hint: () => "Daemon failed to start. Try: secret-shuttle daemon status",
-  nextAction: () => "secret-shuttle daemon status",
-},
+// Note: daemon_start_failed was renamed daemon_start_timeout in implementation.
+// daemon_start_timeout already exists in the registry from lifecycle.ts — reuse it.
+// No new entry needed here.
 ```
 
 Verify `keychain_unavailable` has nextAction (Plan 5d should have added it):
@@ -1285,8 +1283,10 @@ test("error-codes: keychain_key_invalid registered with PERMISSION exit code + n
   assert.strictEqual(entry.nextAction!(""), "secret-shuttle unlock");
 });
 
-test("error-codes: daemon_start_failed registered with TRANSIENT exit code + nextAction", () => {
-  const entry = lookupErrorCode("daemon_start_failed");
+test("error-codes: daemon_start_timeout registered with TRANSIENT exit code + nextAction", () => {
+  // Note: plan originally named this daemon_start_failed; implementation uses
+  // daemon_start_timeout from lifecycle.ts (already in the registry).
+  const entry = lookupErrorCode("daemon_start_timeout");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_TRANSIENT);
   assert.strictEqual(entry.nextAction!(""), "secret-shuttle daemon status");
@@ -1305,14 +1305,15 @@ npm test -- src/shared/error-codes.test.ts 2>&1 | tail -10
 ```bash
 git add src/shared/error-codes.ts src/shared/error-codes.test.ts
 git commit -m "$(cat <<'EOF'
-feat(errors): add keychain_key_invalid + daemon_start_failed codes
+feat(errors): add keychain_key_invalid + daemon_start_timeout codes
 
-Plan 5b. Two new error codes for the init + keychain unlock flows:
+Plan 5b. Two new/updated error codes for the init + keychain unlock flows:
 
   - keychain_key_invalid (PERMISSION): cached key didn't unlock the
     vault. nextAction: "secret-shuttle unlock".
-  - daemon_start_failed (TRANSIENT): daemon spawn timed out during
-    init. nextAction: "secret-shuttle daemon status".
+  - daemon_start_timeout (TRANSIENT): daemon spawn timed out during
+    init. (Originally planned as daemon_start_failed; implementation
+    reuses daemon_start_timeout from lifecycle.ts.)
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -1679,7 +1680,7 @@ export function initCommand(): Command {
         await spawnDaemonAndWait({ timeoutMs: 5000 });
         socket = await readSocketFile();
         if (socket === null) {
-          throw new ShuttleError("daemon_start_failed", "Daemon failed to start within 5s.");
+          throw new ShuttleError("daemon_start_timeout", "Daemon failed to start within 5s.");
         }
         daemonSpawned = true;
       }
@@ -1826,7 +1827,7 @@ Append a new Plan 5b + 5f-impl section under Unreleased:
 - `secret-shuttle keychain enable / disable / status` — explicit control over keychain enrollment for users who want to opt in/out outside the init flow.
 - Daemon routes: `POST /v1/keychain/enable`, `POST /v1/keychain/disable`, `GET /v1/keychain/status`.
 - Envelope file gains a stable `id` field (UUID). Used as the keychain account key so multiple Secret Shuttle vaults can coexist on one machine without collision. Legacy envelopes are transparently upgraded on first read.
-- Error codes: `keychain_key_invalid` (cached key didn't unlock), `daemon_start_failed` (spawn timeout during init). Both include `next_action`.
+- Error codes: `keychain_key_invalid` (cached key didn't unlock), `daemon_start_timeout` (spawn timeout during init — implementation reuses existing code from lifecycle.ts rather than adding new `daemon_start_failed`). Both include `next_action`.
 
 **Changed:**
 
