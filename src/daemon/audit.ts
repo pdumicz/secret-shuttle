@@ -1,5 +1,6 @@
 import { appendFile } from "node:fs/promises";
 import { ensureShuttleHome, getShuttlePaths } from "../shared/config.js";
+import { getCurrentAgentId } from "./auth/auth-context.js";
 
 export type DaemonAuditAction =
   | "init" | "unlock" | "lock"
@@ -49,14 +50,51 @@ export interface DaemonAuditEvent {
    * returned in the HTTP response body where the agent can read it.
    */
   value_visible_to_agent?: boolean;
+  /**
+   * The agent_id that caused this audit event.  Auto-stamped by
+   * `writeDaemonAudit` from the ambient ALS AuthContext (set by withAuthContext
+   * around every authenticated handler) when undefined.  Falls back to the
+   * literal "daemon" outside any request context (lifecycle hooks, background
+   * tasks).  Routes that act on a persisted grant (e.g. UI approval clicks)
+   * should pass the grant's owner_agent_id explicitly.
+   */
+  actor_agent_id?: string;
+}
+
+/**
+ * Discriminates *where* an audit event is emitted from, so the right
+ * actor_agent_id can be resolved:
+ *  - "request":          inside an authenticated daemon handler — read from ALS.
+ *  - "lifecycle":        daemon-side lifecycle hooks (startup, sweeps, etc.).
+ *  - "persisted-owner":  routes that act on behalf of a stored grant's owner
+ *                        outside any ALS context (e.g. UI approval clicks).
+ */
+export type AuditActorSite =
+  | { site: "request" }
+  | { site: "lifecycle" }
+  | { site: "persisted-owner"; ownerAgentId: string };
+
+export function getAuditActor(site: AuditActorSite): string {
+  switch (site.site) {
+    case "request":
+      return getCurrentAgentId();
+    case "lifecycle":
+      return "daemon";
+    case "persisted-owner":
+      return site.ownerAgentId;
+  }
 }
 
 export async function writeDaemonAudit(event: DaemonAuditEvent): Promise<void> {
   const paths = getShuttlePaths();
   await ensureShuttleHome(paths);
+  // Auto-stamp actor_agent_id from the ambient ALS AuthContext if not already
+  // set by the caller.  Falls back to "daemon" outside any request context.
+  const actor_agent_id = event.actor_agent_id ?? getCurrentAgentId();
   const line = JSON.stringify({
     ts: new Date().toISOString(),
     ...event,
+    actor_agent_id,
     // Default to false; only emit true when the caller explicitly opted into
     // documenting that this operation surfaced plaintext to the agent
     // (currently: inject_render in stdout-passthrough mode).
