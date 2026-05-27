@@ -400,16 +400,25 @@ The grouping key becomes:
 
 So a batch pushing `ss://stripe/prod/X` to both `vercel:production` AND `vercel:preview` produces TWO patterns (one per environment), each correctly scoped via `required_params.environment`. A batch pushing the same ref to two distinct GitHub repos produces two patterns. A batch pushing two different refs to the same `(vercel-env-add, environment=production)` produces ONE pattern with `ref_glob: "ss://<source>/<env>/*"` and `required_params: { environment: "production" }`.
 
-**Per-group output (rules):**
-- `action: "template-run"`
+**Pre-grouping filter:** before grouping, walk every `PlanEntry.destination` and check whether its `template_id` is a key in `DESTINATION_DEFINING_PARAMS`. Destinations whose template is NOT a key are **dropped from the derivation input** (fail-closed per the rule above). Track the dropped destinations so the UI footer can surface the "excluded" notice. Only registered destinations flow into the grouping step.
+
+**Per-group output (rules) — applied only to destinations that survived the pre-grouping filter:**
+- `actions: ["template-run"]`
 - `template_ids: [<template_id>]`
 - `ref_glob: "ss://<source>/<env>/*"` (if group has ≥2 entries with the same `(source, env)`) OR the single exact ref (if group has 1 entry)
-- `required_params: { <param>: <value>, ... }` — populated from the group key's destination-defining params (empty/absent when the template has no registered destination-defining params, matching Plan 4a's pre-burst behavior)
-- `destination_domains: [<domain>]` — informational; emitted for audit/display consistency; not consulted by the template-run matcher
+- `required_params`: populated from the registered destination-defining-params for this `template_id`:
+  - If `DESTINATION_DEFINING_PARAMS[template_id]` is a **non-empty** list of param keys: emit `required_params: { <key>: <value-from-PlanEntry.destination.template_params>, ... }` for every listed key. This is the strict-equal scope the user is consenting to.
+  - If `DESTINATION_DEFINING_PARAMS[template_id]` is an **explicitly registered empty list** `[]` (the future case of a template whose maintainer deliberately reviewed it and confirmed no destination-defining params exist): emit `required_params: {}` (or omit the field). The matcher matches by ref + template_id only, as Plan 4a. The empty list is an **explicit registration of "no constraints needed"**, distinct from the unregistered case which is fail-closed.
+  - There is **no third case**: derivation never sees an unregistered template, because the pre-grouping filter dropped it.
+- `destination_domains: [<domain>]` — informational; emitted for audit/display consistency; not consulted by the template-run matcher.
 
 **Capture-step exclusion:** capture is one-shot human-attended; future captures are not session-eligible (the user has to click Capture every time anyway). Plan entries with `source.kind == capture` contribute their template-run destination groups to the session pattern (the *push* is repeatable) but do NOT contribute any capture/reveal action to the session.
 
-**Empty-pattern guard:** if the derivation produces zero patterns, the affordance is not rendered. The only realistic way to hit zero is a batch consisting entirely of capture steps that have no template-run destinations attached (capture without a downstream push). Any batch with at least one resolved destination produces at least one pattern — including single-entry ones (see "Single-entry patterns are allowed" below).
+**Empty-pattern guard:** if the derivation produces zero patterns, the affordance is not rendered. There are two ways to hit zero:
+1. The batch is entirely capture steps with no template-run destinations attached (capture without a downstream push).
+2. Every destination in the batch was dropped by the pre-grouping filter (all template_ids unregistered). The approval card still shows the "excluded destinations" notice for diagnosis, but no session checkbox.
+
+Any batch with at least one *registered* template-run destination produces at least one pattern — including single-entry ones (see "Single-entry patterns are allowed" below).
 
 ### Ref glob narrowness rule
 
