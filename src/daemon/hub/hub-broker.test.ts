@@ -346,3 +346,83 @@ test("emitBootstrapCaptureStep: detached + already spawning → no duplicate spa
   );
   assert.equal(opens.length, 1, "spawn-in-flight must debounce a second emit");
 });
+
+test("clearBootstrapCaptureStep(matching token): drops pending so subsequent attach does NOT replay", () => {
+  // After the executor settles a capture await (any of the five branches),
+  // it MUST clear the pending event. A fresh hub attach after that point
+  // must NOT receive a stale bootstrap_capture_step (otherwise the UI's
+  // capture-mode iframe-hide would mask any unrelated navigate replay).
+  const { broker } = newBroker();
+  broker.emitBootstrapCaptureStep(
+    {
+      batch_id: "b1",
+      secret_name: "STRIPE_KEY",
+      url: "https://x",
+      step_idx: 1,
+      step_total: 1,
+      capture_token: "tok-A",
+    },
+    5555,
+  );
+
+  broker.clearBootstrapCaptureStep("tok-A");
+
+  // Verify the clear took effect by attaching a fresh subscriber and
+  // checking that NO bootstrap_capture_step event is replayed.
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  const cap = events.find((e) => e.type === "bootstrap_capture_step");
+  assert.equal(
+    cap,
+    undefined,
+    "after clear, attach must NOT replay the cleared capture step",
+  );
+});
+
+test("clearBootstrapCaptureStep(mismatched token): no-op — pending stays, attach still replays", () => {
+  // Token guard rationale: if a rapid-fire next capture has already
+  // replaced pendingCaptureStep with a NEW event, an old executor's
+  // finally clear (carrying the previous capture_token) must NOT wipe
+  // the new pending event. Each capture's own finally is the one that
+  // authoritatively drops its slot — by token equality.
+  const { broker } = newBroker();
+  broker.emitBootstrapCaptureStep(
+    {
+      batch_id: "b1",
+      secret_name: "K",
+      url: "https://x",
+      step_idx: 1,
+      step_total: 1,
+      capture_token: "tok-NEW",
+    },
+    5555,
+  );
+
+  // Try to clear with a STALE token (e.g., a previous capture's settle
+  // arriving after a newer emit has overwritten the slot).
+  broker.clearBootstrapCaptureStep("tok-STALE");
+
+  // pendingCaptureStep is private; verify via attach replay.
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  const cap = events.find((e) => e.type === "bootstrap_capture_step");
+  assert.ok(
+    cap,
+    "mismatched-token clear must be a no-op — newer pending event must still replay",
+  );
+  assert.equal(
+    (cap as { capture_token: string }).capture_token,
+    "tok-NEW",
+    "newer event survives stale clear",
+  );
+});
+
+test("clearBootstrapCaptureStep: clear before emit (defensive) → no-op, no throw", () => {
+  // Defensive: clear may legitimately race ahead of an emit (e.g., a test
+  // calls it on a fresh broker) — must not throw.
+  const { broker } = newBroker();
+  broker.clearBootstrapCaptureStep("any-token");
+  // lastBootstrapCaptureStep should still be null — clear must not
+  // accidentally allocate state.
+  assert.equal(broker.lastBootstrapCaptureStep, null);
+});

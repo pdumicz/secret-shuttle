@@ -164,9 +164,11 @@ export class HubBroker {
         seq: this.activeSeq,
       });
     }
-    // Replay the most-recent pending capture step (Option C from the review
-    // findings: don't try to clear pendingCaptureStep here — stale tokens
-    // are 404'd by the bootstrap-capture-ui routes when the user clicks).
+    // Replay the most-recent unconsumed capture step. The executor's
+    // `runCaptureStep` finally clears this slot (token-guarded) once the
+    // await settles, so by the time the flow has ended there is nothing
+    // left to replay — a fresh `navigate` on the same hub reattach is no
+    // longer masked by the iframe-hide that capture-mode triggers.
     if (this.pendingCaptureStep !== null) {
       sub.write({
         type: "bootstrap_capture_step",
@@ -256,6 +258,30 @@ export class HubBroker {
   }
 
   /**
+   * Token-guarded clear of the pending capture-step replay slot. Called by
+   * the executor in the `runCaptureStep` finally, regardless of which of the
+   * five state-machine branches settles the await (success+verified,
+   * success+cleanup_failed, skip, timeout, abort, redirect). Without this,
+   * a stale `bootstrap_capture_step` event could linger and be replayed on a
+   * later hub `attach()` — the UI in hub-ui.html hides the iframe whenever a
+   * capture event is active, so a stale replay would MASK a fresh unrelated
+   * `navigate` (worse than the documented "stale button 404" trade-off).
+   *
+   * Token-guarded so it's a no-op if the stored event has been replaced by a
+   * newer emit since the executor took its capture_token snapshot (rapid-fire
+   * captures): the most-recent emit's clear() — fired in its own finally —
+   * is the one that authoritatively drops the slot.
+   */
+  clearBootstrapCaptureStep(captureToken: string): void {
+    if (
+      this.pendingCaptureStep !== null &&
+      this.pendingCaptureStep.capture_token === captureToken
+    ) {
+      this.pendingCaptureStep = null;
+    }
+  }
+
+  /**
    * @internal — exposed only for tests + the C14 transition. Holds the last
    * BootstrapCaptureStepEvent recorded by `emitBootstrapCaptureStep`. Lets
    * C11 tests assert that emit() fired with the right payload between
@@ -264,13 +290,12 @@ export class HubBroker {
   lastBootstrapCaptureStep: BootstrapCaptureStepEvent | null = null;
 
   /**
-   * Latest unconsumed bootstrap_capture_step event. Set by emit, replayed
-   * on attach. We intentionally do NOT clear this on resolve/reject: the
-   * pending-captures registry already enforces single-use semantics on
-   * the capture_token (subsequent UI POSTs 404), and a stale replay just
-   * shows a card whose button presses harmlessly fail. Keeping it simple
-   * (Option C from the review) avoids coupling the hub broker to the
-   * bootstrap-capture-ui route handlers.
+   * Latest unconsumed bootstrap_capture_step event. Set by `emit`, replayed
+   * by `attach`, dropped by `clearBootstrapCaptureStep` (token-guarded) on
+   * await settle. The executor's settle path is the single authoritative
+   * source of "this capture flow has ended" — once cleared, a subsequent
+   * hub reattach replays nothing and a fresh `navigate` is no longer masked
+   * by the iframe-hide in capture mode.
    */
   private pendingCaptureStep: BootstrapCaptureStepEvent | null = null;
 

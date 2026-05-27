@@ -299,6 +299,197 @@ secrets:
   });
 });
 
+test("POST /v1/bootstrap/continue: capture plan + cross-batch bootstrap browser → bootstrap_browser_busy fires BEFORE approval consume; approval preserved", async () => {
+  // Sister test to the C10 blind-guard ordering invariant. The pre-approval
+  // browser-busy guard MUST fire BEFORE requireApprovals consumes the batch's
+  // single-use approval — otherwise the user is stranded with a "used"
+  // approval after a concurrency collision and must mint a fresh one to retry.
+  //
+  // Invariants verified:
+  //   1. /continue throws bootstrap_browser_busy (not approval_required, not
+  //      approval_already_used, not the post-lock ensureBootstrapBrowser path).
+  //   2. Batch state UNCHANGED (still "pending"), no executor side effects.
+  //   3. Approval still status="granted" (unconsumed). Subsequent retry after
+  //      batch A completes can reuse the SAME approval_id.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    // Phase 1: create a capture batch — gets approval_required + batch_id.
+    const yml = `
+version: 1
+secrets:
+  STRIPE_KEY:
+    source: { kind: capture, url: "https://dashboard.stripe.com/apikeys" }
+    destinations: ["vercel:production"]
+`;
+    const planR = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml });
+    assert.equal(planR.status, 400, `expected 400 approval_required, got ${planR.status}`);
+    const details = planR.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string };
+    const batchId = details.batch_id;
+    const approvalId = details.approvals[0]!.approval_id;
+
+    // Phase 2: approve.
+    ctx.services.approvals.approve(approvalId);
+    assert.equal(
+      ctx.services.approvals.get(approvalId)!.status,
+      "granted",
+      "approval should be granted after approve()",
+    );
+
+    // Phase 3: simulate "batch A is already driving the daemon-owned browser"
+    // by directly installing a bootstrap-owned BrowserSession with a different
+    // batchId. The new pre-approval guard inspects services.browserSession and
+    // must reject before requireApprovals.
+    ctx.services.browserSession = makeStubSession({ kind: "bootstrap", batchId: "bootstrap-other-batch-A" });
+
+    // Phase 4: call /continue — must throw bootstrap_browser_busy.
+    const blockedR = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: batchId,
+      approval_ids: [approvalId],
+    });
+    assert.equal(
+      blockedR.status,
+      400,
+      `expected 400 bootstrap_browser_busy, got ${blockedR.status} body=${JSON.stringify(blockedR.body)}`,
+    );
+    const blockedErr = (blockedR.body as { error: { code: string } }).error;
+    assert.equal(
+      blockedErr.code,
+      "bootstrap_browser_busy",
+      `expected bootstrap_browser_busy (pre-approval guard), got: ${blockedErr.code}`,
+    );
+
+    // INVARIANT 1: batch state unchanged (still "pending").
+    const stateAfterBlock = await ctx.services.bootstrapStore.get(batchId);
+    assert.ok(stateAfterBlock !== null, "batch must still exist after blocked /continue");
+    assert.equal(
+      stateAfterBlock!.status,
+      "pending",
+      `batch must remain "pending" after blocked /continue, got: ${stateAfterBlock!.status}`,
+    );
+
+    // INVARIANT 2: approval UNCONSUMED — still "granted", not "used".
+    // This is the entire point of the pre-approval ordering.
+    const grantAfterBlock = ctx.services.approvals.get(approvalId);
+    assert.ok(grantAfterBlock !== undefined, "approval must still exist");
+    assert.equal(
+      grantAfterBlock!.status,
+      "granted",
+      `INVARIANT VIOLATION: approval must remain "granted" (unconsumed) after the cross-batch browser-busy guard fired. Got: ${grantAfterBlock!.status}. This means the new guard ran AFTER requireApprovals — defeating the whole point of placing it BEFORE.`,
+    );
+
+    // Phase 5: simulate "batch A finished" by clearing browserSession.
+    ctx.services.browserSession = null;
+
+    // Phase 6: retry with the SAME approval_id — must NOT see approval_already_used.
+    // Downstream errors (executor failure in the stub harness) are fine; what
+    // we're testing is that the approval is REUSABLE.
+    const retryR = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: batchId,
+      approval_ids: [approvalId],
+    });
+    const retryErr = (retryR.body as { error?: { code: string } }).error;
+    if (retryErr !== undefined) {
+      assert.notEqual(
+        retryErr.code,
+        "approval_already_used",
+        `RETRY MUST REUSE APPROVAL: got approval_already_used. Pre-approval guard failed to preserve approval.`,
+      );
+      assert.notEqual(
+        retryErr.code,
+        "approval_not_granted",
+        `RETRY MUST REUSE APPROVAL: got approval_not_granted.`,
+      );
+      assert.notEqual(
+        retryErr.code,
+        "bootstrap_browser_busy",
+        `batch A's session was cleared — guard must not fire on retry.`,
+      );
+    }
+  });
+});
+
+test("POST /v1/bootstrap/continue: capture plan + user-owned browser → guard does NOT fire (user session is reused)", async () => {
+  // The new browser-busy guard is bootstrap-owned-cross-batch SPECIFIC:
+  // a user-owned BrowserSession means the user pre-emptively ran
+  // `browser start`, and ensureBootstrapBrowser will reuse it unchanged.
+  // The guard must NOT fire on user-owned sessions — that would break the
+  // common bootstrap-after-browser-start workflow.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  STRIPE_KEY:
+    source: { kind: capture, url: "https://dashboard.stripe.com/apikeys" }
+    destinations: ["vercel:production"]
+`;
+    const planR = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml });
+    const details = planR.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string };
+    const batchId = details.batch_id;
+    const approvalId = details.approvals[0]!.approval_id;
+
+    ctx.services.approvals.approve(approvalId);
+
+    // User-owned session: must be tolerated by the new guard.
+    ctx.services.browserSession = makeStubSession({ kind: "user" });
+
+    const r = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: batchId,
+      approval_ids: [approvalId],
+    });
+    const err = (r.body as { error?: { code: string } }).error;
+    if (err !== undefined) {
+      assert.notEqual(
+        err.code,
+        "bootstrap_browser_busy",
+        `user-owned session must NOT trip the cross-batch guard, got: ${err.code}`,
+      );
+    }
+  });
+});
+
+test("POST /v1/bootstrap/continue: non-capture plan + cross-batch bootstrap browser → guard does NOT fire", async () => {
+  // The new browser-busy guard is capture-conditional, mirroring the C10
+  // blind guard. Non-capture plans (random_32_bytes) don't need the
+  // browser at all — services.ensureBootstrapBrowser is never called for
+  // them, so the cross-batch collision is harmless. Guard must skip.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  RANDOM_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:production"]
+`;
+    const planR = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml });
+    const details = planR.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string };
+    const batchId = details.batch_id;
+    const approvalId = details.approvals[0]!.approval_id;
+
+    ctx.services.approvals.approve(approvalId);
+
+    // Cross-batch bootstrap session present, but this batch is non-capture.
+    ctx.services.browserSession = makeStubSession({ kind: "bootstrap", batchId: "bootstrap-other-batch-X" });
+
+    const r = await call(ctx, "POST", "/v1/bootstrap/continue", {
+      batch_id: batchId,
+      approval_ids: [approvalId],
+    });
+    const err = (r.body as { error?: { code: string } }).error;
+    if (err !== undefined) {
+      assert.notEqual(
+        err.code,
+        "bootstrap_browser_busy",
+        `non-capture plan must NOT trip the cross-batch guard, got: ${err.code}`,
+      );
+    }
+  });
+});
+
 test("POST /v1/bootstrap/continue: non-capture plan + active blind → guard does NOT fire", async () => {
   // C10 /continue guard is capture-conditional. For a non-capture batch
   // (random_32_bytes sources), the guard must NOT fire even with blind

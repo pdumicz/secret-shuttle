@@ -628,6 +628,19 @@ async function runCaptureStep(
       failureCode = "bootstrap_capture_aborted";
       failureMessage = e instanceof Error ? e.message : String(e);
     }
+  } finally {
+    // Drop the pending hub event regardless of outcome — this is the single
+    // authoritative settle point for ALL FIVE state-machine branches
+    // (success+verified, success+cleanup_failed, skip, timeout, abort,
+    // redirect). Token-guarded inside the broker so a rapid-fire next emit
+    // (different capture_token) is not accidentally cleared.
+    //
+    // Without this, a stale capture_step event would replay on hub
+    // reattach and the UI's capture-mode iframe-hide would MASK any fresh
+    // `navigate` event for an unrelated operation. The previous "Option C
+    // (don't clear)" trade-off only considered stale button presses 404'ing
+    // — it missed the iframe-mask interaction.
+    services.hubBroker.clearBootstrapCaptureStep(capture_token);
   }
 
   // ── Step 6: cleanup ─────────────────────────────────────────────────────

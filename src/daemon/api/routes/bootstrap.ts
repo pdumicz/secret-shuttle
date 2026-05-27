@@ -240,6 +240,31 @@ export function registerBootstrapRoutes(
           "Blind mode is currently active from a prior operation. Approve `blind end` before bootstrapping.",
         );
       }
+
+      // Pre-approval browser-busy guard (sister to the C10 blind guard). If
+      // another bootstrap batch already owns the daemon-spawned Chrome,
+      // ensureBootstrapBrowser below WOULD throw bootstrap_browser_busy —
+      // but that throw happens AFTER requireApprovals has already consumed
+      // this batch's single-use approval. Without this pre-check the user
+      // would be forced to mint a fresh approval every time they retry
+      // after waiting for batch A to finish. Mirror the C10 ordering: same
+      // capture-conditional gate, same "fire before requireApprovals so the
+      // approval stays granted" UX invariant.
+      //   - null session              → fine (we will spawn below)
+      //   - user-owned session        → fine (reused unchanged)
+      //   - bootstrap-owned same batch → fine (idempotent reuse on resume)
+      //   - bootstrap-owned diff batch → REJECT here
+      const session = services.browserSession;
+      if (
+        session !== null &&
+        session.owner.kind === "bootstrap" &&
+        session.owner.batchId !== batchId
+      ) {
+        throw new ShuttleError(
+          "bootstrap_browser_busy",
+          `Another bootstrap batch (${session.owner.batchId}) is already driving the daemon-owned browser. Retry after that batch completes.`,
+        );
+      }
     }
 
     // The bootstrap approval is single-use, but the executor is idempotent

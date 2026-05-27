@@ -348,6 +348,55 @@ test("capture branch: SUCCESS + cleanup verified → blind.end auto + step ok:tr
   assert.ok(records.some((r) => r.name === "STRIPE_KEY"), "captured secret must be in the vault");
 });
 
+// ── Clear hub pending event on settle ──────────────────────────────────────
+
+test("capture branch: runCaptureStep clears the broker's pending hub event after settle (success path)", async (t) => {
+  // After the await pending settles (any of the five branches), the executor
+  // MUST clear the broker's pendingCaptureStep slot via
+  // clearBootstrapCaptureStep(capture_token). Otherwise a later hub attach
+  // would replay a stale capture event, and the UI's capture-mode iframe-hide
+  // would MASK any unrelated `navigate` for a future operation.
+  //
+  // We verify the clear by attaching a FRESH hub subscriber AFTER the step
+  // settles. If the executor cleared correctly, the subscriber receives
+  // no bootstrap_capture_step event. If it did NOT clear, the subscriber
+  // would receive the stale event.
+  t.after(drainCleanups);
+  const fx = await setupFixture();
+  await saveCapturePlan(fx.store, { batchId: "b-clear-on-settle" });
+
+  const driveCapture = (async (): Promise<void> => {
+    for (let i = 0; i < 200; i++) {
+      const ev = fx.services.hubBroker.lastBootstrapCaptureStep;
+      if (ev !== null) {
+        fx.services.pendingCaptures.resolveByToken(ev.capture_token, {
+          value: "sk_live_clear", field_fingerprint: "fp:clear",
+        });
+        return;
+      }
+      await new Promise<void>((r) => setImmediate(r));
+    }
+    throw new Error("emitBootstrapCaptureStep never fired");
+  })();
+
+  await executeBatch(fx.store, "b-clear-on-settle", makeDeps(fx.services));
+  await driveCapture;
+
+  // Now attach a fresh subscriber — there must be NO replay of the
+  // capture step (it was cleared in the finally of runCaptureStep).
+  const events: import("../hub/hub-broker.js").HubEvent[] = [];
+  fx.services.hubBroker.attach({
+    write: (e) => events.push(e),
+    close: () => undefined,
+  });
+  const replayed = events.find((e) => e.type === "bootstrap_capture_step");
+  assert.equal(
+    replayed,
+    undefined,
+    "after runCaptureStep settles, hub attach must NOT replay a stale capture event",
+  );
+});
+
 // ── Test 2 — SUCCESS + cleanup NOT verified ─────────────────────────────────
 
 test("capture branch: SUCCESS + cleanup NOT verified → blind stays active + cleanup_failed; STOP", async (t) => {
