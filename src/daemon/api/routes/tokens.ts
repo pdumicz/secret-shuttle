@@ -25,6 +25,7 @@ import type { DaemonServer } from "../../server.js";
 import { deriveHmac, formatBearer } from "../../auth/token-derive.js";
 import { assertAgentIdValid } from "../../auth/agent-id.js";
 import { getAuthContext } from "../../auth/auth-context.js";
+import { rootTokenFingerprint } from "../../auth/root-token-fingerprint.js";
 import { asObject, reqString } from "../validate.js";
 import { writeDaemonAudit } from "../../audit.js";
 
@@ -60,6 +61,7 @@ export function registerTokens(server: DaemonServer, getRootToken: () => string)
         ok: true,
         parent_agent_id: ctx.agent_id,
         child_agent_id: requested,
+        root_token_fp: rootTokenFingerprint(getRootToken()),
       });
       return { token, agent_id: requested };
     } catch (err) {
@@ -69,6 +71,7 @@ export function registerTokens(server: DaemonServer, getRootToken: () => string)
         parent_agent_id: ctx.agent_id,
         child_agent_id: requested,
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+        root_token_fp: rootTokenFingerprint(getRootToken()),
       });
       throw err;
     }

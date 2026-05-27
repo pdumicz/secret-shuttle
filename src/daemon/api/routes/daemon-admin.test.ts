@@ -29,8 +29,10 @@ import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
 import { readSocketFile, writeSocketFile } from "../../socket-file.js";
 import { deriveHmac, formatBearer } from "../../auth/token-derive.js";
+import { rootTokenFingerprint } from "../../auth/root-token-fingerprint.js";
 import { ensureRootToken } from "../../root-token.js";
 import { ensureMachineId } from "../../machine-id.js";
+import { getShuttlePaths } from "../../../shared/config.js";
 
 // ── shared harness ──────────────────────────────────────────────────────────
 // Same shape as tokens.test.ts (A12) — 32-byte base64url root token so derived
@@ -244,6 +246,62 @@ test("POST /v1/daemon/reset-machine-id: root-only, regenerates file, does NOT in
       post.status,
       200,
       `agent token must survive machine-id reset (HMAC depends on root, not machine-id), got ${post.status} body=${JSON.stringify(post.body)}`,
+    );
+  });
+});
+
+test("POST /v1/daemon/rotate: audit row carries old + new root_token_fp (T4 continuity)", async () => {
+  // T4 regression: the daemon_rotate audit row must record BOTH the pre-rotate
+  // fingerprint (root_token_fp_prev) AND the post-rotate one (root_token_fp).
+  // This pair lets audit-log readers chain the rotation timeline — every
+  // tokens_mint row with root_token_fp = X was minted under generation X, and
+  // the rotate row with root_token_fp_prev = X + root_token_fp = Y marks the
+  // transition that retired all of them.
+  await withDaemon(async (ctx) => {
+    const auditPath = getShuttlePaths().auditLogPath;
+    const fpBefore = rootTokenFingerprint(ctx.token);
+
+    const r = await callWithBearer(ctx, ctx.token, "POST", "/v1/daemon/rotate");
+    assert.equal(r.status, 200, `rotate should succeed, got: ${JSON.stringify(r.body)}`);
+
+    // Read the new token off the socket file so we can cross-check the
+    // recorded NEW fingerprint against the actual new root.
+    const sf = await readSocketFile();
+    assert.notEqual(sf, null);
+
+    const lines = (await readFile(auditPath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const rotateRow = lines.find((row) => row.action === "daemon_rotate" && row.ok === true);
+    assert.ok(rotateRow !== undefined, "successful daemon_rotate audit row must be present");
+
+    // OLD fingerprint matches what we captured pre-rotate.
+    assert.equal(
+      rotateRow.root_token_fp_prev,
+      fpBefore,
+      "root_token_fp_prev must equal pre-rotate fingerprint",
+    );
+    // NEW fingerprint is 8-hex and matches the deterministic fingerprint of
+    // the actual new token sitting in the socket file.
+    assert.match(
+      rotateRow.root_token_fp as string,
+      /^[0-9a-f]{8}$/,
+      `new root_token_fp must be 8 hex chars, got: ${rotateRow.root_token_fp}`,
+    );
+    assert.equal(
+      rotateRow.root_token_fp,
+      rootTokenFingerprint(sf!.token),
+      "new root_token_fp must match fingerprint of actual new root token",
+    );
+    // Continuity invariant: the two fingerprints must differ (otherwise the
+    // rotate was a no-op or the new token collided — both indicate a bug in
+    // rotateRootToken, not in the audit-fingerprint wiring).
+    assert.notEqual(
+      rotateRow.root_token_fp,
+      rotateRow.root_token_fp_prev,
+      "fingerprints must differ across a successful rotate",
     );
   });
 });

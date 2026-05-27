@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +8,8 @@ import { DaemonServer } from "../../server.js";
 import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
 import { deriveHmac, formatBearer } from "../../auth/token-derive.js";
+import { rootTokenFingerprint } from "../../auth/root-token-fingerprint.js";
+import { getShuttlePaths } from "../../../shared/config.js";
 
 // ── shared harness ──────────────────────────────────────────────────────────
 // Mirrors approvals-session.test.ts / bootstrap-owner.test.ts (A10/A11):
@@ -170,6 +172,84 @@ test("POST /v1/tokens/mint: non-root CANNOT mint with trailing-dot-only suffix",
       "agent_id_namespace_violation",
       `expected agent_id_namespace_violation for trailing-dot mint, got: ${error.code} body=${JSON.stringify(r.body)}`,
     );
+  });
+});
+
+test("POST /v1/tokens/mint: audit row carries root_token_fp (8-char hex of SHA-256(root))", async () => {
+  // T4 regression: every tokens_mint audit row must include the active root
+  // fingerprint so post-rotate forensics can bucket mint events by which
+  // generation of the root they were bound to. Verifies both that the field
+  // is present + correctly shaped AND that the value matches the deterministic
+  // fingerprint of the daemon's actual root token.
+  await withDaemon(async (ctx) => {
+    // Capture the audit path BEFORE awaiting anything that might let a
+    // parallel test shift SECRET_SHUTTLE_HOME (mirrors approvals-session.test).
+    const auditPath = getShuttlePaths().auditLogPath;
+
+    const r = await call(ctx, "POST", "/v1/tokens/mint", { agent_id: "claude-fp-success" });
+    assert.equal(r.status, 200, `mint should succeed: ${JSON.stringify(r.body)}`);
+
+    const lines = (await readFile(auditPath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const mintRow = lines.find(
+      (row) => row.action === "tokens_mint" && row.child_agent_id === "claude-fp-success",
+    );
+    assert.ok(mintRow !== undefined, "tokens_mint audit row must be present");
+    assert.equal(mintRow.ok, true);
+    assert.match(
+      mintRow.root_token_fp as string,
+      /^[0-9a-f]{8}$/,
+      `root_token_fp must be 8 hex chars, got: ${mintRow.root_token_fp}`,
+    );
+    // Cross-check the fingerprint value: it must be the deterministic SHA-256
+    // prefix of the daemon's actual root token (not some random string).
+    assert.equal(
+      mintRow.root_token_fp,
+      rootTokenFingerprint(ctx.token),
+      "audit fingerprint must match rootTokenFingerprint(actual root token)",
+    );
+  });
+});
+
+test("POST /v1/tokens/mint: failure audit row also carries root_token_fp", async () => {
+  // The failure-path audit emission (catch block) was added in an earlier
+  // review round (I1) to record rejected mint attempts. T4 must stamp the
+  // fingerprint on that row too — without it, an attacker who triggers
+  // namespace violations could pollute the audit log with rows whose
+  // generation cannot be identified.
+  await withDaemon(async (ctx) => {
+    const auditPath = getShuttlePaths().auditLogPath;
+    const callerBearer = agentBearer(ctx.token, "claude-7f2a");
+    // Trigger an agent_id_namespace_violation: caller tries to mint outside
+    // its namespace. The route catches, writes a failure audit row, then
+    // rethrows.
+    const r = await callWithBearer(ctx, callerBearer, "POST", "/v1/tokens/mint", {
+      agent_id: "cursor-deadbeef",
+    });
+    assert.equal(r.status, 400, `expected 400, got ${r.status}`);
+
+    const lines = (await readFile(auditPath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    const failRow = lines.find(
+      (row) =>
+        row.action === "tokens_mint" &&
+        row.ok === false &&
+        row.child_agent_id === "cursor-deadbeef",
+    );
+    assert.ok(failRow !== undefined, "failure tokens_mint audit row must be present");
+    assert.equal(failRow.error_code, "agent_id_namespace_violation");
+    assert.match(
+      failRow.root_token_fp as string,
+      /^[0-9a-f]{8}$/,
+      `failure row root_token_fp must be 8 hex chars, got: ${failRow.root_token_fp}`,
+    );
+    assert.equal(failRow.root_token_fp, rootTokenFingerprint(ctx.token));
   });
 });
 

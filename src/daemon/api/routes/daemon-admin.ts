@@ -28,6 +28,7 @@
 import { ShuttleError } from "../../../shared/errors.js";
 import type { DaemonServer } from "../../server.js";
 import { getAuthContext } from "../../auth/auth-context.js";
+import { rootTokenFingerprint } from "../../auth/root-token-fingerprint.js";
 import { rotateRootToken } from "../../root-token.js";
 import { resetMachineId } from "../../machine-id.js";
 import { writeSocketFile } from "../../socket-file.js";
@@ -53,23 +54,40 @@ export function registerDaemonAdmin(server: DaemonServer, daemonPortRef: () => n
     // socket + in-memory writes, leaving them three-way divergent. If that
     // becomes a real concern, add a simple Promise-based mutex around the
     // try-block below.
+    //
+    // Capture the OLD root-token fingerprint BEFORE any mutation so we can
+    // record it on BOTH the success and failure audit rows (forensics: lets
+    // audit-log readers chain `tokens_mint` rows minted under this generation
+    // to the rotate event that retired them).
+    const oldFp = rootTokenFingerprint(server.getRootToken());
     try {
       const paths = getShuttlePaths();
       const newToken = await rotateRootToken(paths.homeDir);
       await writeSocketFile({ port: daemonPortRef(), token: newToken, pid: process.pid });
       server.replaceRootToken(newToken);
-      await writeDaemonAudit({ action: "daemon_rotate", ok: true, actor_agent_id: "root" });
+      const newFp = rootTokenFingerprint(newToken);
+      await writeDaemonAudit({
+        action: "daemon_rotate",
+        ok: true,
+        actor_agent_id: "root",
+        root_token_fp_prev: oldFp,
+        root_token_fp: newFp,
+      });
       return {
         ok: true,
         message: "Root token rotated. Re-run `secret-shuttle init` to re-issue per-agent tokens.",
       };
     } catch (err) {
       // We're past the isRoot guard, so actor_agent_id is "root" by construction.
+      // root_token_fp_prev is always known (captured before the try). We do NOT
+      // stamp root_token_fp on the failure row because the swap may have failed
+      // partway through and the "current" token state is ambiguous.
       await writeDaemonAudit({
         action: "daemon_rotate",
         ok: false,
         actor_agent_id: "root",
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+        root_token_fp_prev: oldFp,
       });
       throw err;
     }
@@ -91,10 +109,15 @@ export function registerDaemonAdmin(server: DaemonServer, daemonPortRef: () => n
     try {
       const paths = getShuttlePaths();
       await resetMachineId(paths.homeDir);
+      // reset-machine-id does NOT mutate the root token. Stamping the current
+      // (unchanged) fingerprint here keeps the audit row shape consistent with
+      // tokens_mint / daemon_rotate and lets audit readers visually confirm
+      // the root WAS NOT rotated by this action.
       await writeDaemonAudit({
         action: "daemon_reset_machine_id",
         ok: true,
         actor_agent_id: "root",
+        root_token_fp: rootTokenFingerprint(server.getRootToken()),
       });
       return {
         ok: true,
@@ -103,11 +126,14 @@ export function registerDaemonAdmin(server: DaemonServer, daemonPortRef: () => n
       };
     } catch (err) {
       // We're past the isRoot guard, so actor_agent_id is "root" by construction.
+      // The root token is not mutated by this route, so the fingerprint is
+      // unambiguous on failure (same as it was on entry).
       await writeDaemonAudit({
         action: "daemon_reset_machine_id",
         ok: false,
         actor_agent_id: "root",
         error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+        root_token_fp: rootTokenFingerprint(server.getRootToken()),
       });
       throw err;
     }

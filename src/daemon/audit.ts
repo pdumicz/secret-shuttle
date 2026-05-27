@@ -74,6 +74,22 @@ export interface DaemonAuditEvent {
    * by the route).
    */
   child_agent_id?: string;
+  /**
+   * Short fingerprint of the daemon's root token at the time this event was
+   * emitted (first 4 bytes / 8 hex chars of SHA-256(root_token)). Stamped by
+   * /v1/tokens/mint on every audit row and by /v1/daemon/rotate on the
+   * before+after rows. Audit-log consumers can bucket rows by generation
+   * without seeing the actual root token bytes.
+   */
+  root_token_fp?: string;
+  /**
+   * For daemon_rotate events only: the OLD fingerprint (before the swap).
+   * `root_token_fp` carries the NEW fingerprint. Pair lets readers chain
+   * the rotation timeline: rows with root_token_fp = X were minted under
+   * X; the rotate event with root_token_fp_prev = X + root_token_fp = Y
+   * marks the transition.
+   */
+  root_token_fp_prev?: string;
 }
 
 /**
