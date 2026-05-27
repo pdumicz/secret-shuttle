@@ -235,8 +235,12 @@ export async function captureFromTarget(
     );
     const v = r.result.value;
     if (!v.ok || v.value === undefined || v.field === undefined || v.domain === undefined) {
+      // NOT a redirect: the page IS on the expected host, but READ_SCRIPT
+      // couldn't surface a readable focused field. Distinct code so the CLI
+      // hint can point at the right recovery (focus the field) instead of
+      // the redirect recovery (navigate back to the expected host).
       throw new ShuttleError(
-        "bootstrap_capture_redirect_blocked",
+        "bootstrap_capture_field_unreadable",
         v.reason === "no_active_element"
           ? "No focused element on the capture tab. Focus the field containing the secret and re-trigger capture."
           : v.reason === "not_editable"
@@ -247,15 +251,17 @@ export async function captureFromTarget(
     // Reject selection-when-field-requested and vice versa. READ_SCRIPT
     // returns selection FIRST when one exists, so a user with stray selected
     // text would otherwise silently override a focused-field capture.
+    // NOT a redirect: same code as the unreadable case above — the host is
+    // fine, the page state just doesn't match the requested capture mode.
     if (mode === "focused-field" && v.source !== "focused-field") {
       throw new ShuttleError(
-        "bootstrap_capture_redirect_blocked",
+        "bootstrap_capture_field_unreadable",
         "Expected a focused-field capture but the page has a non-empty selection. Click into the field (clearing the selection) and re-trigger capture.",
       );
     }
     if (mode === "selection" && v.source !== "selection") {
       throw new ShuttleError(
-        "bootstrap_capture_redirect_blocked",
+        "bootstrap_capture_field_unreadable",
         "Expected a selection capture but the page has no selected text. Select the secret text and re-trigger capture.",
       );
     }

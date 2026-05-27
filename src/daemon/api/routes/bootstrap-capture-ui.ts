@@ -70,7 +70,10 @@ export function registerBootstrapCaptureUi(server: DaemonServer, services: Daemo
       // The capture itself failed (host drift, not-editable element, CDP
       // error). Reject the pending Promise with the SAME error so the
       // executor's state machine branches correctly:
-      //   - bootstrap_capture_redirect_blocked → continue-to-next-secret
+      //   - bootstrap_capture_redirect_blocked (real host drift) →
+      //     continue-to-next-secret
+      //   - bootstrap_capture_field_unreadable (host fine, field state off) →
+      //     continue-to-next-secret (T2 split: distinct CLI hint, same flow)
       //   - any other error → unexpected; treated as failed step
       services.pendingCaptures.rejectByToken(token, e as Error);
       res.statusCode = 200;

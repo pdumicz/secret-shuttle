@@ -254,6 +254,18 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
       "The capture tab is no longer on the host declared in secret-shuttle.yml. Navigate back to the expected host (or fix the yml) and retry the capture step.",
     nextAction: () => null,
   },
+  bootstrap_capture_field_unreadable: {
+    // CONFLICT: the capture tab IS on the expected host (no redirect), but
+    // the page state doesn't match what the executor needs to read — either
+    // no element is focused, the focused element isn't a text field, or the
+    // mode (focused-field vs selection) doesn't match the actual page state.
+    // The recovery is human: click into the right field / set or clear the
+    // selection, then re-trigger capture.
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () =>
+      "The capture tab is on the expected host, but the focused field is missing or the selection state doesn't match. Click into the field containing the secret (clearing any selection if you requested focused-field, or selecting the text if you requested selection) and re-trigger capture.",
+    nextAction: () => null,
+  },
   bootstrap_capture_cleanup_failed: {
     // CONFLICT: cleanup verification could not confirm the bootstrap-owned
     // capture tab is closed, so the daemon halts and asks the human to

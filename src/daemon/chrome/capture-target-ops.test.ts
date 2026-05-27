@@ -233,9 +233,12 @@ test("captureFromTarget refuses focused-field when READ_SCRIPT returned selectio
     domain: "dashboard.stripe.com",
   };
   const cdp = new CdpClient(t);
+  // T2 split: mode mismatch is NOT a redirect (host is fine) — it's a
+  // "field state unreadable" condition. Distinct code so the CLI hint
+  // points at the focus/selection recovery, not the navigate-back one.
   await assert.rejects(
     () => captureFromTarget(cdp, "T-1", "focused-field", "dashboard.stripe.com"),
-    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_capture_redirect_blocked",
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_capture_field_unreadable",
   );
 });
 
@@ -244,9 +247,10 @@ test("captureFromTarget refuses selection when READ_SCRIPT returned focused-fiel
   t.defaultTargetUrl = "https://dashboard.stripe.com/api-keys";
   // Default readResult is focused-field; we ask for selection.
   const cdp = new CdpClient(t);
+  // T2 split: same as above — mode mismatch surfaces field_unreadable.
   await assert.rejects(
     () => captureFromTarget(cdp, "T-1", "selection", "dashboard.stripe.com"),
-    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_capture_redirect_blocked",
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_capture_field_unreadable",
   );
 });
 
@@ -255,9 +259,35 @@ test("captureFromTarget rejects when READ_SCRIPT reports no_active_element", asy
   t.defaultTargetUrl = "https://dashboard.stripe.com/api-keys";
   t.readResult = { ok: false, reason: "no_active_element" };
   const cdp = new CdpClient(t);
+  // T2 split: no_active_element is the canonical "field unreadable" case
+  // (host fine, but the user hasn't clicked into anything). Distinct code
+  // from the redirect path.
   await assert.rejects(
     () => captureFromTarget(cdp, "T-1", "focused-field", "dashboard.stripe.com"),
-    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_capture_redirect_blocked",
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_capture_field_unreadable",
+  );
+});
+
+test("captureFromTarget rejects when READ_SCRIPT reports not_editable", async () => {
+  // T2 added coverage: previously only no_active_element was asserted; the
+  // not_editable branch (focused element exists but isn't a text field) is
+  // a separate hint string and also surfaces field_unreadable.
+  const t = new ScriptedTransport();
+  t.defaultTargetUrl = "https://dashboard.stripe.com/api-keys";
+  t.readResult = { ok: false, reason: "not_editable" };
+  const cdp = new CdpClient(t);
+  await assert.rejects(
+    () => captureFromTarget(cdp, "T-1", "focused-field", "dashboard.stripe.com"),
+    (e: unknown) => {
+      assert.ok(e instanceof ShuttleError);
+      assert.equal(e.code, "bootstrap_capture_field_unreadable");
+      assert.match(
+        (e as ShuttleError).message,
+        /not a text field/,
+        "not_editable branch must surface the text-field hint",
+      );
+      return true;
+    },
   );
 });
 

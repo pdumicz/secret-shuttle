@@ -159,12 +159,16 @@ test("registry total entry count (sanity check)", () => {
   // Burst 4 pre-launch review adds 1 more (bootstrap_browser_busy — emitted
   // when two concurrent bootstrap batches try to share the daemon-owned
   // browser) = 140 total.
+  // Burst 4 Tier 2 cleanup T2 adds 1 more (bootstrap_capture_field_unreadable —
+  // split from bootstrap_capture_redirect_blocked for the three non-redirect
+  // "field state unreadable" cases: no_active_element, not_editable, and
+  // mode mismatch in either direction) = 141 total.
   // Note: daemon_start_failed was removed (P3.1) — it was registered but never
   // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 140, `expected 140 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 141, `expected 141 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -241,6 +245,19 @@ test("error-codes: bootstrap_capture_redirect_blocked registered with CONFLICT +
     /expected host/i,
     "hint should reference the expected host",
   );
+});
+
+test("bootstrap_capture_field_unreadable → CONFLICT exit + field-focus hint", () => {
+  // T2 split: the three non-redirect failure modes of captureFromTarget
+  // (no_active_element, not_editable, mode mismatch) now surface as this
+  // code instead of bootstrap_capture_redirect_blocked. The hint must
+  // point the user at the focused-field recovery, not the redirect one.
+  const entry = lookupErrorCode("bootstrap_capture_field_unreadable");
+  assert.ok(entry);
+  assert.equal(entry.exitCode, EXIT_CODE_CONFLICT);
+  assert.match(entry.hint("") ?? "", /focused field/i);
+  const next = entry.nextAction ? entry.nextAction("") : null;
+  assert.strictEqual(next, null, "no automatic recovery — human must focus the field");
 });
 
 test("error-codes: bootstrap_browser_busy registered with CONFLICT + null nextAction", () => {
