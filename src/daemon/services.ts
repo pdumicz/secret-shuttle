@@ -22,6 +22,24 @@ import { PendingCapturesRegistry } from "./bootstrap/pending-captures.js";
 import type { KeychainAdapter } from "../vault/keychain/types.js";
 import { ShuttleError } from "../shared/errors.js";
 
+/**
+ * A lease handle returned by reserveBootstrapBrowser. Opaque to callers —
+ * pass it back to releaseBootstrapBrowser to clear the reservation. Two
+ * reservations from the same batch produce DIFFERENT leases (in practice
+ * the second one throws bootstrap_batch_busy), so a stale release from a
+ * duplicate /continue cannot clear an active lease held by the original.
+ *
+ * The `handle` is a monotonically-increasing counter from DaemonServices —
+ * it is unique within a single daemon process. Across process restarts the
+ * counter resets, but reservations don't persist across restarts either,
+ * so the invariant ("only the exact lease that holds the slot can release
+ * it") holds end-to-end.
+ */
+export interface BootstrapBrowserLease {
+  readonly batchId: string;
+  readonly handle: number;
+}
+
 export interface UnlockSession {
   id: string;
   ui_token: string;
@@ -244,14 +262,27 @@ export class DaemonServices {
    * reservation closes that race window — synchronous claim BEFORE
    * requireApprovals.
    *
+   * Lease shape: { batchId, handle } where handle is a unique counter value
+   * issued at reserve-time. releaseBootstrapBrowser is handle-guarded so a
+   * stale release from a duplicate /continue (which fast-failed with
+   * bootstrap_batch_busy and never got its own lease) cannot clear the
+   * active lease held by the original /continue.
+   *
    * States:
    *  - null: no batch holds the resource
-   *  - { batchId }: held by this batch (either spawning or spawned)
+   *  - { batchId, handle }: held by this lease (either spawning or spawned)
    *
-   * Cleared by releaseBootstrapBrowser(batchId) — typically in the /continue
+   * Cleared by releaseBootstrapBrowser(lease) — typically in the /continue
    * outer finally, after stopBootstrapBrowser (or skipping if user-owned).
    */
-  private bootstrapBrowserReservation: { batchId: string } | null = null;
+  private bootstrapBrowserReservation: BootstrapBrowserLease | null = null;
+
+  /**
+   * Monotonically-increasing counter used to issue unique lease handles.
+   * Process-local; resets on daemon restart (which also clears any in-flight
+   * reservations, so the uniqueness invariant holds end-to-end).
+   */
+  private nextReservationHandle = 1;
 
   constructor(opts: DaemonServicesOptions = {}) {
     // Production: real openUrl (which honors SECRET_SHUTTLE_NO_OPEN_URL=1
@@ -266,23 +297,32 @@ export class DaemonServices {
   }
 
   /**
-   * Synchronously reserve the bootstrap browser slot for this batch. Throws
-   * bootstrap_browser_busy if another batch already holds (reserved or owned)
-   * the slot. Idempotent for the SAME batchId (a retry can reclaim).
+   * Synchronously reserve the bootstrap browser slot. Returns a lease that
+   * MUST be passed to releaseBootstrapBrowser to clear the slot.
+   *
+   * Throws `bootstrap_browser_busy` when a DIFFERENT batch already owns or
+   * holds the slot.
+   *
+   * Throws `bootstrap_batch_busy` when the SAME batch already holds a lease
+   * — i.e. a concurrent same-batch /continue. This mirrors the per-batch
+   * execution lock model: the executor is already serialized via
+   * bootstrapStore.tryAcquireExecutionLock, and we serialize the
+   * approval-and-spawn phase here so the lease is never held twice for a
+   * single batch. (If we silently re-reserved instead, two same-batch
+   * /continue calls would produce a "lease" that points to the original's
+   * cycle — and any release from the duplicate would then clear the
+   * original's reservation, reopening the cross-batch race.)
+   *
+   * Pair with `releaseBootstrapBrowser(lease)` in an outer finally. The
+   * lease handle is unique, so a stale release from a duplicate /continue
+   * (which fast-failed with bootstrap_batch_busy and never got its own
+   * lease — passes null to the finally) cannot clear an active lease.
    *
    * Call BEFORE requireApprovals in /continue so the approval is preserved
-   * across cross-batch collisions. Pair with releaseBootstrapBrowser in the
-   * outer finally.
-   *
-   * This closes the cross-batch double-spawn race: ensureBootstrapBrowser's
-   * null-check is awaited (not synchronous), so two batches starting from
-   * a null services.browserSession would both pass the slot-only precheck,
-   * both consume approvals, then race into ensureBootstrapBrowser with the
-   * last writer winning — leaking one Chrome process and orphaning the
-   * loser's approval. The synchronous reservation here happens BEFORE any
+   * across cross-batch collisions: the synchronous throw happens BEFORE any
    * await, so a losing batch fails BEFORE its approval is consumed.
    */
-  reserveBootstrapBrowser(batchId: string): void {
+  reserveBootstrapBrowser(batchId: string): BootstrapBrowserLease {
     // If the slot is held by an active (already-spawned) bootstrap session for
     // a different batch, that's the existing-session collision — same error.
     if (
@@ -294,29 +334,43 @@ export class DaemonServices {
         `Another bootstrap batch (${this.browserSession.owner.batchId}) is already driving the daemon-owned browser. Retry after that batch completes.`,
       );
     }
-    // If the reservation is held by another batch (spawning in flight), same error.
-    if (
-      this.bootstrapBrowserReservation !== null &&
-      this.bootstrapBrowserReservation.batchId !== batchId
-    ) {
+    // Any active reservation blocks. Same-batch is bootstrap_batch_busy
+    // (concurrent /continue on the same batch — serialize at the reservation
+    // layer, symmetric with the per-batch execution lock); different-batch
+    // is bootstrap_browser_busy.
+    if (this.bootstrapBrowserReservation !== null) {
+      const other = this.bootstrapBrowserReservation.batchId;
+      if (other === batchId) {
+        throw new ShuttleError(
+          "bootstrap_batch_busy",
+          `Batch ${batchId} is already being processed; wait for the current /continue to finish before retrying.`,
+        );
+      }
       throw new ShuttleError(
         "bootstrap_browser_busy",
-        `Another bootstrap batch (${this.bootstrapBrowserReservation.batchId}) is reserving the daemon-owned browser. Retry after that batch completes.`,
+        `Another bootstrap batch (${other}) is reserving the daemon-owned browser. Retry after that batch completes.`,
       );
     }
-    // Reserve / re-reserve for this batch.
-    this.bootstrapBrowserReservation = { batchId };
+    const lease: BootstrapBrowserLease = { batchId, handle: this.nextReservationHandle++ };
+    this.bootstrapBrowserReservation = lease;
+    return lease;
   }
 
   /**
-   * Synchronously release the reservation. Idempotent. Tolerates batchId
-   * mismatch (silent no-op — the outer finally always tries to release,
-   * even on paths where no reservation was actually made).
+   * Release a previously-issued lease. Handle-guarded: clears the reservation
+   * only if THIS exact lease still owns it. A stale release (e.g. a duplicate
+   * /continue that fast-failed before the original spawn finished) is a
+   * silent no-op — the original's lease is preserved.
+   *
+   * Idempotent (calling twice with the same lease is a no-op on the second
+   * call), and safe to call on a path where no reservation was made (the
+   * caller passes null and skips the call, but the function itself would
+   * also no-op on a stale lease).
    */
-  releaseBootstrapBrowser(batchId: string): void {
+  releaseBootstrapBrowser(lease: BootstrapBrowserLease): void {
     if (
       this.bootstrapBrowserReservation !== null &&
-      this.bootstrapBrowserReservation.batchId === batchId
+      this.bootstrapBrowserReservation.handle === lease.handle
     ) {
       this.bootstrapBrowserReservation = null;
     }

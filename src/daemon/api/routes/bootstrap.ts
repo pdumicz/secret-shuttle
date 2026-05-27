@@ -9,7 +9,7 @@ import { parseBootstrapYml } from "../../../cli/bootstrap/yml.js";
 import { computeBootstrapPlan } from "../../bootstrap/plan.js";
 import { executeBatch, type ExecutorDeps } from "../../bootstrap/executor.js";
 import type { DaemonServer } from "../../server.js";
-import type { DaemonServices } from "../../services.js";
+import type { BootstrapBrowserLease, DaemonServices } from "../../services.js";
 import type { ApprovalBinding } from "../../approvals/store.js";
 import type { BatchState, PlanEntry } from "../../bootstrap/store.js";
 
@@ -262,16 +262,24 @@ export function registerBootstrapRoutes(
     // reserveBootstrapBrowser runs SYNCHRONOUSLY, so the second caller hits
     // it BEFORE its approval is consumed: the loser fails with
     // bootstrap_browser_busy and its grant is preserved for the user's retry
-    // after batch A finishes. Pair with releaseBootstrapBrowser in the
-    // outermost finally so it runs after stopBootstrapBrowser releases the
-    // session, even on throw paths (requireApprovals failure, lock-acquire
-    // failure, executor exception).
+    // after batch A finishes.
+    //
+    // LEASE MODEL: reserveBootstrapBrowser returns a unique lease handle.
+    // releaseBootstrapBrowser(lease) is handle-guarded — clears the slot
+    // ONLY if that exact lease still owns it. This closes a follow-up race:
+    // a duplicate same-batch /continue (which now throws bootstrap_batch_busy
+    // synchronously) leaves `lease === null` in its scope, so its outer
+    // finally is a no-op and the ORIGINAL /continue's lease is preserved.
+    // Same-batch concurrent reserve also rejects with bootstrap_batch_busy
+    // (symmetric with the per-batch execution lock), so the approval-and-spawn
+    // phase is serialized end-to-end.
     //
     // The reservation also rejects when an existing bootstrap session is
     // owned by a different batch — same semantics as the old precheck, just
     // unified through one primitive.
+    let lease: BootstrapBrowserLease | null = null;
     if (hasCapture) {
-      services.reserveBootstrapBrowser(batchId);
+      lease = services.reserveBootstrapBrowser(batchId);
     }
 
     try {
@@ -376,11 +384,17 @@ export function registerBootstrapRoutes(
       // Release the bootstrap-browser reservation LAST — outer-most finally.
       // Covers both the happy path and any throw inside the try (including
       // requireApprovals failure pre-lock-acquire, lock-acquire failure, and
-      // any executor exception). releaseBootstrapBrowser is idempotent and
-      // batchId-guarded, so calling on the precheck-throw path (where no
-      // reservation was made, e.g. blind_mode_already_active) is a no-op.
-      if (hasCapture) {
-        services.releaseBootstrapBrowser(batchId);
+      // any executor exception).
+      //
+      // Handle-guarded: releaseBootstrapBrowser clears the slot ONLY if this
+      // exact lease still owns it. The `lease !== null` check covers the path
+      // where reserveBootstrapBrowser itself threw (cross-batch
+      // bootstrap_browser_busy, or same-batch bootstrap_batch_busy from a
+      // duplicate concurrent /continue) — in that scope `lease` is null and
+      // the finally is a no-op, preserving the active lease held by the
+      // original /continue.
+      if (lease !== null) {
+        services.releaseBootstrapBrowser(lease);
       }
     }
   });

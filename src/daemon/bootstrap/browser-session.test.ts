@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DaemonServices } from "../services.js";
+import type { BootstrapBrowserLease } from "../services.js";
 import { ShuttleError } from "../../shared/errors.js";
 import type {
   BrowserSession,
@@ -327,13 +328,19 @@ test("stopBootstrapBrowser: SIGKILL fallback fires if SIGTERM never exits in tim
 });
 
 // ---------------------------------------------------------------------------
-// reserveBootstrapBrowser / releaseBootstrapBrowser
+// reserveBootstrapBrowser / releaseBootstrapBrowser (LEASE MODEL)
 // ---------------------------------------------------------------------------
 //
 // These synchronous primitives close the cross-batch double-spawn race the
 // old slot-only precheck missed. /continue calls reserveBootstrapBrowser
 // SYNCHRONOUSLY before requireApprovals so a losing batch fails BEFORE its
 // approval is consumed.
+//
+// Reservation now returns a unique LEASE (batchId + monotonic handle).
+// releaseBootstrapBrowser(lease) is handle-guarded — clears the slot ONLY
+// if that exact lease still owns it. This prevents a duplicate same-batch
+// /continue's outer finally from clearing the ORIGINAL /continue's still-
+// active reservation.
 
 test("reserveBootstrapBrowser: throws bootstrap_browser_busy when a different batch holds the reservation", () => {
   const services = new DaemonServices();
@@ -351,41 +358,89 @@ test("reserveBootstrapBrowser: throws bootstrap_browser_busy when a different ba
   );
 });
 
-test("reserveBootstrapBrowser: same batchId is idempotent (re-reserve is a no-op)", () => {
+test("reserveBootstrapBrowser: same batchId concurrent reservation throws bootstrap_batch_busy", () => {
+  // LEASE MODEL CHANGE: same-batch re-reserve is no longer idempotent. A
+  // duplicate /continue while another /continue for the same batch is
+  // already mid-flight throws bootstrap_batch_busy, symmetric with the
+  // per-batch execution lock model. This prevents two same-batch /continue
+  // calls from both "holding" the slot, where a stale release from the
+  // duplicate would clear the active lease held by the original.
   const services = new DaemonServices();
   services.reserveBootstrapBrowser("batch-A");
-  // Re-reserving for the same batchId must NOT throw — retry-after-crash
-  // and within-batch resume both need this.
-  services.reserveBootstrapBrowser("batch-A");
-  services.reserveBootstrapBrowser("batch-A");
-  // Sanity check — still rejects a different batch.
+  assert.throws(
+    () => services.reserveBootstrapBrowser("batch-A"),
+    (e: unknown) => {
+      assert.ok(e instanceof ShuttleError);
+      assert.equal(e.code, "bootstrap_batch_busy");
+      return true;
+    },
+  );
+});
+
+test("reserveBootstrapBrowser: returns a unique lease handle per reservation", () => {
+  // Sanity check on lease uniqueness: after release + re-reserve, the new
+  // lease's handle differs from the prior one. (Same batchId, different
+  // cycle → different handle.) This is what makes releaseBootstrapBrowser
+  // safe under duplicate /continue scenarios.
+  const services = new DaemonServices();
+  const leaseA1 = services.reserveBootstrapBrowser("batch-A");
+  services.releaseBootstrapBrowser(leaseA1);
+  const leaseA2 = services.reserveBootstrapBrowser("batch-A");
+  assert.notEqual(leaseA1.handle, leaseA2.handle, "lease handle must be unique per reservation");
+  assert.equal(leaseA1.batchId, "batch-A");
+  assert.equal(leaseA2.batchId, "batch-A");
+  services.releaseBootstrapBrowser(leaseA2);
+});
+
+test("releaseBootstrapBrowser: handle-guarded (stale release from duplicate /continue does not clear active lease)", () => {
+  // The exact race the lease model closes:
+  //
+  // /continue A reserves(batch-A) → leaseA. /continue A is still mid-spawn.
+  // /continue B (also batch-A) tries to reserve and would throw
+  // bootstrap_batch_busy synchronously. If B somehow held a stale "lease"
+  // (e.g. from a fabricated handle), passing it to release MUST NOT clear
+  // A's reservation.
+  const services = new DaemonServices();
+  const leaseA = services.reserveBootstrapBrowser("batch-A");
+
+  // Simulate a stale lease (different handle, same batchId).
+  const staleLease: BootstrapBrowserLease = { batchId: "batch-A", handle: leaseA.handle + 999 };
+  services.releaseBootstrapBrowser(staleLease); // no-op
+
+  // The original lease's batch is still reserved — different-batch reserve
+  // still blocked.
   assert.throws(
     () => services.reserveBootstrapBrowser("batch-B"),
     (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_browser_busy",
   );
-});
 
-test("releaseBootstrapBrowser: clears reservation; mismatched batchId is a no-op", () => {
-  const services = new DaemonServices();
-  services.reserveBootstrapBrowser("batch-A");
-  // Mismatched release must NOT clear A's reservation — defends against a
-  // stale finally from an aborted batch killing the live batch's claim.
-  services.releaseBootstrapBrowser("batch-B");
-  assert.throws(
-    () => services.reserveBootstrapBrowser("batch-C"),
-    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_browser_busy",
-  );
-  // Now release properly — the slot is free.
-  services.releaseBootstrapBrowser("batch-A");
-  services.reserveBootstrapBrowser("batch-C"); // must not throw
+  // Real release with the correct lease clears the slot.
+  services.releaseBootstrapBrowser(leaseA);
+  const leaseB = services.reserveBootstrapBrowser("batch-B"); // succeeds
+  services.releaseBootstrapBrowser(leaseB);
 });
 
 test("releaseBootstrapBrowser: idempotent (no-op when no reservation exists)", () => {
+  // Outer-finally release on a path where the reservation was already
+  // cleared (or never made) must not blow up. The function silently no-ops
+  // when there's no reservation OR the handle doesn't match.
   const services = new DaemonServices();
-  // Outer-finally release on a path where no reservation was made (e.g. the
-  // C10 blind_mode_already_active throw) must not blow up.
-  services.releaseBootstrapBrowser("batch-A");
-  services.releaseBootstrapBrowser("batch-A");
+  const phantomLease: BootstrapBrowserLease = { batchId: "batch-A", handle: 42 };
+  services.releaseBootstrapBrowser(phantomLease);
+  services.releaseBootstrapBrowser(phantomLease);
+});
+
+test("releaseBootstrapBrowser: double-release of the same lease is a no-op on the second call", () => {
+  // Calling release(lease) twice with the same lease: first call clears the
+  // slot, second call is a no-op (lease.handle no longer matches
+  // bootstrapBrowserReservation, which is now null).
+  const services = new DaemonServices();
+  const leaseA = services.reserveBootstrapBrowser("batch-A");
+  services.releaseBootstrapBrowser(leaseA);
+  services.releaseBootstrapBrowser(leaseA); // must not blow up
+  // Slot is free — a fresh reserve succeeds.
+  const leaseB = services.reserveBootstrapBrowser("batch-B");
+  services.releaseBootstrapBrowser(leaseB);
 });
 
 test("reserveBootstrapBrowser: throws when an existing bootstrap session is from a different batch", () => {
@@ -413,12 +468,13 @@ test("reserveBootstrapBrowser: tolerates a pre-existing user-owned session (no t
   // collisions still work).
   const services = new DaemonServices();
   services.browserSession = makeStubSession({ owner: { kind: "user" } });
-  services.reserveBootstrapBrowser("batch-A"); // must not throw
+  const lease = services.reserveBootstrapBrowser("batch-A"); // must not throw
   // And a second batch is still rejected via the reservation.
   assert.throws(
     () => services.reserveBootstrapBrowser("batch-B"),
     (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_browser_busy",
   );
+  services.releaseBootstrapBrowser(lease);
 });
 
 test("ensureBootstrapBrowser: respects reservation held by a different batch (defense-in-depth)", async () => {
@@ -464,4 +520,54 @@ test("ensureBootstrapBrowser: own batch's reservation does NOT block its own spa
   assert.equal(factoryCalls, 1);
   assert.equal(services.browserSession, got);
   assert.deepEqual(got.owner, { kind: "bootstrap", batchId: "batch-A" });
+});
+
+test("releaseBootstrapBrowser: a fast-failing duplicate same-batch /continue does NOT clear the original lease", () => {
+  // The EXACT scenario the reviewer described:
+  //
+  // 1. /continue A reserves(batch-X) → leaseA (handle=1).
+  // 2. /continue B (also batch-X) attempts to reserve → throws
+  //    bootstrap_batch_busy. B's caller scope has lease=null.
+  // 3. B's outer finally: `if (lease !== null) release(lease)` — skipped.
+  // 4. A is still mid-spawn. A's leaseA is preserved.
+  // 5. /continue C (batch-Y) tries to reserve → blocked by A's lease.
+  //
+  // Without the lease model (old batchId-keyed release): B's finally would
+  // call release(batchId=X), which under the prior idempotent semantics
+  // would clear the reservation. /continue C would then succeed, racing A
+  // into ensureBootstrapBrowser and reopening the cross-batch double-spawn
+  // window.
+  const services = new DaemonServices();
+  const leaseA = services.reserveBootstrapBrowser("batch-X");
+
+  // B fails to reserve.
+  let bError: unknown;
+  let bLease: BootstrapBrowserLease | null = null;
+  try {
+    bLease = services.reserveBootstrapBrowser("batch-X");
+  } catch (e) {
+    bError = e;
+  }
+  assert.ok(bError instanceof ShuttleError);
+  assert.equal((bError as ShuttleError).code, "bootstrap_batch_busy");
+  assert.equal(bLease, null, "B did not receive a lease — its finally must be a no-op");
+
+  // B's finally: release whatever lease it got (which is null, so no-op).
+  if (bLease !== null) services.releaseBootstrapBrowser(bLease);
+
+  // Cross-batch reserve still blocked by A's lease — the critical invariant.
+  assert.throws(
+    () => services.reserveBootstrapBrowser("batch-Y"),
+    (e: unknown) => {
+      assert.ok(e instanceof ShuttleError);
+      assert.equal(e.code, "bootstrap_browser_busy");
+      assert.match(e.message, /batch-X/, "A's batch must still appear as the holder");
+      return true;
+    },
+  );
+
+  // Cleanup: A finishes, releases its lease, and the slot is free.
+  services.releaseBootstrapBrowser(leaseA);
+  const leaseY = services.reserveBootstrapBrowser("batch-Y");
+  services.releaseBootstrapBrowser(leaseY);
 });
