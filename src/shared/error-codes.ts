@@ -292,6 +292,16 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
       "Another bootstrap batch owns the daemon-owned browser. Wait for it to finish, then retry.",
     nextAction: () => null,
   },
+  daemon_rotate_in_progress: {
+    // CONFLICT: another /v1/daemon/rotate call is mid-flight. Rotate mutates
+    // file + socket + in-memory token state in sequence, and two concurrent
+    // rotates would interleave those writes (and also race on the shared
+    // root-token.tmp path). Fail-fast and let the second caller retry once
+    // the in-flight rotate releases.
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "Retry after the in-flight rotate completes.",
+    nextAction: () => null,
+  },
   secret_exists: {
     exitCode: EXIT_CODE_CONFLICT,
     hint: () => "Re-run with --force to overwrite.",

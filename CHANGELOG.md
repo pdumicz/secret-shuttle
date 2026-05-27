@@ -21,6 +21,7 @@
 - `Secret.value` and `CaptureResult.value` remain JS strings, lingering in heap until GC. End-to-end Buffer refactor is the named follow-up plan 5q.
 - Per-(machine, runtime) agent_ids — all of a user's projects share the same daemon-perspective identity per runtime. Per-project granularity is opt-in via `secret-shuttle agent mint`; auto-derived per-project support is plan 5s.
 - No per-agent token denylist or expiry; revocation is global via `daemon rotate`. Plan 5r covers granular revocation.
+- Template binaries (wrangler, vercel, gh, etc.) are validated against argv stability only at template-author time. A future CI guard (plan 5l) will catch major-version bumps that break bootstrap before they ship.
 
 ### Added
 - Structured error contract: every CLI error now emits both the legacy nested `error: { code, message }` block AND flat agent-friendly fields (`error_code`, `message`, `hint`, `exit_code`). `hint` is the literal recovery command (or null when the human must intervene); `exit_code` follows Sol convention (0 success, 1 transient, 2 usage, 3 not-found, 4 permission, 5 conflict).

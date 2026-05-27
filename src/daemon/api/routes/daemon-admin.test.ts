@@ -250,6 +250,53 @@ test("POST /v1/daemon/reset-machine-id: root-only, regenerates file, does NOT in
   });
 });
 
+test("POST /v1/daemon/rotate: concurrent rotates → second caller fails with daemon_rotate_in_progress", async () => {
+  // Two concurrent rotate calls must NOT interleave file + socket + in-memory
+  // writes. The route-level mutex (rotateInProgress flag) is a fail-fast gate
+  // — the first caller wins and runs to completion; the second is rejected
+  // immediately with the daemon_rotate_in_progress code. We fire both with
+  // Promise.all and the original (pre-rotate) bearer; both pass auth before
+  // the first call's replaceRootToken swap because auth resolves
+  // synchronously off `this.token` and only mutates inside the handler.
+  await withDaemon(async (ctx) => {
+    const [a, b] = await Promise.all([
+      callWithBearer(ctx, ctx.token, "POST", "/v1/daemon/rotate"),
+      callWithBearer(ctx, ctx.token, "POST", "/v1/daemon/rotate"),
+    ]);
+    const results = [a, b];
+
+    // Exactly one must succeed (200). The other must fail with the new
+    // conflict code. Ordering of which physical fetch() lands first is
+    // non-deterministic so we partition by status, not by index.
+    const successes = results.filter((r) => r.status === 200);
+    const failures = results.filter((r) => r.status !== 200);
+    assert.equal(
+      successes.length,
+      1,
+      `exactly one rotate must succeed; got statuses ${a.status}/${b.status} bodies=${JSON.stringify(results.map((r) => r.body))}`,
+    );
+    assert.equal(failures.length, 1, "exactly one rotate must be rejected");
+    const failureCode = (failures[0]!.body as { error: { code: string } }).error.code;
+    assert.equal(
+      failureCode,
+      "daemon_rotate_in_progress",
+      `second concurrent rotate must surface daemon_rotate_in_progress; got: ${failureCode} body=${JSON.stringify(failures[0]!.body)}`,
+    );
+
+    // Sanity: after the gate releases, a fresh rotate (with the post-rotate
+    // token from the socket file) is allowed. Proves the finally-clause
+    // actually clears rotateInProgress.
+    const sf = await readSocketFile();
+    assert.notEqual(sf, null);
+    const after = await callWithBearer(ctx, sf!.token, "POST", "/v1/daemon/rotate");
+    assert.equal(
+      after.status,
+      200,
+      `rotate must succeed after the gate releases, got ${after.status} body=${JSON.stringify(after.body)}`,
+    );
+  });
+});
+
 test("POST /v1/daemon/rotate: audit row carries old + new root_token_fp (T4 continuity)", async () => {
   // T4 regression: the daemon_rotate audit row must record BOTH the pre-rotate
   // fingerprint (root_token_fp_prev) AND the post-rotate one (root_token_fp).

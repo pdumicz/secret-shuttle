@@ -163,12 +163,15 @@ test("registry total entry count (sanity check)", () => {
   // split from bootstrap_capture_redirect_blocked for the three non-redirect
   // "field state unreadable" cases: no_active_element, not_editable, and
   // mode mismatch in either direction) = 141 total.
+  // Burst 4 Tier 2 review fix adds 1 more (daemon_rotate_in_progress —
+  // emitted by /v1/daemon/rotate when a concurrent rotate is already
+  // mid-flight) = 142 total.
   // Note: daemon_start_failed was removed (P3.1) — it was registered but never
   // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 141, `expected 141 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 142, `expected 142 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {

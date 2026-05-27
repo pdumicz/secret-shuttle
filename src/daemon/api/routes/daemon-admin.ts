@@ -36,6 +36,15 @@ import { writeDaemonAudit } from "../../audit.js";
 import { getShuttlePaths } from "../../../shared/config.js";
 
 export function registerDaemonAdmin(server: DaemonServer, daemonPortRef: () => number): void {
+  // Per-server-instance gate that serializes /v1/daemon/rotate. Closed over
+  // by the route handler below. Rotate mutates file + socket + in-memory
+  // token state in sequence; two concurrent rotates would interleave those
+  // writes and could leave them three-way divergent. Defense-in-depth
+  // complements the per-call random temp path in rotateRootToken (so even
+  // if a stale crash-recovery or test artifact wrote root-token.tmp, the
+  // live rotate's temp file would not collide).
+  let rotateInProgress = false;
+
   server.addRoute("POST", "/v1/daemon/rotate", async () => {
     const ctx = getAuthContext();
     if (ctx?.isRoot !== true) {
@@ -49,12 +58,24 @@ export function registerDaemonAdmin(server: DaemonServer, daemonPortRef: () => n
       });
       throw new ShuttleError("unauthorized", "daemon rotate is root-only.");
     }
-    // NOTE: rotate is operator-initiated and low-frequency — no serialization
-    // guard. Concurrent /v1/daemon/rotate calls could interleave the file +
-    // socket + in-memory writes, leaving them three-way divergent. If that
-    // becomes a real concern, add a simple Promise-based mutex around the
-    // try-block below.
-    //
+    // Fail-fast on concurrent rotates. Matches the pattern used by
+    // bootstrap_batch_busy / bootstrap_browser_busy — simpler than
+    // queueing, and clearer for callers (the second rotate is almost
+    // always a duplicate operator click rather than a meaningful retry).
+    if (rotateInProgress) {
+      await writeDaemonAudit({
+        action: "daemon_rotate",
+        ok: false,
+        actor_agent_id: "root",
+        error_code: "daemon_rotate_in_progress",
+      });
+      throw new ShuttleError(
+        "daemon_rotate_in_progress",
+        "Another daemon-rotate operation is in progress. Retry after it completes.",
+      );
+    }
+    rotateInProgress = true;
+
     // Capture the OLD root-token fingerprint BEFORE any mutation so we can
     // record it on BOTH the success and failure audit rows (forensics: lets
     // audit-log readers chain `tokens_mint` rows minted under this generation
@@ -90,6 +111,10 @@ export function registerDaemonAdmin(server: DaemonServer, daemonPortRef: () => n
         root_token_fp_prev: oldFp,
       });
       throw err;
+    } finally {
+      // Always release — both success and failure paths must clear the gate
+      // so subsequent rotates can proceed.
+      rotateInProgress = false;
     }
   });
 

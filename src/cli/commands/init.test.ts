@@ -809,14 +809,40 @@ test("init: one runtime's /v1/tokens/mint failure does not halt the others; summ
 
       // agent_runtimes_failed must contain exactly one entry — the runtime
       // whose mint threw on its first call.
+      //
+      // Each entry must carry { runtime, error_code, message, hint } so the
+      // partial-failure summary is actionable without cross-referencing the
+      // registry. The summary must also carry partial_failure: true so new
+      // readers don't have to inspect failed[].length themselves.
       const runtimesFailed = result.agent_runtimes_failed as
-        | Array<{ runtime: string; error_code: string }>
+        | Array<{ runtime: string; error_code: string; message: string; hint: string | null }>
         | undefined;
       assert.ok(
         Array.isArray(runtimesFailed) && runtimesFailed.length === 1,
         `agent_runtimes_failed must have exactly 1 entry, got: ${JSON.stringify(runtimesFailed)}`,
       );
       assert.equal(runtimesFailed![0]!.error_code, "agent_token_invalid");
+      assert.equal(
+        typeof runtimesFailed![0]!.message,
+        "string",
+        "failed entry must include a string message",
+      );
+      assert.ok(
+        runtimesFailed![0]!.message.length > 0,
+        "failed entry message must be non-empty",
+      );
+      // hint comes from the registry: agent_token_invalid has a string hint.
+      // The contract is "string OR null" — accept both shapes.
+      const hint = runtimesFailed![0]!.hint;
+      assert.ok(
+        hint === null || typeof hint === "string",
+        `failed entry hint must be string or null, got: ${JSON.stringify(hint)}`,
+      );
+      assert.equal(
+        result.partial_failure,
+        true,
+        "summary must set partial_failure: true when failed[] is non-empty",
+      );
 
       // Both runtimes must still be detected even after one failure.
       const detected = result.agent_runtimes_detected as string[];

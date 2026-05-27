@@ -668,6 +668,62 @@ test("capture branch: FAILURE (redirect_blocked) → cleanup attempted; behaves 
   assert.equal(final?.step_results["NEXT_SECRET"]?.ok, true);
 });
 
+// ── Test 6b — FAILURE (field_unreadable at capture time) → behaves like redirect ──
+
+// Pins the contract that bootstrap_capture_field_unreadable hits the same
+// executor branch as bootstrap_capture_redirect_blocked (see executor.ts:725 —
+// the "FAILURE + verified, non-abort" branch CONTINUEs). The C13 UI route
+// comment in bootstrap-capture-ui.ts calls this out explicitly ("behaves like
+// redirect"); this test stops a future refactor from accidentally segregating
+// the two codes without anyone noticing.
+test("capture branch: FAILURE (field_unreadable) → cleanup attempted; behaves like redirect (continue)", async (t) => {
+  t.after(drainCleanups);
+  const fx = await setupFixture();
+
+  await fx.store.save({
+    batch_id: "b-field-unreadable",
+    approval_id: "a",
+    plan_file_path: "/tmp",
+    plan: [
+      { secret: "STRIPE_KEY", ref: "ss://local/prod/STRIPE_KEY", source: { kind: "capture", url: "https://dashboard.stripe.com/login" }, destinations: [] },
+      { secret: "NEXT_SECRET", ref: "ss://local/prod/NEXT_SECRET", source: { kind: "random_32_bytes" }, destinations: [] },
+    ],
+    step_results: {},
+    created_at: Date.now(),
+    status: "pending",
+    owner_agent_id: "daemon",
+  });
+
+  const driveCapture = (async (): Promise<void> => {
+    for (let i = 0; i < 200; i++) {
+      const ev = fx.services.hubBroker.lastBootstrapCaptureStep;
+      if (ev !== null) {
+        // The C13 raw UI route rejects with field_unreadable when host is
+        // correct but the focused field / selection state does not match.
+        // Surface the same code here.
+        fx.services.pendingCaptures.rejectByToken(ev.capture_token, new ShuttleError("bootstrap_capture_field_unreadable", "no focused field on the capture tab"));
+        return;
+      }
+      await new Promise<void>((r) => setImmediate(r));
+    }
+  })();
+
+  let generateCalled = 0;
+  await executeBatch(fx.store, "b-field-unreadable", makeDeps(fx.services, {
+    generateSecret: (async () => { generateCalled += 1; return { generated: true, secret_ref: "ss://local/prod/NEXT_SECRET", name: "NEXT_SECRET", environment: "production", fingerprint: "fp", value_visible_to_agent: false as const }; }) as ExecutorDeps["generateSecret"],
+  }));
+  await driveCapture;
+
+  assert.equal(fx.services.blind.current(), null);
+  const final = await fx.store.get("b-field-unreadable");
+  assert.equal(final?.step_results["STRIPE_KEY"]?.error_code, "bootstrap_capture_field_unreadable");
+  // Cleanup was attempted — at least one Target.closeTarget call observed.
+  assert.ok(fx.transport.sentMethods.includes("Target.closeTarget"), "cleanup must call Target.closeTarget");
+  // Behaves like redirect: continue to next entry.
+  assert.equal(generateCalled, 1, "field_unreadable is a continue — next entry must execute");
+  assert.equal(final?.step_results["NEXT_SECRET"]?.ok, true);
+});
+
 // ── Test 7 — FAILURE (any) + cleanup NOT verified → STOP ────────────────────
 
 test("capture branch: FAILURE (any) + cleanup NOT verified → blind stays active + cleanup_failed; STOP", async (t) => {

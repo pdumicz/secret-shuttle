@@ -4,6 +4,7 @@ import { readSocketFile } from "../../daemon/socket-file.js";
 import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
 import { ShuttleError } from "../../shared/errors.js";
+import { lookupErrorCode } from "../../shared/error-codes.js";
 import { detectAgentRuntimes, type AgentRuntime } from "../agent-runtime-detect.js";
 import { agentInstallTarget, readBundledSkill } from "./agent.js";
 import { getSecretShuttleHome } from "../../shared/config.js";
@@ -222,7 +223,12 @@ export function initCommand(): Command {
       // emitted so the user can re-run init after the daemon writes the file.
       const configured: string[] = [];
       const pendingManual: string[] = [];
-      const failed: Array<{ runtime: string; error_code: string }> = [];
+      const failed: Array<{
+        runtime: string;
+        error_code: string;
+        message: string;
+        hint: string | null;
+      }> = [];
       const nextActions: string[] = [];
       if (runtimes.length > 0) {
         const machineId = await readMachineId(getSecretShuttleHome());
@@ -249,14 +255,31 @@ export function initCommand(): Command {
               // others. Without this, a mid-loop mint failure would halt init
               // with a stack trace and leave the user with partial state and
               // no signal (some runtimes installed, others not).
+              //
+              // Enrich the entry with message + hint so a partial-failure
+              // summary is actionable on its own — agents shouldn't have to
+              // cross-reference the error-code registry to know what to do
+              // next.
+              const code = err instanceof ShuttleError ? err.code : "unexpected_error";
+              const message = err instanceof Error ? err.message : String(err);
+              const registryEntry = lookupErrorCode(code);
+              const hint = registryEntry?.hint(message) ?? null;
               failed.push({
                 runtime,
-                error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+                error_code: code,
+                message,
+                hint,
               });
             }
           }
         }
       }
+      // partial_failure: true makes a mixed outcome (some runtimes configured,
+      // others failed) unmissable for new readers. We deliberately keep
+      // exit_code=0 so existing automation that inspects `configured` /
+      // `failed` continues to work — flipping the exit code is a higher
+      // blast-radius change. See review note on this fix.
+      const partialFailure = failed.length > 0;
 
       // Step 6: Emit summary.
       outputJson(
@@ -271,6 +294,7 @@ export function initCommand(): Command {
           agent_runtimes_configured: configured,
           agent_runtimes_pending_manual: pendingManual,
           agent_runtimes_failed: failed,
+          partial_failure: partialFailure,
           next_actions: nextActions,
           next_action: vaultJustCreated
             ? "secret-shuttle import --env-file .env  # optional: migrate existing secrets"

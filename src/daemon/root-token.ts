@@ -49,7 +49,12 @@ export async function rotateRootToken(shuttleHome: string): Promise<string> {
   const file = path.join(shuttleHome, ROOT_TOKEN_FILE);
   await mkdir(shuttleHome, { recursive: true });
   const t = randomBytes(32).toString("base64url");
-  const tmp = `${file}.tmp`;
+  // Per-call random suffix so the temp path is unique. The route-level
+  // mutex in daemon-admin.ts already serializes /v1/daemon/rotate, but
+  // this is defense-in-depth: if anything else writes the legacy fixed
+  // `root-token.tmp` (a stale crash-recovery artifact, a test, etc.),
+  // the in-flight rotate won't collide on the same path.
+  const tmp = `${file}.tmp.${randomBytes(8).toString("hex")}`;
   await writeFile(tmp, t, { mode: 0o600 });
   await rename(tmp, file);
   return t;
