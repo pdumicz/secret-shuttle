@@ -2021,24 +2021,84 @@ export function validateDestinationDefiningParamsCoverage(
 
 The function takes a `TemplateRegistry` instance — the real registry is a class with a `list()` method (see `src/daemon/templates/registry.ts:47`). No module-level `TEMPLATES` constant exists. The startup wiring (Task 2a.6) imports the module-scoped registry from `src/daemon/api/routes/templates.ts:25` directly — `DaemonServices` has no `templates` field (verified at `services.ts`).
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Add `sessionDefiningParams` to the `TemplateDefinition` interface**
+
+Open `src/daemon/templates/registry.ts`. Find the `TemplateDefinition` interface at line 7. Add the optional field at the end (before the closing brace):
+
+```ts
+  /**
+   * Burst 5 §2: keys of `template_params` whose values determine WHERE
+   * the secret is pushed. Provision-derived sessions stamp these onto
+   * SessionPattern.required_params so the matcher cannot widen consent
+   * to a different destination. `name` is universally destination-
+   * defining (the env-var / secret name set at the provider).
+   *
+   * Templates without this field are excluded from provision-derived
+   * sessions (fail-closed) and produce a startup-time warning. See
+   * src/daemon/templates/destination-defining-params.ts.
+   */
+  sessionDefiningParams?: readonly string[];
+```
+
+- [ ] **Step 5: Declare `sessionDefiningParams` on each built-in template**
+
+Edit each file under `src/daemon/templates/builtin/` to add the field. Concrete diffs (apply to each):
+
+```diff
+ // src/daemon/templates/builtin/vercel-env-add.ts
+   id: "vercel-env-add",
+   required_params: ["name", "environment"],
++  sessionDefiningParams: ["name", "environment"] as const,
+```
+
+```diff
+ // src/daemon/templates/builtin/github-actions-secret-set.ts
+   id: "github-actions-secret-set",
+   required_params: ["name", "repo"],
++  sessionDefiningParams: ["name", "repo"] as const,
+```
+
+```diff
+ // src/daemon/templates/builtin/cloudflare-secret-put.ts
+   id: "cloudflare-secret-put",
+   required_params: ["name"],
++  sessionDefiningParams: ["name", "env"] as const,
+```
+
+```diff
+ // src/daemon/templates/builtin/supabase-edge-secret-set.ts
+   id: "supabase-edge-secret-set",
+   required_params: ["name"],
++  sessionDefiningParams: ["name", "project_ref"] as const,
+```
+
+Notice that `cloudflare-secret-put` and `supabase-edge-secret-set` declare a `sessionDefiningParams` superset of `required_params`. That's correct — `env` and `project_ref` are consumed via `additionalArgs` (which is why `required_params` doesn't list them) but they ARE destination-defining (they change *where* the secret lands).
+
+- [ ] **Step 6: Run tests**
 
 Run: `npm test -- --test-name-pattern "DESTINATION_DEFINING_PARAMS\|destination-defining"`
-Expected: all 7 tests pass.
+Expected: all 7 tests pass — including the derivation-from-per-template test and the warning-path test.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/daemon/templates/destination-defining-params.ts src/daemon/templates/destination-defining-params.test.ts
-git commit -m "feat(templates): DESTINATION_DEFINING_PARAMS config + startup coverage validator (4 shipped templates)"
+git add \
+  src/daemon/templates/destination-defining-params.ts \
+  src/daemon/templates/destination-defining-params.test.ts \
+  src/daemon/templates/registry.ts \
+  src/daemon/templates/builtin/vercel-env-add.ts \
+  src/daemon/templates/builtin/github-actions-secret-set.ts \
+  src/daemon/templates/builtin/cloudflare-secret-put.ts \
+  src/daemon/templates/builtin/supabase-edge-secret-set.ts
+git commit -m "feat(templates): per-template sessionDefiningParams + derived DESTINATION_DEFINING_PARAMS (single source of truth) + warning-path test"
 ```
 
 ---
 
-### Task 2a.6: Wire startup hook in `registry.ts` or daemon `main.ts`
+### Task 2a.6: Wire startup hook in `src/daemon/api/router.ts`
 
 **Files:**
-- Modify: `src/daemon/main.ts` (or the daemon's entry point)
+- Modify: `src/daemon/api/router.ts` (default — see Step 2 for the alternative site at `src/daemon/main.ts`)
 
 - [ ] **Step 1: Confirm the template registry location**
 
@@ -2074,7 +2134,10 @@ Expected: daemon starts cleanly, no warnings logged (all 4 templates registered 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/daemon/main.ts
+# Default site:
+git add src/daemon/api/router.ts
+# OR if you went with the alternative site:
+# git add src/daemon/main.ts
 git commit -m "feat(daemon): call validateDestinationDefiningParamsCoverage on startup"
 ```
 
@@ -3355,17 +3418,39 @@ test("active matching session silently satisfies a template-run requireApprovals
 
 test("expired session skipped during auto-match — falls through to approval prompt", async () => {
   // Construct a session whose expires_at is in the past; requireApprovals
-  // without --no-wait should now block on a fresh mint (test by passing
-  // waitMs: 1 and asserting approval_timeout, or by using --no-wait
-  // semantics and asserting approval_required).
+  // with --no-wait semantics should throw approval_required for that
+  // binding (Phase 1 didn't auto-match → Phase 2 mints fresh).
 });
 
-test("max_uses race retry-once: session is consumed mid-plan → fall through to mint", async () => {
-  // Mint a session with max_uses: 1. Consume it via a parallel call (or
-  // bump `uses` directly on the grant). The new requireApprovals call
-  // should see the candidate, attempt to plan it as kind:"session", and
-  // when mintFromSession throws (or returns null) because uses === max_uses,
-  // retry the candidate lookup once and then fall through to kind:"mint".
+test("auto-matched session whose uses exhausted between Phase 1 and Phase 2 is demoted to mint", async () => {
+  // Pin per the resolveSessionRaces algorithm (no retry-and-rethrow):
+  //   1. Set up max_uses=1 session that matches the binding.
+  //   2. Run requireApprovals with --no-wait. Phase 1 plans the session.
+  //   3. BEFORE the simulated Phase 2 commit, consume the session via a
+  //      direct ApprovalStore.mintFromSession() call (simulates a
+  //      concurrent caller racing in).
+  //   4. resolveSessionRaces runs; canMatchSession still returns true
+  //      but sess.uses === sess.max_uses, so the entry is demoted to
+  //      kind:"mint".
+  //   5. Assert the resulting requireApprovals outcome includes a mint
+  //      approval (under --no-wait: approval_required with details.approvals
+  //      containing the binding) NOT a session_uses_exhausted-style throw.
+});
+
+test("explicit --session for a non-matching session is demoted to mint (not throw)", async () => {
+  // Pass opts.sessionId of a session whose pattern doesn't match the
+  // binding. resolveSessionRaces sees canMatchSession === false and
+  // demotes to kind:"mint". The resulting behavior is a fresh approval
+  // mint, matching the spec ("explicit --session for non-matching session
+  // falls back to per-op approval").
+});
+
+test("session-uses-counter is tracked across N bindings in one call", async () => {
+  // 2 bindings, 1 session with max_uses=1. Phase 1 plans the session for
+  // binding[0]; bumps plannedAutoSessionUsesById; binding[1]'s candidate
+  // filter sees `uses + planned >= max_uses` and skips, plans kind:"mint".
+  // resolveSessionRaces is a no-op (no race condition since both decisions
+  // were made in the same Phase 1).
 });
 ```
 
@@ -3487,40 +3572,65 @@ function planFromAutoMatchedSession(
 
 Add `const plannedAutoSessionUsesById = new Map<string, number>();` just above the Phase-1 binding loop (alongside the existing `plannedSessionUses = 0` counter at line 112).
 
-6. **Race handling** at Phase 2: the existing Step-2 `canMatchSession` re-check (line 329) already covers the "pattern stopped matching" race. For the more-specific `uses === max_uses` race, wrap the `mintFromSession` call (line 344) with a one-shot retry **only for auto-matched entries** (telling them apart from explicit-sessionId entries via a Phase-1 flag or by checking `opts.sessionId === undefined`):
+6. **Race resolution — pinned algorithm (executable, no choose-your-own-implementation):**
+
+**Pin:** detect every potentially-raced `kind: "session"` plan entry BEFORE any irreversible commit, and demote each one to `kind: "mint"` in-place. The existing Phase 2 mint-and-wait loop then handles those bindings via the normal fresh-approval flow. No retry-and-rethrow at commit time. No structured signal to outer callers. Both auto-matched and explicit-sessionId entries are subject to the same demotion (matches the spec's "explicit `--session` for a non-matching session falls back to per-op approval").
+
+Add `resolveSessionRaces(plans, sessionStore, store)` between Phase 1 (build `plans`) and Phase 2 (commit). It runs after the `plannedAutoSessionUsesById` map is fully populated; at that point, every `kind: "session"` entry has been planned but no side effect has fired. The function mutates `plans` in place:
 
 ```ts
-if (p.kind === "session") {
-  try {
-    sessionGrants.set(i, opts.store.mintFromSession(p.sessionId, p.binding, opts.sessionStore!));
-  } catch (err) {
-    // Auto-matched plan entries get a single retry. Explicit-sessionId entries
-    // (user passed --session) fall through as today.
-    if (opts.sessionId === undefined && isMaxUsesExhausted(err)) {
-      const retry = planFromAutoMatchedSession(
-        p.binding, opts.sessionStore!, callerAgentId, Date.now(),
-        plannedAutoSessionUsesById,
-        new Set([p.sessionId]),
-      );
-      if (retry !== null) {
-        sessionGrants.set(i, opts.store.mintFromSession(retry.sessionId, retry.binding, opts.sessionStore!));
-        continue;
-      }
-      // Auto-match exhausted — fall through to fresh mint for this binding.
-      // Implementation detail: depends on how the existing function handles
-      // per-binding fall-through. Easiest path: throw a structured signal
-      // (`session_auto_match_exhausted`) and let the outer caller retry the
-      // whole gate without `sessionStore` for this binding's binding-set,
-      // OR re-plan inline by converting this entry to kind:"mint" and
-      // re-running the Phase 2 mint flow for just this binding. Pick whichever
-      // fits the existing function shape with the least churn.
+function resolveSessionRaces(
+  plans: Plan[],
+  sessionStore: SessionStore,
+  store: ApprovalStore,
+): void {
+  for (let i = 0; i < plans.length; i++) {
+    const p = plans[i];
+    if (p === undefined || p.kind !== "session") continue;
+
+    // Two failure modes demote a session entry to mint:
+    //   (a) canMatchSession returns false (pattern stopped matching —
+    //       could be revoked/expired/edited concurrently)
+    //   (b) the session's effective remaining uses ≤ 0 because some
+    //       other call consumed the slot we were planning to take.
+    //
+    // We deliberately do NOT attempt to re-auto-match here. Auto-match
+    // happened in Phase 1; re-running it would race against the same
+    // sessions we already filtered. Demote and let Phase 2 mint.
+    const stillMatches = store.canMatchSession(p.sessionId, p.binding, sessionStore);
+    const sess = sessionStore.list().find((s) => s.id === p.sessionId);
+    const exhausted =
+      sess === undefined ||
+      (sess.max_uses !== undefined && sess.uses >= sess.max_uses);
+
+    if (!stillMatches || exhausted) {
+      plans[i] = { kind: "mint", binding: p.binding };
     }
-    throw err;
   }
 }
 ```
 
-`isMaxUsesExhausted(err)` checks whether the thrown error is the specific "session uses exhausted" error code from `ApprovalStore.mintFromSession` — grep the implementation to find the actual code name.
+Call site: right before the existing Phase 2 step-2 `canMatchSession` re-check loop (around `require-approvals.ts:325`):
+```ts
+// BURST 5 §2 race resolution — runs BEFORE Phase 2 commits anything.
+// After this call, every plans[i].kind === "session" entry is guaranteed
+// to commit successfully; demoted entries become kind:"mint" and flow
+// through the existing fresh-approval path.
+if (opts.sessionStore !== undefined) {
+  resolveSessionRaces(plans, opts.sessionStore, opts.store);
+}
+```
+
+**Phase 2 simplification:** the existing step-2 `canMatchSession` re-verify (line 329) becomes belt-and-suspenders — `resolveSessionRaces` already handled the demotion. Keep the existing check as a defensive guard; if it now fails, that's a bug in `resolveSessionRaces` (e.g., a race during the same event-loop tick), and the existing throw is the right defense.
+
+**The `mintFromSession` call at line 344** runs unchanged. No try/catch wrapper. No retry. No fallback. If it ever throws here, that's an invariant violation — `resolveSessionRaces` was supposed to catch it.
+
+**Mint loop for demoted entries:** Phase 2's existing `kind: "mint"` loop processes the demoted entries alongside the original mints. Same mint-and-wait semantics, same hub popup. No new code path.
+
+**Tests** must exercise both auto-matched and explicit-sessionId race demotion:
+- "auto-matched session whose uses exhausted between Phase 1 and Phase 2 is demoted to mint" — Phase 1 plans against a session with max_uses=1; another caller consumes the slot; assert the binding ends up with a fresh approval prompt, not a thrown error.
+- "explicit --session <id> for a non-matching session is demoted to mint" — pass `--session sess_X` where the session does not match; assert the binding mints fresh (not throws `session_pattern_no_match`).
+- "session-uses-counter is correctly tracked across N bindings in one call" — N=2 bindings, max_uses=1 session: Phase 1 plans one session, one mint (via `plannedAutoSessionUsesById` filter); no race occurs.
 
 - [ ] **Step 3: Run tests**
 
