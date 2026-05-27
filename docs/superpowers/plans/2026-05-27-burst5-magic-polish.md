@@ -14,7 +14,7 @@
 
 ## Code-Grounding Corrections (read first)
 
-This plan went through two review rounds against the actual codebase. The following API facts override anything the spec or earlier plan drafts implied:
+This plan went through three review rounds against the actual codebase. The following API facts override anything the spec or earlier plan drafts implied:
 
 - **Error-code registry shape** (`src/shared/error-codes.ts:9`) is `{ exitCode, hint(message), nextAction?(message) }`. **Messages live in `new ShuttleError("code", "msg")` call sites — NOT in the registry entry.** Constants `EXIT_CODE_USAGE`, `EXIT_CODE_NOT_FOUND`, `EXIT_CODE_CONFLICT` are exported from the same file.
 - **Bootstrap route payloads** (`src/daemon/api/routes/bootstrap.ts`): `POST /v1/bootstrap/plan` takes `{ plan_yml, force?, environment? }` (NOT `{ yml }`). The list endpoint is `GET /v1/bootstrap/list` (NOT `/v1/bootstrap/batches`).
@@ -27,6 +27,12 @@ This plan went through two review rounds against the actual codebase. The follow
 - **Session matcher entry point**: `matchesSessionPattern(binding, pattern)` at `src/daemon/approvals/session-matchers.ts:5` — single exported function that dispatches on action. The internal helpers (`templateRunMatches` etc.) are NOT exported. `ApprovalBinding.action` is stored as `"template"` and canonicalized to `"template-run"` by `canonicalAction()`.
 - **Template registry**: `TemplateRegistry` class with private `map` and `list()` method (`src/daemon/templates/registry.ts:37`). No module-level `TEMPLATES` constant. Helpers like `validateDestinationDefiningParamsCoverage` take a `TemplateRegistry` instance.
 - **`server.addRoute` body**: handlers receive ALREADY-PARSED JSON via `readJsonBody` (see `src/daemon/server.ts:223`). Use `asObject(raw)` + `reqString` / `optString` / `optBool` from `src/daemon/api/validate.ts`, matching the pattern in `bootstrap.ts:31`. **Do not call `JSON.parse(raw)`**.
+- **`parseSessionPatternFromBody`** (`src/daemon/api/routes/approvals-session.ts:103`) dereferences `const p = o.pattern` at line 110. **Every pattern field is read from `p`, NOT from the outer body `o`.** New fields (e.g. `required_params`) must read from `p`.
+- **`Plan` type in `require-approvals.ts:25`**: `kind: "session"` has no `sessionId` field today. Phase 2 reads `opts.sessionId!` at lines 329 and 344 (single-session-for-the-call assumption). Auto-match REQUIRES refactoring `Plan` to `{ kind: "session"; binding; sessionId: string }` so each per-binding plan entry can target its own session (auto-matched vs explicit). The explicit-sessionId path also gets updated to stamp `opts.sessionId` onto its plan entries.
+- **Template registry is module-scoped**: `export const registry = new TemplateRegistry()` at `src/daemon/api/routes/templates.ts:25`. `DaemonServices` has no `templates` field. The validator import is `import { registry as templateRegistry } from "./routes/templates.js"`; calls look like `validateDestinationDefiningParamsCoverage(templateRegistry)`.
+- **Audit log path** on `ShuttlePaths` is `auditLogPath` (`src/shared/config.ts:13,31`), **not `auditLog`**. Audit-route code reads `paths.auditLogPath`.
+- **CLI status route**: `secret-shuttle status` calls `GET /v1/health` at `src/cli/commands/status.ts:53`, **not `/v1/status`**. New status fields (`active_sessions[]`) belong on the health route (`src/daemon/api/routes/health.ts`). A separate `/v1/status` route exists but is unused by the CLI for the user-facing status command.
+- **Approval UI rendering model**: `GET /ui/approve` serves a static HTML file (`ui-server.ts:15-28`). The page fetches `/ui/approvals/:id?token=X` and renders client-side from JSON (`ui.html:104` — `await fetch(...).json()`). There is no server-side substitution path. The session-affordance footer extends the JSON returned by `GET /ui/approvals/:id` and is rendered client-side from that data.
 
 When a step's code snippet appears to disagree with these facts, the facts win — adjust the snippet inline before applying.
 
@@ -109,7 +115,7 @@ When a step's code snippet appears to disagree with these facts, the facts win �
 - `src/daemon/approvals/ui.html` — add the session-affordance footer block (default-unchecked checkbox + TTL dropdown + rendered pattern list).
 - `src/daemon/approvals/ui-html-drift.test.ts` — extend with affordance assertions.
 - `src/daemon/approvals/require-approvals.ts` — when no `approval_id` AND no `session_id` is supplied, perform auto-match lookup; pick most-recently-approved candidate; race-retry once on max_uses exhaustion.
-- `src/daemon/api/routes/status.ts` — add `active_sessions[]` field; owner-scoped.
+- `src/daemon/api/routes/health.ts` — add `active_sessions[]` field; owner-scoped. **(CLI hits `/v1/health`, not `/v1/status` — see `src/cli/commands/status.ts:53`.)**
 - `src/cli/commands/status.ts` — surface `active_sessions` in text mode.
 
 ### §4 — Audit + resume hint + discoverability
@@ -198,6 +204,24 @@ infer_yml_exists: {
   exitCode: EXIT_CODE_CONFLICT,
   hint: () => "Re-run with --force to overwrite, or --dry-run to stdout only.",
   nextAction: () => "secret-shuttle provision --infer --force",
+},
+// ── Audit-route codes (Task 4.6) ─────────────────────────────────────────────
+audit_window_invalid: {
+  exitCode: EXIT_CODE_USAGE,
+  hint: () => "Pass --since with format Ns/Nm/Nh/Nd (e.g., 5m, 1h, 1d).",
+},
+audit_batch_not_found: {
+  exitCode: EXIT_CODE_NOT_FOUND,
+  hint: () => null,
+},
+```
+
+Note: `command_renamed` is listed with `hint: () => null` and no `nextAction` above — the spec at §1 specifies `next_action` should point at `provision`, so update that entry to include the nextAction (matches the bootstrap-stub throw site):
+```ts
+command_renamed: {
+  exitCode: EXIT_CODE_USAGE,
+  hint: () => null,
+  nextAction: () => "secret-shuttle provision",
 },
 ```
 
@@ -1841,7 +1865,8 @@ const defaultLogger: Logger = {
 /**
  * Validate that every shipped template (every entry in the supplied
  * `TemplateRegistry`) has a registered entry in DESTINATION_DEFINING_PARAMS.
- * Called once at daemon startup with the daemon's `services.templates`.
+ * Called once at daemon startup with the module-scoped registry from
+ * src/daemon/api/routes/templates.ts (no `services.templates` field exists).
  * Emits a warning line for each missing entry — provision-derived
  * sessions for that template will be excluded (fail-closed).
  */
@@ -1882,20 +1907,29 @@ git commit -m "feat(templates): DESTINATION_DEFINING_PARAMS config + startup cov
 **Files:**
 - Modify: `src/daemon/main.ts` (or the daemon's entry point)
 
-- [ ] **Step 1: Find the daemon startup sequence and DaemonServices wiring**
+- [ ] **Step 1: Confirm the template registry location**
 
-Run: `grep -n "DaemonServices\|new TemplateRegistry\|services\.templates" src/daemon/services.ts src/daemon/main.ts 2>/dev/null | head -15`
+The shipped `TemplateRegistry` instance is module-scoped: `export const registry = new TemplateRegistry()` at `src/daemon/api/routes/templates.ts:25`. `DaemonServices` (`src/daemon/services.ts`) does **not** have a `templates` field. The validator call must import this `registry` directly, not look for `services.templates`.
 
-- [ ] **Step 2: Add the validator call passing the registry instance**
+Run: `grep -n "export const registry\|registerTemplatesRoute\|registerTemplates" src/daemon/api/routes/templates.ts src/daemon/api/router.ts | head -10`
 
-In whichever file constructs `DaemonServices` (probably `src/daemon/services.ts` or `src/daemon/main.ts` — the grep above will tell you), after the `TemplateRegistry` is instantiated and before the HTTP server begins listening:
+- [ ] **Step 2: Add the validator call at startup**
+
+The simplest wiring is to call the validator from `src/daemon/api/router.ts` (where every route is registered) right after `registerTemplatesRoutes` (or wherever the templates route is mounted). The router runs once per daemon process at startup, before any traffic.
+
+Edit `src/daemon/api/router.ts`:
 ```ts
-import { validateDestinationDefiningParamsCoverage } from "./templates/destination-defining-params.js";
-// ...where `services.templates` (a TemplateRegistry instance) is in scope:
-validateDestinationDefiningParamsCoverage(services.templates);
+import { registry as templateRegistry } from "./routes/templates.js";
+import { validateDestinationDefiningParamsCoverage } from "../templates/destination-defining-params.js";
+// ... (existing imports) ...
+
+// In the route-registration body, after registerTemplatesRoutes (or equivalent):
+validateDestinationDefiningParamsCoverage(templateRegistry);
 ```
 
-If services aren't grouped in a struct yet, pass the registry instance directly: `validateDestinationDefiningParamsCoverage(templateRegistry)`.
+Alternative (if the router doesn't feel like the right home): the validator call can live in `src/daemon/main.ts` immediately after `createServices()`, importing the same module-scoped registry. Either site is correct; the router is cheaper because it already imports from `routes/templates.ts`.
+
+**Do NOT** add a `templates` field to `DaemonServices` for this burst — that's a refactor unrelated to magic polish, and the module-scoped registry is already a stable de-facto singleton.
 
 - [ ] **Step 3: Build + run + smoke**
 
@@ -1978,19 +2012,33 @@ Expected: persistence test fails (field is dropped in the route's whitelist).
 
 - [ ] **Step 3: Add `required_params` to the whitelist in `parseSessionPatternFromBody`**
 
-Open `src/daemon/api/routes/approvals-session.ts` and find `parseSessionPatternFromBody` (line ~103). It already whitelist-shapes patterns. Add `required_params` to whatever shape the function builds. Concrete diff: where the function copies fields from the body object onto the pattern, add:
-```ts
-  ...(typeof o.required_params === "object" && o.required_params !== null
-    ? { required_params: o.required_params as Record<string, unknown> }
-    : {}),
-```
-(Cast to `Record<string, unknown>` so TypeScript doesn't reject — `assertSessionPatternValid` will narrow & validate.)
+Open `src/daemon/api/routes/approvals-session.ts` and find `parseSessionPatternFromBody` (line ~103). The function dereferences the pattern as `const p = o.pattern` at line 110 — every pattern field is read from `p`, NOT from the outer body `o`. **Read `required_params` from `p`** so operator-supplied constraints are not silently dropped:
 
-If the function constructs the SessionPattern via explicit field assignments, add:
 ```ts
-  required_params: o.required_params !== undefined ? (o.required_params as any) : undefined,
+  // After the existing per-field branches (template_ids, allowed_actions, etc.),
+  // and before the function builds the final SessionPattern object:
+  if (p.required_params !== undefined) {
+    if (
+      p.required_params === null ||
+      typeof p.required_params !== "object" ||
+      Array.isArray(p.required_params)
+    ) {
+      throw new ShuttleError("bad_request", "pattern.required_params must be an object.");
+    }
+    // Forward the raw object onto the SessionPattern; `assertSessionPatternValid`
+    // (called downstream by SessionStore.create / createForOwner) does the
+    // strict key-regex + string-value validation per Task 2a.2.
+  }
 ```
-…in the appropriate spot.
+
+In the section of `parseSessionPatternFromBody` that builds the returned `SessionPattern` literal, add:
+```ts
+  required_params: p.required_params as Record<string, string> | undefined,
+```
+
+(The cast is safe because the validator in step 2a.2 is the single source of truth for shape enforcement.)
+
+**Anti-pattern to avoid**: reading `o.required_params` directly — that's the outer body object, not the pattern. Operator-supplied constraints would be silently dropped, producing broader manual sessions than the operator intended.
 
 - [ ] **Step 4: Run tests**
 
@@ -2824,67 +2872,144 @@ git commit -m "feat(approval-ui): approve route mints session grants from BatchS
 
 ---
 
-### Task 2b.5: Add the session-affordance footer to `ui.html` + drift-guard test
+### Task 2b.5: Add the session-affordance to `ui.html` (client-side render) + extend the GET JSON
+
+**Real rendering model (verified):** `GET /ui/approve` serves a static `ui.html` (`src/daemon/approvals/ui-server.ts:15-28` — `res.end(await readFile(HTML_PATH, "utf8"))`, no substitution). The page then fetches its approval-grant data client-side: `ui.html:104` does `const r = await fetch('/ui/approvals/${id}?token=${token}'); const g = await r.json();` and renders from `g`. So the affordance must be a **client-side block** built from JSON returned by the `GET /ui/approvals/:id` route. There is no `__TOKEN__` substitution path to extend.
 
 **Files:**
-- Modify: `src/daemon/approvals/ui.html`
+- Modify: `src/daemon/approvals/ui-server.ts` (extend the `GET /ui/approvals/:id` JSON response)
+- Modify: `src/daemon/approvals/ui.html` (client-side renderer for the affordance footer)
 - Modify: `src/daemon/approvals/ui-html-drift.test.ts`
 
-- [ ] **Step 1: Read current ui.html**
+- [ ] **Step 1: Read current ui-server.ts JSON response and ui.html render block**
 
-Run: `wc -l src/daemon/approvals/ui.html && grep -n "form\|button\|approve\|deny" src/daemon/approvals/ui.html | head -20`
-
-- [ ] **Step 2: Add the affordance HTML**
-
-In `src/daemon/approvals/ui.html`, locate the approve/deny button form. Just above it, conditionally render the affordance when the approval action is `bootstrap` AND the derived pattern set is non-empty.
-
-Server-side: the approval-card template gets two new substitution tokens:
-- `__SESSION_AFFORDANCE_HTML__` — server-rendered chunk containing the checkbox + dropdown + pattern list (or empty string when not applicable).
-- `__SESSION_EXCLUDED_HTML__` — server-rendered notice for excluded destinations (or empty string).
-
-For an initial drop, hard-code the HTML structure in `ui-server.ts` where the template is loaded and substituted:
-```html
-<fieldset id="session-affordance" style="margin: 1em 0; padding: 0.75em; border: 1px solid #ddd;">
-  <label>
-    <input type="checkbox" id="session-on-approve" name="session_on_approve" />
-    Also approve any matching shape for the next
-    <select name="ttl_minutes" id="ttl-minutes">
-      <option value="5">5 min</option>
-      <option value="15" selected>15 min</option>
-      <option value="30">30 min</option>
-      <option value="60">60 min</option>
-    </select>
-  </label>
-  <p>This would let the same secret(s) be pushed again to the exact destinations below, within the time window:</p>
-  <ul id="session-pattern-list">
-    __PATTERN_LINES_HTML__
-  </ul>
-  <p>Different env-var names, environments, repos, or projects are NOT covered.</p>
-  <p style="font-size: 90%;">
-    Revoke any time: <code>secret-shuttle internal session revoke &lt;session-id&gt;</code>
-  </p>
-</fieldset>
+Run:
+```bash
+sed -n '30,75p' src/daemon/approvals/ui-server.ts        # GET /ui/approvals/:id JSON shape
+sed -n '95,180p' src/daemon/approvals/ui.html             # client-side load() + render
 ```
 
-And in `ui-server.ts` where the template is substituted, derive `__PATTERN_LINES_HTML__` from `inferSessionPatternFromPlan(batch.plan)` (call it server-side at GET-time for the approval card). Each line:
+- [ ] **Step 2: Extend the GET response with session-affordance data**
+
+In `src/daemon/approvals/ui-server.ts`, find the handler at line 30 — `GET /ui/approvals/:id`. It currently serializes the `ApprovalGrant`. When the grant's `action` is `"bootstrap"`, **additionally**:
+1. Look up the batch via `deps.bootstrap.get(grant.template_params.batch_id)`.
+2. Run `inferSessionPatternFromPlan(batch.plan, DEFAULT_TTL_MS)` to derive `{ patterns, excluded }`.
+3. Attach to the JSON response:
+   ```ts
+   session_affordance: {
+     patterns: patterns.map((p) => ({
+       template_id: p.template_ids?.[0] ?? null,
+       ref_glob: p.ref_glob,
+       required_params: p.required_params ?? {},
+     })),
+     excluded: excluded.map((x) => ({ secret: x.secret, template_id: x.template_id })),
+   }
+   ```
+4. When the grant action is anything other than `"bootstrap"`, OR when both `patterns` and `excluded` are empty, omit the field entirely (the client-side renderer hides the affordance).
+
+- [ ] **Step 3: Add the client-side render in `ui.html`**
+
+In the `load()` function (around line 104) after the existing `g.json()` is parsed, append a render call for the affordance. Insert markup into a dedicated `<div id="session-affordance">…</div>` placeholder (add the placeholder in the HTML structure just above the approve/deny buttons):
 ```html
-<li><code>{template_id}</code> &nbsp; <code>{ref_glob}</code> &nbsp; {required_params as k=v list}</li>
+<div id="session-affordance" hidden></div>
+<!-- existing approve/deny buttons unchanged below -->
 ```
 
-For excluded destinations, render a separate `<p>` block above the buttons.
+In the script block, after the existing per-action human-text rendering:
+```js
+function renderSessionAffordance(aff) {
+  const container = document.getElementById('session-affordance');
+  if (!aff || (aff.patterns.length === 0 && aff.excluded.length === 0)) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  const patternHtml = aff.patterns.map((p) =>
+    `<li><code>${esc(p.template_id ?? '?')}</code> &nbsp; <code>${esc(p.ref_glob)}</code> &nbsp; ${
+      Object.entries(p.required_params).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(', ')
+    }</li>`
+  ).join('');
+  const excludedHtml = aff.excluded.length === 0 ? '' :
+    `<p><em>Note: ${aff.excluded.length} destination(s) excluded (template not registered for session-derivation). Pushes to those destinations will require fresh approval each time.</em></p>`;
+  container.innerHTML = `
+    <fieldset style="margin: 1em 0; padding: 0.75em; border: 1px solid #ddd;">
+      <label>
+        <input type="checkbox" id="session-on-approve" />
+        Also approve any matching shape for the next
+        <select id="ttl-minutes">
+          <option value="5">5 min</option>
+          <option value="15" selected>15 min</option>
+          <option value="30">30 min</option>
+          <option value="60">60 min</option>
+        </select>
+      </label>
+      <p>This would let the same secret(s) be pushed again to the exact destinations below, within the time window:</p>
+      <ul>${patternHtml}</ul>
+      <p>Different env-var names, environments, repos, or projects are NOT covered.</p>
+      ${excludedHtml}
+      <p style="font-size: 90%;">Revoke any time: <code>secret-shuttle internal session revoke &lt;session-id&gt;</code></p>
+    </fieldset>
+  `;
+}
+// In load(): renderSessionAffordance(g.session_affordance);
+```
 
-The approve form's POST body now needs the checkbox state. The simplest implementation: client-side JS reads the checkbox + dropdown and includes `{ session: { ttl_minutes: N } }` in the POST body when checked. Existing forms in `ui.html` likely already use JS for the POST — find that block and extend it.
+In the existing approve-button click handler, read the checkbox state and include `session` in the body:
+```js
+const sessionCheck = document.getElementById('session-on-approve');
+const ttlSelect = document.getElementById('ttl-minutes');
+const body = {};
+if (sessionCheck && sessionCheck.checked && ttlSelect) {
+  body.session = { ttl_minutes: parseInt(ttlSelect.value, 10) };
+}
+await fetch(`/ui/approvals/${id}/approve?token=${token}`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(body),
+});
+```
 
-- [ ] **Step 3: Update the drift-guard test**
+(The route in Task 2b.4 reads this body via `readBoundedJson(..., { allowEmpty: true })` — empty/missing-`session` is the legacy unchecked path.)
 
-Extend `src/daemon/approvals/ui-html-drift.test.ts`:
+The existing `esc()` helper at top of the inline script provides HTML-escaping. Reuse it.
+
+- [ ] **Step 4: Update the drift-guard test**
+
+Extend `src/daemon/approvals/ui-html-drift.test.ts`. The affordance is rendered client-side from JSON, so the drift-guard asserts presence of the placeholder + the renderer function name in the inline script:
 ```ts
-test("ui.html contains session-affordance container", async () => {
+test("ui.html contains the session-affordance placeholder + renderer", async () => {
   const html = await readFile("src/daemon/approvals/ui.html", "utf8");
   assert.match(html, /id="session-affordance"/);
-  assert.match(html, /name="session_on_approve"/);
-  assert.match(html, /name="ttl_minutes"/);
-  assert.match(html, /__PATTERN_LINES_HTML__/);
+  // Renderer function is invoked from load()
+  assert.match(html, /renderSessionAffordance\s*\(/);
+  // Approve form posts session ttl_minutes when checkbox is checked
+  assert.match(html, /ttl_minutes/);
+});
+```
+
+Also add an integration-style test (in a separate file) asserting the GET JSON includes `session_affordance` for bootstrap-action grants:
+```ts
+// src/daemon/approvals/approval-ui-session-affordance.test.ts
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { withDaemonForTest, mintBootstrapApproval, call } from "../../test-helpers/daemon.js";
+
+test("GET /ui/approvals/:id of a bootstrap-action grant returns session_affordance with derived patterns", async () => {
+  await withDaemonForTest(async (ctx) => {
+    const { approvalId, uiToken } = await mintBootstrapApproval(ctx, /* multi-destination plan */);
+    const r = await call(ctx, "GET", `/ui/approvals/${approvalId}?token=${uiToken}`, null);
+    assert.ok(Array.isArray(r.session_affordance.patterns));
+    assert.ok(r.session_affordance.patterns.length >= 1);
+    assert.ok(Array.isArray(r.session_affordance.excluded));
+  });
+});
+
+test("GET /ui/approvals/:id of a non-bootstrap grant omits session_affordance", async () => {
+  await withDaemonForTest(async (ctx) => {
+    const { approvalId, uiToken } = await mintInjectSubmitApproval(ctx, /* shape */);
+    const r = await call(ctx, "GET", `/ui/approvals/${approvalId}?token=${uiToken}`, null);
+    assert.equal(r.session_affordance, undefined);
+  });
 });
 ```
 
@@ -2898,8 +3023,8 @@ Optional: run the daemon and hit `/ui/approvals/:id?token=...` in a browser to c
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/daemon/approvals/ui.html src/daemon/approvals/ui-html-drift.test.ts
-git commit -m "feat(approval-ui): session-affordance footer with checkbox + ttl dropdown + pattern list"
+git add src/daemon/approvals/ui-server.ts src/daemon/approvals/ui.html src/daemon/approvals/ui-html-drift.test.ts src/daemon/approvals/approval-ui-session-affordance.test.ts
+git commit -m "feat(approval-ui): session-affordance — GET JSON carries patterns; client-side render + ttl_minutes in approve POST"
 ```
 
 ---
@@ -2994,24 +3119,69 @@ test("max_uses race retry-once: session is consumed mid-plan → fall through to
 });
 ```
 
-- [ ] **Step 2: Add the auto-match logic — fit into the existing two-phase architecture**
+- [ ] **Step 2: Refactor the `Plan` type to carry `sessionId` per entry, then add auto-match logic**
 
-Open `src/daemon/approvals/require-approvals.ts`. Phase 1 builds an array of `Plan` entries (one per binding) — `synth` / `session` / `consume` / `mint`. The existing `session` kind is selected when `opts.sessionId` is supplied and matches. Auto-match adds the `session` kind *without* requiring an explicit `sessionId` — selected by scanning owned-active sessions whose pattern matches the binding.
+The existing `Plan` type at `src/daemon/approvals/require-approvals.ts:25` is:
+```ts
+type Plan =
+  | { kind: "synth"; binding: ApprovalBinding }
+  | { kind: "session"; binding: ApprovalBinding }
+  | { kind: "consume"; binding: ApprovalBinding; id: string }
+  | { kind: "mint"; binding: ApprovalBinding };
+```
 
-Locate the per-binding planning step in Phase 1 (after the `approvalIdsFromClient` matching attempt, before the `synth`/`mint` fallback). Insert an auto-match attempt that returns a `{ kind: "session", binding, sessionId }` plan entry if a candidate matches. Phase 2 already handles the `session` kind via the same `mintFromSession` (or equivalent) primitive used when `opts.sessionId` is supplied — reuse it.
+Today the `session` kind has **no `sessionId` field** — Phase 2 uses the singular `opts.sessionId!` at lines 329 and 344, which works when there's one explicit session for the whole call but breaks the moment we want per-plan sessions (auto-match selects potentially different sessions per binding). The refactor is **required**, not optional, for auto-match to work.
 
+Refactor steps:
+
+1. Change the `Plan` type:
+```ts
+type Plan =
+  | { kind: "synth"; binding: ApprovalBinding }
+  | { kind: "session"; binding: ApprovalBinding; sessionId: string }   // NEW: sessionId required on this branch
+  | { kind: "consume"; binding: ApprovalBinding; id: string }
+  | { kind: "mint"; binding: ApprovalBinding };
+```
+
+2. **Existing explicit-sessionId path** (Phase 1): when `opts.sessionId` is supplied and the binding matches, the plan entry now stamps that id: `plan.push({ kind: "session", binding, sessionId: opts.sessionId })`. Grep for the existing `kind: "session"` push site in `require-approvals.ts` and pass the id.
+
+3. **Phase 2 commit sites** at `require-approvals.ts:329` and `require-approvals.ts:344` currently dereference `opts.sessionId!`. Change both to read from the plan entry:
+```ts
+// Step 2: re-verify (line 329-ish):
+for (const p of plans) {
+  if (p.kind === "session") {
+    const ok = opts.store.canMatchSession(p.sessionId, p.binding, opts.sessionStore!);
+    if (!ok) {
+      throw new ShuttleError(
+        "session_pattern_no_match",
+        "Session pattern stopped matching between Phase 1 and Phase 2 (concurrent state change?).",
+      );
+    }
+  }
+}
+
+// Step 3: commit (line 344-ish):
+for (let i = 0; i < plans.length; i++) {
+  const p = plans[i]!;
+  if (p.kind === "session") {
+    sessionGrants.set(i, opts.store.mintFromSession(p.sessionId, p.binding, opts.sessionStore!));
+  }
+}
+```
+
+4. **Auto-match helper** (new) — selects a candidate and returns a `session` plan entry with its id:
 ```ts
 import { matchesSessionPattern } from "./session-matchers.js";
-// (use `callerAgentId` already captured at line 64; do not re-read getCurrentAgentId())
 
 function planFromAutoMatchedSession(
   binding: ApprovalBinding,
   sessionStore: SessionStore,
   ownerAgentId: string,
   now: number,
+  excludeIds: ReadonlySet<string> = new Set(),
 ): Plan | null {
-  // Candidate filter — owner-scoped, granted, not expired, has uses left
   const candidates = sessionStore.list()
+    .filter((s) => !excludeIds.has(s.id))
     .filter((s) => s.owner_agent_id === ownerAgentId)
     .filter((s) => s.status === "granted")
     .filter((s) => s.expires_at > now)
@@ -3020,11 +3190,6 @@ function planFromAutoMatchedSession(
 
   for (const candidate of candidates) {
     if (matchesSessionPattern(binding, candidate)) {
-      // Return a `session` plan referencing this candidate. The retry-once
-      // on max_uses race happens at commit time (Phase 2): if mintFromSession
-      // throws because uses raced to max_uses, Phase 2 re-runs the
-      // auto-match lookup once (skipping `candidate.id`) and either picks a
-      // sibling candidate or falls through to kind:"mint" for this binding.
       return { kind: "session", binding, sessionId: candidate.id };
     }
   }
@@ -3032,25 +3197,57 @@ function planFromAutoMatchedSession(
 }
 ```
 
-Wiring point: in the existing per-binding planning loop in Phase 1, after the "supplied ID" branch and before the synth/mint default, add:
+5. **Wiring**: in the existing per-binding planning loop in Phase 1, after the `approvalIdsFromClient` match attempt and before the `synth` / `mint` default, add:
 ```ts
-  // BURST 5 §2: auto-match owned active session when no explicit sessionId
+  // BURST 5 §2: auto-match an owned active session when no explicit sessionId is supplied.
   if (
     opts.sessionStore !== undefined &&
     opts.sessionId === undefined &&
-    callerAgentId !== "root"  // root requests skip session auto-match — keep predictable behavior for admin tooling
+    callerAgentId !== "root"
   ) {
-    const autoPlan = planFromAutoMatchedSession(binding, opts.sessionStore, callerAgentId, Date.now());
+    const autoPlan = planFromAutoMatchedSession(
+      binding, opts.sessionStore, callerAgentId, Date.now(),
+    );
     if (autoPlan !== null) {
       plan.push(autoPlan);
-      continue;  // next binding
+      continue;
     }
   }
 ```
 
-Phase 2 race handling: in the commit step where `kind: "session"` is consumed (existing code), wrap the `mintFromSession` call. If it throws because `uses === max_uses` (race condition — another caller used the last slot since we planned), re-run `planFromAutoMatchedSession` excluding the exhausted candidate. If the second attempt returns a plan, consume that. Otherwise fall through to fresh-mint for this binding (re-enter Phase 1's `kind: "mint"` path for just this binding — implementation detail: build a `kind: "mint"` plan entry on the fly and commit it via the existing mint-and-wait code path).
+6. **Race handling** at Phase 2: the existing Step-2 `canMatchSession` re-check (line 329) already covers the "pattern stopped matching" race. For the more-specific `uses === max_uses` race, wrap the `mintFromSession` call (line 344) with a one-shot retry **only for auto-matched entries** (telling them apart from explicit-sessionId entries via a Phase-1 flag or by checking `opts.sessionId === undefined`):
 
-(If the existing commit code does not cleanly support per-binding re-planning, the simplest fix is to surface a structured "race" outcome from the session commit and have the outer caller retry once. Document whichever approach lands in the implementation commit.)
+```ts
+if (p.kind === "session") {
+  try {
+    sessionGrants.set(i, opts.store.mintFromSession(p.sessionId, p.binding, opts.sessionStore!));
+  } catch (err) {
+    // Auto-matched plan entries get a single retry. Explicit-sessionId entries
+    // (user passed --session) fall through as today.
+    if (opts.sessionId === undefined && isMaxUsesExhausted(err)) {
+      const retry = planFromAutoMatchedSession(
+        p.binding, opts.sessionStore!, callerAgentId, Date.now(),
+        new Set([p.sessionId]),
+      );
+      if (retry !== null) {
+        sessionGrants.set(i, opts.store.mintFromSession(retry.sessionId, retry.binding, opts.sessionStore!));
+        continue;
+      }
+      // Auto-match exhausted — fall through to fresh mint for this binding.
+      // Implementation detail: depends on how the existing function handles
+      // per-binding fall-through. Easiest path: throw a structured signal
+      // (`session_auto_match_exhausted`) and let the outer caller retry the
+      // whole gate without `sessionStore` for this binding's binding-set,
+      // OR re-plan inline by converting this entry to kind:"mint" and
+      // re-running the Phase 2 mint flow for just this binding. Pick whichever
+      // fits the existing function shape with the least churn.
+    }
+    throw err;
+  }
+}
+```
+
+`isMaxUsesExhausted(err)` checks whether the thrown error is the specific "session uses exhausted" error code from `ApprovalStore.mintFromSession` — grep the implementation to find the actual code name.
 
 - [ ] **Step 3: Run tests**
 
@@ -3066,11 +3263,13 @@ git commit -m "feat(require-approvals): auto-match owned active sessions (most-r
 
 ---
 
-### Task 2b.7: `status` surfaces `active_sessions[]` (owner-scoped)
+### Task 2b.7: Surface `active_sessions[]` on the route the CLI actually calls
+
+**Route reality:** `secret-shuttle status` calls `GET /v1/health` (`src/cli/commands/status.ts:53` — `daemonRequest("GET", "/v1/health")`). The `/v1/health` handler lives in `src/daemon/api/routes/health.ts`. The separate `/v1/status` route in `src/daemon/api/routes/status.ts` exists but is not what the CLI uses — modifying it would not surface anything to the user.
 
 **Files:**
-- Modify: `src/daemon/api/routes/status.ts`
-- Modify: `src/cli/commands/status.ts`
+- Modify: `src/daemon/api/routes/health.ts` (add `active_sessions[]` field to the response)
+- Modify: `src/cli/commands/status.ts` (render `active_sessions` in text mode)
 - Create: `src/cli/commands/status-active-sessions.test.ts`
 
 - [ ] **Step 1: Write the failing test**
@@ -3081,7 +3280,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { withDaemonForTest, asAgent, call } from "../../test-helpers/daemon.js";
 
-test("status --json includes active_sessions[] for the calling agent", async () => {
+test("GET /v1/health includes active_sessions[] for the calling agent", async () => {
   await withDaemonForTest(async (ctx) => {
     await asAgent(ctx, "claude-abc", async () => {
       const s = await ctx.sessionStore.createForOwner({
@@ -3094,32 +3293,33 @@ test("status --json includes active_sessions[] for the calling agent", async () 
       }, "claude-abc");
       ctx.sessionStore.approve(s.id);
 
-      const status = await call(ctx, "GET", "/v1/status", null);
-      assert.ok(Array.isArray(status.active_sessions));
-      assert.equal(status.active_sessions.length, 1);
-      assert.equal(status.active_sessions[0].id, s.id);
-      assert.match(status.active_sessions[0].pattern_summary, /vercel-env-add/);
-      assert.match(status.active_sessions[0].pattern_summary, /name=STRIPE_KEY/);
+      const health = await call(ctx, "GET", "/v1/health", null);
+      assert.ok(Array.isArray(health.active_sessions));
+      assert.equal(health.active_sessions.length, 1);
+      assert.equal(health.active_sessions[0].id, s.id);
+      assert.match(health.active_sessions[0].pattern_summary, /vercel-env-add/);
+      assert.match(health.active_sessions[0].pattern_summary, /name=STRIPE_KEY/);
     });
   });
 });
 
-test("status active_sessions is owner-scoped (agent does not see other agents' sessions)", async () => {
+test("/v1/health active_sessions is owner-scoped", async () => {
   await withDaemonForTest(async (ctx) => {
-    await asAgent(ctx, "claude-abc", async () => {
-      await ctx.sessionStore.createForOwner({/* ... */} as any, "cursor-xyz"); // different owner
+    await asAgent(ctx, "cursor-xyz", async () => {
+      const other = await ctx.sessionStore.createForOwner(/* valid pattern */ {} as any, "cursor-xyz");
+      ctx.sessionStore.approve(other.id);
     });
     await asAgent(ctx, "claude-abc", async () => {
-      const status = await call(ctx, "GET", "/v1/status", null);
-      assert.equal(status.active_sessions.length, 0);
+      const health = await call(ctx, "GET", "/v1/health", null);
+      assert.equal(health.active_sessions.length, 0);
     });
   });
 });
 ```
 
-- [ ] **Step 2: Add the field to the status route**
+- [ ] **Step 2: Add the field to the health route**
 
-Open `src/daemon/api/routes/status.ts`. Find where the status response is built. Add:
+Open `src/daemon/api/routes/health.ts`. Find where the health-response object is built. Add the new field by computing it from the session store (the route registration in `router.ts` may need to pass `services.sessionStore` to the route — grep `grep -n "registerHealthRoute\|registerHealth" src/daemon/api/router.ts` to confirm the call site and extend the signature if needed):
 ```ts
   const currentAgent = getCurrentAgentId();
   const active_sessions = currentAgent
@@ -3170,8 +3370,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/daemon/api/routes/status.ts src/cli/commands/status.ts src/cli/commands/status-active-sessions.test.ts
-git commit -m "feat(status): surface owner-scoped active_sessions[] with pattern_summary + minutes_remaining"
+git add src/daemon/api/routes/health.ts src/daemon/api/router.ts src/cli/commands/status.ts src/cli/commands/status-active-sessions.test.ts
+git commit -m "feat(health): surface owner-scoped active_sessions[] on /v1/health (the route `secret-shuttle status` calls)"
 ```
 
 ---
@@ -3242,7 +3442,7 @@ test("bootstrap_step audit rows carry batch_id, source_kind, destination_shortha
   await withTempShuttleHome(async (paths) => {
     // Run a synthetic provision batch that has 1 entry pushing to 2 destinations
     const { batchId } = await runMiniBootstrap(/* ... */);
-    const log = await readFile(paths.auditLog, "utf8");
+    const log = await readFile(paths.auditLogPath, "utf8");
     const rows = log.trim().split("\n").map((l) => JSON.parse(l));
     const stepRow = rows.find((r) => r.action === "bootstrap_step");
     assert.ok(stepRow, "expected at least one bootstrap_step row");
@@ -3334,7 +3534,7 @@ import { withTempShuttleHome, runMiniBootstrap, runStandaloneTemplate } from "..
 test("template_run rows under bootstrapAuthority carry batch_id", async () => {
   await withTempShuttleHome(async (paths) => {
     const { batchId } = await runMiniBootstrap(/* ... */);
-    const log = await readFile(paths.auditLog, "utf8");
+    const log = await readFile(paths.auditLogPath, "utf8");
     const rows = log.trim().split("\n").map((l) => JSON.parse(l));
     const tmplRow = rows.find((r) => r.action === "template_run");
     assert.ok(tmplRow);
@@ -3345,7 +3545,7 @@ test("template_run rows under bootstrapAuthority carry batch_id", async () => {
 test("standalone template_run (no bootstrap) does NOT have batch_id", async () => {
   await withTempShuttleHome(async (paths) => {
     await runStandaloneTemplate(/* ... */);
-    const log = await readFile(paths.auditLog, "utf8");
+    const log = await readFile(paths.auditLogPath, "utf8");
     const tmplRow = log.trim().split("\n").map((l) => JSON.parse(l)).find((r) => r.action === "template_run");
     assert.ok(tmplRow);
     assert.equal(tmplRow.batch_id, undefined);
@@ -3598,7 +3798,7 @@ export function registerAuditSummaryRoute(server: DaemonServer, deps: { bootstra
 async function readAuditRows(): Promise<any[]> {
   const paths = getShuttlePaths();
   try {
-    const content = await readFile(paths.auditLog, "utf8");
+    const content = await readFile(paths.auditLogPath, "utf8");
     return content.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
   } catch {
     return [];
