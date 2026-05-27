@@ -12,6 +12,26 @@
 
 ---
 
+## Code-Grounding Corrections (read first)
+
+This plan went through two review rounds against the actual codebase. The following API facts override anything the spec or earlier plan drafts implied:
+
+- **Error-code registry shape** (`src/shared/error-codes.ts:9`) is `{ exitCode, hint(message), nextAction?(message) }`. **Messages live in `new ShuttleError("code", "msg")` call sites — NOT in the registry entry.** Constants `EXIT_CODE_USAGE`, `EXIT_CODE_NOT_FOUND`, `EXIT_CODE_CONFLICT` are exported from the same file.
+- **Bootstrap route payloads** (`src/daemon/api/routes/bootstrap.ts`): `POST /v1/bootstrap/plan` takes `{ plan_yml, force?, environment? }` (NOT `{ yml }`). The list endpoint is `GET /v1/bootstrap/list` (NOT `/v1/bootstrap/batches`).
+- **CLI error path** (`src/cli/index.ts:62`): commands **throw**; the top-level catch writes JSON to **stderr** and sets `process.exitCode`. Do NOT call `outputJson(errorToJson(err))` + `process.exit()` in command actions — that bypasses stderr conventions and deprecation-warning handling.
+- **`registerUiRoutes` signature** (`src/daemon/approvals/ui-server.ts:14`) is `(server, store: ApprovalStore)`. To mint sessions from the approve route this burst expands it to take `{ approvals, sessions, bootstrap }` (Task 2b.4). The caller in `src/daemon/api/router.ts:36` updates accordingly.
+- **Bootstrap batch_id on `ApprovalGrant`**: lives at `grant.template_params.batch_id` (set by `src/daemon/api/routes/bootstrap.ts:107`), NOT `grant.batch_id`.
+- **`SessionStore.revoke(id)`** is the method to flip a session to `revoked` status (`src/daemon/approvals/session-store.ts:69`). There is **no `delete` method**.
+- **Session fields**: `uses: number` (incremented on consume) and `max_uses?: number` (optional cap, 1..1000). There is no `uses_remaining`. The max-uses check is `s.max_uses === undefined || s.uses < s.max_uses`.
+- **`requireApprovals` option names** (`src/daemon/approvals/require-approvals.ts:12`): `approvalIdsFromClient` (NOT `approval_ids`), `sessionId` (NOT `session_id`), `sessionStore`. The function already implements a two-phase plan/commit architecture — auto-match is a new Phase-1 sub-case that emits `{ kind: "session", binding, sessionId }`, reusing Phase-2's existing session-commit primitive.
+- **Session matcher entry point**: `matchesSessionPattern(binding, pattern)` at `src/daemon/approvals/session-matchers.ts:5` — single exported function that dispatches on action. The internal helpers (`templateRunMatches` etc.) are NOT exported. `ApprovalBinding.action` is stored as `"template"` and canonicalized to `"template-run"` by `canonicalAction()`.
+- **Template registry**: `TemplateRegistry` class with private `map` and `list()` method (`src/daemon/templates/registry.ts:37`). No module-level `TEMPLATES` constant. Helpers like `validateDestinationDefiningParamsCoverage` take a `TemplateRegistry` instance.
+- **`server.addRoute` body**: handlers receive ALREADY-PARSED JSON via `readJsonBody` (see `src/daemon/server.ts:223`). Use `asObject(raw)` + `reqString` / `optString` / `optBool` from `src/daemon/api/validate.ts`, matching the pattern in `bootstrap.ts:31`. **Do not call `JSON.parse(raw)`**.
+
+When a step's code snippet appears to disagree with these facts, the facts win — adjust the snippet inline before applying.
+
+---
+
 ## Conventions
 
 - All imports use `.js` extensions even for TypeScript files (ESM requirement).
@@ -139,41 +159,54 @@
 
 Run: `grep -n "register\|export const" src/shared/error-codes.ts | head -20`
 
-- [ ] **Step 2: Add the 6 new codes (place alongside existing entries; preserve sort/grouping conventions of the file)**
+- [ ] **Step 2: Add the 6 new codes — matching the real registry shape**
 
-Add to the registry the following entries (use the existing per-entry shape — see how `bootstrap_plan_invalid` is registered at line 108 for the template):
+The registry shape (`ErrorCodeEntry` at `src/shared/error-codes.ts:9`) is:
+```ts
+{ exitCode: number; hint: (message: string) => string | null; nextAction?: (message: string) => string | null }
+```
+**Messages live in `new ShuttleError("code", "the message")` at call sites — NOT in the registry entry.** Constants `EXIT_CODE_USAGE`, `EXIT_CODE_NOT_FOUND`, `EXIT_CODE_CONFLICT` are exported from the same file (lines 1–7).
+
+Add inside the `REGISTRY` constant, preserving the existing grouping comments (Transient / Usage / Not-found / Permission / Conflict):
 
 ```ts
+// ── Usage (exit 2) ───────────────────────────────────────────────────────────
 command_renamed: {
-  message: (replacement: string) => `Command renamed. Use: ${replacement}`,
-  exit_code: 2, // USAGE
-  hint: null,
-},
-infer_no_env_example: {
-  message: "No .env.example found. Create one listing your secret names then re-run `secret-shuttle provision --infer`.",
-  exit_code: 3, // NOT_FOUND
-  hint: null,
-},
-infer_yml_exists: {
-  message: "./secret-shuttle.yml already exists. Re-run with --force to overwrite, or --dry-run to print to stdout only.",
-  exit_code: 5, // CONFLICT
-  hint: "secret-shuttle provision --infer --force",
+  exitCode: EXIT_CODE_USAGE,
+  hint: () => null,
+  // No nextAction — the message itself names the replacement verb.
 },
 provision_mode_conflict: {
-  message: (flags: string) => `Conflicting mode flags: ${flags}. Pass exactly one of --infer, --yml, --secret, --continue, --list, --abandon.`,
-  exit_code: 2,
-  hint: null,
+  exitCode: EXIT_CODE_USAGE,
+  hint: () => "Pass exactly one of: --infer, --yml, --secret, --continue, --list, --abandon.",
 },
 provision_no_mode: {
-  message: "No mode flag and no ./secret-shuttle.yml to default to. Pass --infer, --yml, --secret, --continue, --list, or --abandon.",
-  exit_code: 2,
-  hint: null,
+  exitCode: EXIT_CODE_USAGE,
+  hint: () => "Pass --infer, --yml, --secret, --continue, --list, or --abandon.",
 },
 session_ttl_exceeds_cap: {
-  message: (capMs: number) => `Session ttl_ms cannot exceed ${capMs}ms (${Math.round(capMs / 60_000)} minutes).`,
-  exit_code: 2,
-  hint: null,
+  exitCode: EXIT_CODE_USAGE,
+  hint: () => "Reduce ttl_minutes (max 60).",
 },
+// ── Not-found (exit 3) ───────────────────────────────────────────────────────
+infer_no_env_example: {
+  exitCode: EXIT_CODE_NOT_FOUND,
+  hint: () => "Create a .env.example listing your secret names, then re-run.",
+},
+// ── Conflict (exit 5) ────────────────────────────────────────────────────────
+infer_yml_exists: {
+  exitCode: EXIT_CODE_CONFLICT,
+  hint: () => "Re-run with --force to overwrite, or --dry-run to stdout only.",
+  nextAction: () => "secret-shuttle provision --infer --force",
+},
+```
+
+Throw-sites use the constructor for the human-readable message:
+```ts
+throw new ShuttleError(
+  "infer_no_env_example",
+  "No .env.example found in current directory. Create one listing your secret names then re-run `secret-shuttle provision --infer`.",
+);
 ```
 
 - [ ] **Step 3: Build and typecheck**
@@ -1002,13 +1035,12 @@ export function provisionCommand(): Command {
     .option("--force", "Overwrite existing yml (--infer only)");
   addApprovalIdOption(cmd);
   cmd.action(async (raw: ProvisionOpts) => {
-    try {
-      const mode = resolveMode(raw);
-      await dispatch(mode, raw);
-    } catch (err) {
-      outputJson(errorToJson(err));
-      process.exit((err as ShuttleError)?.exitCode ?? 1);
-    }
+    // Follow project convention: commands throw; src/cli/index.ts:62 catches
+    // ShuttleError, writes JSON to stderr, sets process.exitCode. Do NOT
+    // outputJson+process.exit here — that path bypasses the top-level
+    // deprecation-warning attachment and writes to stdout instead of stderr.
+    const mode = resolveMode(raw);
+    await dispatch(mode, raw);
   });
   return cmd;
 }
@@ -1042,16 +1074,23 @@ function resolveMode(opts: ProvisionOpts): Mode {
 
 async function dispatch(mode: Mode | "yml-default-or-no-mode", opts: ProvisionOpts): Promise<void> {
   if (mode === "yml-default-or-no-mode") {
-    // Check for default secret-shuttle.yml
+    // ENOENT check ONLY — don't let later daemon-side errors get remapped to
+    // provision_no_mode. The outer try would otherwise swallow a real
+    // daemon_not_running or vault_locked from runYmlMode.
+    let hasYml = false;
     try {
       await access("./secret-shuttle.yml");
-      return await runYmlMode("./secret-shuttle.yml", opts);
+      hasYml = true;
     } catch {
+      // missing file → fall through
+    }
+    if (!hasYml) {
       throw new ShuttleError(
         "provision_no_mode",
         "No mode flag and no ./secret-shuttle.yml to default to. Pass --infer, --yml, --secret, --continue, --list, or --abandon.",
       );
     }
+    return runYmlMode("./secret-shuttle.yml", opts);
   }
 
   switch (mode) {
@@ -1102,10 +1141,11 @@ async function runInferMode(opts: ProvisionOpts): Promise<void> {
 }
 
 async function runYmlMode(ymlPath: string, _opts: ProvisionOpts): Promise<void> {
-  // Hands off to the existing bootstrap plan route (unchanged server-side).
-  // The route still lives at /v1/bootstrap/plan — internal naming kept per spec.
+  // Hands off to the existing bootstrap plan route (server-side route name
+  // kept per spec; internal-only). Route body shape per
+  // src/daemon/api/routes/bootstrap.ts:32 is `{ plan_yml, force?, environment? }`.
   const ymlText = await import("node:fs/promises").then((m) => m.readFile(ymlPath, "utf8"));
-  const r = await daemonRequest("POST", "/v1/bootstrap/plan", { yml: ymlText });
+  const r = await daemonRequest("POST", "/v1/bootstrap/plan", { plan_yml: ymlText });
   outputJson(ok(r as Record<string, unknown>));
 }
 
@@ -1114,7 +1154,6 @@ async function runSecretMode(opts: ProvisionOpts): Promise<void> {
     throw new ShuttleError("missing_param", "--secret requires --from <kind> and --to <dest[,dest...]>.");
   }
   // Build a 1-secret yml in-memory.
-  const ref = `ss://local/prod/${opts.secret}`;
   const sourceBlock = buildSecretSource(opts);
   const dests = opts.to.split(",").map((d) => d.trim()).filter(Boolean);
   const yml = [
@@ -1125,7 +1164,7 @@ async function runSecretMode(opts: ProvisionOpts): Promise<void> {
     `    destinations:`,
     ...dests.map((d) => `      - ${d}`),
   ].join("\n") + "\n";
-  const r = await daemonRequest("POST", "/v1/bootstrap/plan", { yml });
+  const r = await daemonRequest("POST", "/v1/bootstrap/plan", { plan_yml: yml });
   outputJson(ok(r as Record<string, unknown>));
 }
 
@@ -1158,7 +1197,8 @@ async function runContinueMode(opts: ProvisionOpts): Promise<void> {
 }
 
 async function runListMode(): Promise<void> {
-  const r = await daemonRequest("GET", "/v1/bootstrap/batches");
+  // Route is GET /v1/bootstrap/list per src/daemon/api/routes/bootstrap.ts:424.
+  const r = await daemonRequest("GET", "/v1/bootstrap/list");
   outputJson(ok(r as Record<string, unknown>));
 }
 
@@ -1226,22 +1266,24 @@ import { provisionCommand } from "./commands/provision.js";
 
 Then in the registration block (where `program.addCommand(...)` calls live), remove every `addCommand` for the deleted commands and add:
 ```ts
+import { Command } from "commander";
+import { ShuttleError } from "../shared/errors.js";
+// ... (existing imports plus `provisionCommand`)
+
 program.addCommand(provisionCommand());
 
-// Stub `bootstrap` so running it surfaces command_renamed with next_action.
-const bootstrapStub = new (await import("commander")).Command("bootstrap")
+// Stub `bootstrap` so running it surfaces command_renamed via the top-level
+// catch in src/cli/index.ts:62 (writes JSON to stderr, sets exitCode).
+// DO NOT outputJson + process.exit here — that bypasses the top-level
+// deprecation-warning handling and writes to stdout instead of stderr.
+const bootstrapStub = new Command("bootstrap")
   .description("Renamed to `provision` in v0.3.0.")
   .allowUnknownOption()
-  .action(async () => {
-    const { ShuttleError, errorToJson } = await import("../shared/errors.js");
-    const { outputJson } = await import("../shared/result.js");
-    const err = new ShuttleError(
+  .action(() => {
+    throw new ShuttleError(
       "command_renamed",
       "The `bootstrap` verb was renamed to `provision` in v0.3.0. Re-run with `secret-shuttle provision <same flags>`.",
-      { hint: "secret-shuttle provision" },
     );
-    outputJson(errorToJson(err));
-    process.exit(2);
   });
 program.addCommand(bootstrapStub);
 ```
@@ -1567,13 +1609,17 @@ git commit -m "feat(session): raise TTL cap 15→60 min; new code session_ttl_ex
 
 - [ ] **Step 1: Write the failing test**
 
+Real exports (verified):
+- `src/daemon/approvals/session-matchers.ts:5` exports `matchesSessionPattern(binding, pattern)` — a single dispatching function. The per-action helpers (`templateRunMatches` etc.) are NOT exported.
+- `ApprovalBinding.action` for template-run is stored as the literal string `"template"` and is canonicalized by `canonicalAction()` to `"template-run"` (see `session-matchers.ts:9` and `session.ts:102`).
+
 Create `src/daemon/approvals/session-matcher-required-params.test.ts`:
 ```ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-// NOTE: import path / function names match the current file's exports.
-import { matchesTemplateRunPattern } from "./session-matchers.js";
+import { matchesSessionPattern } from "./session-matchers.js";
 import type { SessionPattern } from "./session.js";
+import type { ApprovalBinding } from "./store.js";
 
 function pattern(overrides: Partial<SessionPattern> = {}): SessionPattern {
   return {
@@ -1586,54 +1632,62 @@ function pattern(overrides: Partial<SessionPattern> = {}): SessionPattern {
   };
 }
 
-const binding = (params: Record<string, string> = { name: "STRIPE_KEY", environment: "production" }) => ({
-  action: "template-run" as const,
-  ref: "ss://stripe/prod/STRIPE_KEY",
-  template_id: "vercel-env-add",
-  template_params: params,
-  destination_domain: null,
-});
+// ApprovalBinding.action is stored as "template" (per session-matchers.ts:102)
+// and canonicalized to "template-run" by the matcher. Use the stored form
+// so the test matches the binding shape constructed by the templates route.
+function binding(params: Record<string, string> = { name: "STRIPE_KEY", environment: "production" }): ApprovalBinding {
+  return {
+    action: "template",
+    ref: "ss://stripe/prod/STRIPE_KEY",
+    template_id: "vercel-env-add",
+    template_params: params,
+    destination_domain: null,
+    environment: "production",
+    // Add any other required ApprovalBinding fields by mirroring the shape
+    // used in session-matchers.test.ts (`makePattern` test fixture there).
+  } as ApprovalBinding;
+}
 
 test("required_params absent → matcher behaves as today (ref + template_id)", () => {
-  assert.equal(matchesTemplateRunPattern(pattern(), binding()), true);
+  assert.equal(matchesSessionPattern(binding(), pattern()), true);
 });
 
 test("required_params empty object → same as absent", () => {
-  assert.equal(matchesTemplateRunPattern(pattern({ required_params: {} }), binding()), true);
+  assert.equal(matchesSessionPattern(binding(), pattern({ required_params: {} })), true);
 });
 
 test("all required_params keys present and equal → match", () => {
   const p = pattern({ required_params: { name: "STRIPE_KEY", environment: "production" } });
-  assert.equal(matchesTemplateRunPattern(p, binding()), true);
+  assert.equal(matchesSessionPattern(binding(), p), true);
 });
 
 test("one required_params key missing in binding → no match", () => {
   const p = pattern({ required_params: { name: "STRIPE_KEY", environment: "production" } });
-  assert.equal(matchesTemplateRunPattern(p, binding({ name: "STRIPE_KEY" })), false);
+  assert.equal(matchesSessionPattern(binding({ name: "STRIPE_KEY" }), p), false);
 });
 
 test("one required_params value differs → no match", () => {
   const p = pattern({ required_params: { name: "STRIPE_KEY", environment: "production" } });
-  assert.equal(matchesTemplateRunPattern(p, binding({ name: "STRIPE_KEY", environment: "preview" })), false);
+  assert.equal(matchesSessionPattern(binding({ name: "STRIPE_KEY", environment: "preview" }), p), false);
 });
 
-test("binding has extra params not in required_params → match (pattern constrains only what it lists)", () => {
+test("binding has extra params not in required_params → match", () => {
   const p = pattern({ required_params: { environment: "production" } });
-  assert.equal(matchesTemplateRunPattern(p, binding({ name: "STRIPE_KEY", environment: "production", extra: "z" })), true);
+  assert.equal(matchesSessionPattern(binding({ name: "STRIPE_KEY", environment: "production", extra: "z" }), p), true);
 });
 
 test("strict equality: 'production' ≠ 'Production'", () => {
   const p = pattern({ required_params: { environment: "production" } });
-  assert.equal(matchesTemplateRunPattern(p, binding({ name: "X", environment: "Production" })), false);
+  assert.equal(matchesSessionPattern(binding({ name: "X", environment: "Production" }), p), false);
 });
 
 test("strict equality: 'production' ≠ ' production' (whitespace)", () => {
   const p = pattern({ required_params: { environment: "production" } });
-  assert.equal(matchesTemplateRunPattern(p, binding({ name: "X", environment: " production" })), false);
+  assert.equal(matchesSessionPattern(binding({ name: "X", environment: " production" }), p), false);
 });
 ```
 
-(Note: if the existing matcher exports a different function name, update the import accordingly — grep first: `grep -n "export" src/daemon/approvals/session-matchers.ts`.)
+Before writing, run `grep -n "ApprovalBinding\|action:" src/daemon/approvals/session-matchers.test.ts | head -10` to copy the exact binding-fixture shape used there — that file already constructs ApprovalBindings correctly for matcher tests.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1642,10 +1696,11 @@ Expected: new param-matching tests fail (matcher doesn't check params yet).
 
 - [ ] **Step 3: Extend the matcher**
 
-Open `src/daemon/approvals/session-matchers.ts`. Find the `template-run` matcher branch (or the function that matches `template-run` patterns against bindings). At the END of the existing successful-match path (just before `return true`), add:
+Open `src/daemon/approvals/session-matchers.ts`. Find the internal `templateRunMatches(binding, pattern)` helper (the function called from the `case "template-run":` branch of `matchesSessionPattern`). Just BEFORE its final `return true`, insert the param-equality check:
 
 ```ts
-  // NEW: required_params strict-equal (Burst 5 §2 param-constraint primitive)
+  // NEW: required_params strict-equal (Burst 5 §2 param-constraint primitive).
+  // No-op when required_params is empty/absent — preserves Plan 4a behavior.
   if (pattern.required_params && Object.keys(pattern.required_params).length > 0) {
     const params = binding.template_params ?? {};
     for (const [key, expected] of Object.entries(pattern.required_params)) {
@@ -1653,6 +1708,8 @@ Open `src/daemon/approvals/session-matchers.ts`. Find the `template-run` matcher
     }
   }
 ```
+
+This is inside `templateRunMatches` (internal, not exported). The public `matchesSessionPattern` dispatches to it via `canonicalAction(binding.action)`.
 
 - [ ] **Step 4: Run tests**
 
@@ -1685,10 +1742,11 @@ import {
   destinationDefiningParamsFor,
   validateDestinationDefiningParamsCoverage,
 } from "./destination-defining-params.js";
-import { listTemplateIds } from "./registry.js";
+import { TemplateRegistry } from "./registry.js";
 
 test("every shipped template has a registered entry", () => {
-  const ids = listTemplateIds();
+  const registry = new TemplateRegistry();
+  const ids = registry.list().map((t) => t.id);
   assert.ok(ids.length > 0, "expected at least one shipped template");
   for (const id of ids) {
     assert.ok(
@@ -1720,7 +1778,7 @@ test("destinationDefiningParamsFor returns null for unregistered template", () =
 
 test("validateDestinationDefiningParamsCoverage logs warnings for unregistered shipped templates", () => {
   const warnings: string[] = [];
-  validateDestinationDefiningParamsCoverage({ warn: (m) => warnings.push(m) });
+  validateDestinationDefiningParamsCoverage(new TemplateRegistry(), { warn: (m) => warnings.push(m) });
   // With the four shipped templates fully covered, expect 0 warnings.
   assert.equal(warnings.length, 0, `unexpected warnings: ${warnings.join(", ")}`);
 });
@@ -1744,13 +1802,13 @@ Create `src/daemon/templates/destination-defining-params.ts`:
  *
  * NEW templates added in future bursts must register here. The
  * `validateDestinationDefiningParamsCoverage` function (called from
- * `registry.ts` at startup) logs a warning if a shipped template
- * has no entry; the corresponding CI test fails if a registered
- * template's entry is missing.
+ * the daemon startup wiring once the template registry is built)
+ * logs a warning if a shipped template has no entry; the CI test
+ * fails when a shipped template lands without its entry.
  *
  * See spec §2 "Template-param constraint primitive".
  */
-import { listTemplateIds } from "./registry.js";
+import type { TemplateRegistry } from "./registry.js";
 
 export const DESTINATION_DEFINING_PARAMS: Record<string, readonly string[]> = {
   "vercel-env-add":            ["name", "environment"],
@@ -1781,18 +1839,20 @@ const defaultLogger: Logger = {
 };
 
 /**
- * Validate that every shipped template has a registered entry.
- * Called once at daemon startup from registry.ts. Emits a warning
- * line for each missing entry — provision-derived sessions for that
- * template will be excluded (fail-closed), so operators will see
- * "destinations excluded" notices in the approval UI.
+ * Validate that every shipped template (every entry in the supplied
+ * `TemplateRegistry`) has a registered entry in DESTINATION_DEFINING_PARAMS.
+ * Called once at daemon startup with the daemon's `services.templates`.
+ * Emits a warning line for each missing entry — provision-derived
+ * sessions for that template will be excluded (fail-closed).
  */
-export function validateDestinationDefiningParamsCoverage(logger: Logger = defaultLogger): void {
-  const shipped = listTemplateIds();
-  for (const id of shipped) {
-    if (!(id in DESTINATION_DEFINING_PARAMS)) {
+export function validateDestinationDefiningParamsCoverage(
+  registry: TemplateRegistry,
+  logger: Logger = defaultLogger,
+): void {
+  for (const t of registry.list()) {
+    if (!(t.id in DESTINATION_DEFINING_PARAMS)) {
       logger.warn(
-        `Template '${id}' has no entry in DESTINATION_DEFINING_PARAMS. ` +
+        `Template '${t.id}' has no entry in DESTINATION_DEFINING_PARAMS. ` +
         `Provision-derived sessions will exclude this template (fail-closed). ` +
         `Add an entry in src/daemon/templates/destination-defining-params.ts.`,
       );
@@ -1801,26 +1861,17 @@ export function validateDestinationDefiningParamsCoverage(logger: Logger = defau
 }
 ```
 
-(If `listTemplateIds` doesn't exist in `registry.ts`, add it as a small helper that returns `Object.keys(TEMPLATES)` from whatever map is already there. Grep first: `grep -n "export\|TEMPLATES\|registry" src/daemon/templates/registry.ts | head`.)
+The function takes a `TemplateRegistry` instance — the real registry is a class with a `list()` method (see `src/daemon/templates/registry.ts:47`). No module-level `TEMPLATES` constant exists. The startup wiring (Task 2a.6) passes the registry from `DaemonServices.templates`.
 
-- [ ] **Step 4: If needed, add `listTemplateIds` to `registry.ts`**
-
-If `grep -n "listTemplateIds" src/daemon/templates/registry.ts` returns nothing, add at the end of that file:
-```ts
-export function listTemplateIds(): string[] {
-  return Object.keys(TEMPLATES); // adjust if the registry map has a different name
-}
-```
-
-- [ ] **Step 5: Run tests**
+- [ ] **Step 4: Run tests**
 
 Run: `npm test -- --test-name-pattern "DESTINATION_DEFINING_PARAMS\|destination-defining"`
 Expected: all 7 tests pass.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/daemon/templates/destination-defining-params.ts src/daemon/templates/destination-defining-params.test.ts src/daemon/templates/registry.ts
+git add src/daemon/templates/destination-defining-params.ts src/daemon/templates/destination-defining-params.test.ts
 git commit -m "feat(templates): DESTINATION_DEFINING_PARAMS config + startup coverage validator (4 shipped templates)"
 ```
 
@@ -1831,18 +1882,20 @@ git commit -m "feat(templates): DESTINATION_DEFINING_PARAMS config + startup cov
 **Files:**
 - Modify: `src/daemon/main.ts` (or the daemon's entry point)
 
-- [ ] **Step 1: Find the daemon startup sequence**
+- [ ] **Step 1: Find the daemon startup sequence and DaemonServices wiring**
 
-Run: `grep -n "registerBuiltin\|startup\|ready" src/daemon/main.ts | head -10`
+Run: `grep -n "DaemonServices\|new TemplateRegistry\|services\.templates" src/daemon/services.ts src/daemon/main.ts 2>/dev/null | head -15`
 
-- [ ] **Step 2: Add the validator call**
+- [ ] **Step 2: Add the validator call passing the registry instance**
 
-In `src/daemon/main.ts`, near the existing template registration and after the registry is populated, add:
+In whichever file constructs `DaemonServices` (probably `src/daemon/services.ts` or `src/daemon/main.ts` — the grep above will tell you), after the `TemplateRegistry` is instantiated and before the HTTP server begins listening:
 ```ts
 import { validateDestinationDefiningParamsCoverage } from "./templates/destination-defining-params.js";
-// ...after template registry init:
-validateDestinationDefiningParamsCoverage();
+// ...where `services.templates` (a TemplateRegistry instance) is in scope:
+validateDestinationDefiningParamsCoverage(services.templates);
 ```
+
+If services aren't grouped in a struct yet, pass the registry instance directly: `validateDestinationDefiningParamsCoverage(templateRegistry)`.
 
 - [ ] **Step 3: Build + run + smoke**
 
@@ -2382,31 +2435,28 @@ Open `src/daemon/approvals/session-store.ts`. Find `create(pattern: SessionPatte
    * owner. Mirrors the AuditActorSite.persisted-owner pattern.
    */
   createForOwner(pattern: SessionPattern, owner_agent_id: string): SessionGrant {
-    // Defer validation to the same path `create` uses — keep one
-    // source of truth via assertSessionPatternValid (called inside
-    // `create`). Implementation: build the grant identically to
-    // create() but stamp owner explicitly.
+    // Reuse the same construction logic the existing `create()` uses —
+    // refactor `create()` to delegate to a private helper that accepts
+    // the owner_agent_id, and have `create()` call it with
+    // `getCurrentAgentId()` while `createForOwner` calls it with the
+    // supplied owner. Single construction path = single set of fields,
+    // no drift risk.
+    //
+    // Concrete refactor: extract a private `createInternal(pattern, owner)`
+    // method containing `create()`'s current body (post-assertion). Then:
+    //   create(pattern):                this.createInternal(pattern, getCurrentAgentId())
+    //   createForOwner(pattern, owner): this.createInternal(pattern, owner)
+    //
+    // Use the existing SessionGrant shape (session.ts:77 — `uses: number`
+    // starts at 0; `max_uses?: number` is optional). Do NOT introduce a
+    // synthetic `uses_remaining` field — that doesn't exist in the
+    // current model and was a draft-spec artifact.
     assertSessionPatternValid(pattern);
-    const created = this.now();
-    const id = randomUUID();
-    const ui_token = randomUUID();
-    const grant: SessionGrant = {
-      ...pattern,
-      id,
-      ui_token,
-      status: "pending",
-      owner_agent_id,
-      created_at: created,
-      approved_at: null,
-      expires_at: created + PENDING_TTL_MS,
-      uses_remaining: pattern.max_uses ?? null,
-    };
-    this.grants.set(id, grant);
-    return grant;
+    return this.createInternal(pattern, owner_agent_id);
   }
 ```
 
-(Adjust property names to match the existing `SessionGrant` shape — read `session.ts` and `session-store.ts:create()` to copy the construction.)
+Read `session-store.ts:23` (`create()`) and `session.ts:77` (`SessionGrant` interface) to copy the exact field set in `createInternal`. The new method must NOT add or rename fields.
 
 - [ ] **Step 3: Run tests**
 
@@ -2664,21 +2714,51 @@ test("if any createForOwner throws, previously-minted grants in the batch roll b
 Run: `npm test -- --test-name-pattern "approval-ui-creates-sessions"`
 Expected: FAIL (route doesn't mint sessions yet).
 
-- [ ] **Step 3: Update the approve route in `src/daemon/approvals/ui-server.ts`**
+- [ ] **Step 3: Expand `registerUiRoutes` to accept the dependencies it now needs**
 
-Find the existing handler for `POST /ui/approvals/:id/approve` (around line 74). After it records the approval grant (existing behavior), add:
+Today's signature (`src/daemon/approvals/ui-server.ts:14`) is `registerUiRoutes(server, store: ApprovalStore)`. The new session-minting path needs `SessionStore` and `BootstrapStore` too. Update both the signature and the caller in `src/daemon/api/router.ts:36`:
 
 ```ts
-    // BURST 5: read optional session-on-approve body
-    let sessionBody: { session?: { ttl_minutes?: number } } = {};
-    try {
-      sessionBody = (await readBoundedJson(req, 1024, { allowEmpty: true })) as any;
-    } catch (err) {
-      // bad_request / request_too_large propagates as the route's normal error path
-      throw err;
-    }
+// src/daemon/approvals/ui-server.ts
+import type { SessionStore } from "./session-store.js";
+import type { BootstrapStore } from "../bootstrap/store.js";
 
-    const sessionRequest = sessionBody?.session;
+export interface ApprovalsUiDeps {
+  approvals: ApprovalStore;
+  sessions: SessionStore;
+  bootstrap: BootstrapStore;
+}
+
+export function registerUiRoutes(server: DaemonServer, deps: ApprovalsUiDeps): void {
+  // (replace internal `store` references with `deps.approvals`)
+  // ...
+}
+```
+
+```ts
+// src/daemon/api/router.ts — at line 36, where registerUiRoutes is called:
+registerUiRoutes(server, {
+  approvals: services.approvals,
+  sessions: services.sessionStore,
+  bootstrap: services.bootstrap,
+});
+```
+
+(Verify exact field names by running `grep -n "approvals:\|sessionStore:\|bootstrap:" src/daemon/services.ts` and matching what DaemonServices actually exposes.)
+
+- [ ] **Step 4: Update the POST `/ui/approvals/:id/approve|deny` handler**
+
+Find the existing handler (around line 74 of `ui-server.ts`). The approve branch needs to:
+1. Read the optional `{ session: { ttl_minutes } }` body via `readBoundedJson(req, 1024, { allowEmpty: true })` from the relocated helper (Task 2b.1).
+2. After recording the approval grant (existing behavior), if the session affordance was checked, derive patterns from the batch's plan and mint sessions.
+
+```ts
+    // BURST 5: read optional session-on-approve body. allowEmpty:true so a
+    // legacy approve POST with no body still works (the existing UI form
+    // sends an empty POST when the checkbox is unchecked).
+    const sessionBody = await readBoundedJson(req, 1024, { allowEmpty: true }) as { session?: { ttl_minutes?: number } };
+
+    const sessionRequest = sessionBody.session;
     if (sessionRequest && typeof sessionRequest === "object") {
       const ttl_minutes = sessionRequest.ttl_minutes;
       if (![5, 15, 30, 60].includes(ttl_minutes as number)) {
@@ -2686,48 +2766,60 @@ Find the existing handler for `POST /ui/approvals/:id/approve` (around line 74).
       }
       const ttl_ms = (ttl_minutes as number) * 60 * 1000;
 
-      // Resolve the batch this approval grants → derive session patterns
-      const batch = await bootstrapStore.get(grant.batch_id ?? null);
-      if (batch !== null) {
-        const { patterns } = inferSessionPatternFromPlan(batch.plan, ttl_ms);
-        // All-or-nothing rollback
-        const created: string[] = [];
-        try {
-          for (const pattern of patterns) {
-            const sess = sessionStore.createForOwner(pattern, grant.owner_agent_id);
-            created.push(sess.id);
+      // The bootstrap batch_id is stored at grant.template_params.batch_id
+      // (set by the bootstrap route at src/daemon/api/routes/bootstrap.ts:107),
+      // NOT a top-level grant.batch_id.
+      const batchId = grant.template_params?.batch_id;
+      if (typeof batchId === "string") {
+        const batch = await deps.bootstrap.get(batchId);
+        if (batch !== null) {
+          const { patterns } = inferSessionPatternFromPlan(batch.plan, ttl_ms);
+
+          // All-or-nothing rollback. SessionStore exposes `revoke(id)`
+          // (src/daemon/approvals/session-store.ts:69) — there is NO delete()
+          // method. revoke flips status to "revoked" so the grant becomes
+          // immediately unconsumable, which is the correct rollback semantics.
+          const createdIds: string[] = [];
+          try {
+            for (const pattern of patterns) {
+              const sess = deps.sessions.createForOwner(pattern, grant.owner_agent_id);
+              createdIds.push(sess.id);
+              // Auto-approve — patterns came from the card the user just
+              // approved, so they go straight to status: granted.
+              deps.sessions.approve(sess.id);
+            }
+          } catch (err) {
+            for (const id of createdIds) {
+              try { deps.sessions.revoke(id); } catch { /* swallow — best-effort rollback */ }
+            }
+            throw err;
           }
-          // Auto-grant (approved state) — patterns came from a card the user just approved
-          for (const id of created) {
-            sessionStore.approve(id);
-          }
-        } catch (err) {
-          for (const id of created) sessionStore.delete(id);
-          throw err;
         }
       }
     }
 ```
 
-(Adjust property names to match the actual `ApprovalGrant` shape — read the store to confirm `batch_id` field availability. The bootstrap approval binding includes the batch_id; if not, add it.)
-
 Import additions at top of file:
 ```ts
 import { readBoundedJson } from "../helpers/bounded-json.js";
 import { inferSessionPatternFromPlan } from "./infer-session-pattern.js";
-import { ShuttleError } from "../../shared/errors.js";
 ```
 
-- [ ] **Step 4: Run tests**
+Notes:
+- `grant.template_params.batch_id` — verified via `grep -n "batch_id\|template_params" src/daemon/api/routes/bootstrap.ts | head -10` (line 107 sets it on the binding).
+- `SessionStore.revoke(id)` (NOT `delete`) — see `src/daemon/approvals/session-store.ts:69`.
+- `SessionStore.approve(id)` is the existing method that flips status `pending → granted` and resets `expires_at` to `now + ttl_ms`.
+
+- [ ] **Step 5: Run tests**
 
 Run: `npm test -- --test-name-pattern "approval-ui-creates-sessions"`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/daemon/approvals/ui-server.ts src/daemon/approvals/approval-ui-creates-sessions.test.ts
-git commit -m "feat(approval-ui): approve route mints session grants from BatchState.plan (one per derived pattern, all-or-nothing rollback)"
+git add src/daemon/approvals/ui-server.ts src/daemon/api/router.ts src/daemon/approvals/approval-ui-creates-sessions.test.ts
+git commit -m "feat(approval-ui): approve route mints session grants from BatchState.plan (DI expanded; all-or-nothing rollback via revoke)"
 ```
 
 ---
@@ -2818,105 +2910,147 @@ git commit -m "feat(approval-ui): session-affordance footer with checkbox + ttl 
 - Modify: `src/daemon/approvals/require-approvals.ts`
 - Create: `src/daemon/approvals/require-approvals-auto-match.test.ts`
 
+**Architecture note (read before writing code):** `requireApprovals` already has a two-phase plan/commit shape (see `src/daemon/approvals/require-approvals.ts:55-80` and the function header comment at lines 34-54). Phase 1 builds an array of `Plan` entries — one of `{kind: "synth"}`, `{kind: "session"}`, `{kind: "consume", id}`, or `{kind: "mint"}`. Phase 2 commits them. The auto-match logic adds a new sub-case to Phase 1's per-binding planning step: before falling through to `kind: "mint"`, look for a matching owned active session and plan it as `kind: "session"` (the existing kind, which is already wired to phase 2 via `mintFromSession`).
+
+Real option names (verified):
+- `opts.approvalIdsFromClient` (NOT `approval_ids`)
+- `opts.sessionId` (NOT `session_id`)
+- `opts.sessionStore` (already optional on the options interface)
+- Session fields: `uses: number` (incremented), `max_uses?: number` (cap) — NOT `uses_remaining`. The matcher's max-uses check is `s.max_uses === undefined || s.uses < s.max_uses`.
+
+Reuse existing primitives:
+- `matchesSessionPattern(binding, pattern)` from `session-matchers.ts:5` — pure boolean.
+- The session-consume side effect during commit goes through whatever the existing `kind: "session"` branch does (`mintFromSession` / `consumeFromSession`-equivalent). Do NOT re-invent the mint path.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `src/daemon/approvals/require-approvals-auto-match.test.ts`:
 ```ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-// Use the test harness (in-memory daemon) to mint a session for an agent,
-// then call requireApprovals with no approval_id + no session_id and
-// assert the operation proceeds via the matching session.
-import { withDaemonForTest, asAgent } from "../../test-helpers/daemon.js";
+// Use the existing test scaffolding from require-approvals.test.ts and
+// session-store.test.ts. If a higher-level `withDaemonForTest` helper does
+// not exist in src/test-helpers/, run:
+//   grep -rn "function withDaemonForTest\|export async function with" src/
+// to find the canonical name and import accordingly. The plan-level test
+// description below assumes the existing pattern works at the
+// requireApprovals unit level (test imports requireApprovals + constructs
+// in-memory ApprovalStore / SessionStore stubs as the existing
+// require-approvals.test.ts does at the top of that file).
+import { requireApprovals } from "./require-approvals.js";
+import { ApprovalStore } from "./store.js";
+import { SessionStore } from "./session-store.js";
+import { withAuthContext } from "../auth/auth-context.js";
 
 test("active matching session silently satisfies a template-run requireApprovals call", async () => {
-  await withDaemonForTest(async (ctx) => {
-    await asAgent(ctx, "claude-abc", async () => {
-      // Create + grant a session
-      const created = await ctx.sessionStore.createForOwner({
-        actions: ["template-run"],
-        ref_glob: "ss://stripe/prod/STRIPE_KEY",
-        destination_domains: ["vercel.com"],
-        template_ids: ["vercel-env-add"],
-        required_params: { name: "STRIPE_KEY", environment: "production" },
-        ttl_ms: 15 * 60 * 1000,
-      }, "claude-abc");
-      ctx.sessionStore.approve(created.id);
+  const approvals = new ApprovalStore();
+  const sessions = new SessionStore({ now: () => 1_000_000 });
 
-      // requireApprovals with matching binding should succeed without approval prompt
-      const r = await ctx.requireApprovals([{
-        action: "template-run",
+  // Set up: mint + approve a matching session for agent claude-abc
+  await withAuthContext({ agent_id: "claude-abc" }, async () => {
+    const sess = sessions.createForOwner({
+      actions: ["template-run"],
+      ref_glob: "ss://stripe/prod/STRIPE_KEY",
+      destination_domains: ["vercel.com"],
+      template_ids: ["vercel-env-add"],
+      required_params: { name: "STRIPE_KEY", environment: "production" },
+      ttl_ms: 15 * 60 * 1000,
+    }, "claude-abc");
+    sessions.approve(sess.id);
+
+    // Call requireApprovals with NO approvalIdsFromClient, NO sessionId.
+    // Auto-match should plan it as kind:"session" in phase 1 and proceed.
+    const grants = await requireApprovals({
+      store: approvals,
+      sessionStore: sessions,
+      daemonPort: 0,
+      openUrlImpl: () => {},
+      bindings: [{
+        action: "template",  // stored as "template" — canonicalAction maps to "template-run"
         ref: "ss://stripe/prod/STRIPE_KEY",
         template_id: "vercel-env-add",
         template_params: { name: "STRIPE_KEY", environment: "production" },
         destination_domain: null,
-      }], { approval_ids: [], session_id: undefined });
-
-      assert.ok(r.grants.length === 1);
+        environment: "production",
+      } as any],
     });
+    assert.equal(grants.length, 1);
   });
 });
 
-test("expired sessions skipped during auto-match", async () => {
-  // Same setup but advance time past TTL; expect requireApprovals to throw approval_required.
+test("expired session skipped during auto-match — falls through to approval prompt", async () => {
+  // Construct a session whose expires_at is in the past; requireApprovals
+  // without --no-wait should now block on a fresh mint (test by passing
+  // waitMs: 1 and asserting approval_timeout, or by using --no-wait
+  // semantics and asserting approval_required).
 });
 
-test("max_uses race: if uses are exhausted between match and mint, retry once then fall through", async () => {
-  // Mint a session with max_uses=1; consume it from one path; assert the
-  // racing call retries the lookup and falls through to approval_required.
+test("max_uses race retry-once: session is consumed mid-plan → fall through to mint", async () => {
+  // Mint a session with max_uses: 1. Consume it via a parallel call (or
+  // bump `uses` directly on the grant). The new requireApprovals call
+  // should see the candidate, attempt to plan it as kind:"session", and
+  // when mintFromSession throws (or returns null) because uses === max_uses,
+  // retry the candidate lookup once and then fall through to kind:"mint".
 });
 ```
 
-- [ ] **Step 2: Add the auto-match logic**
+- [ ] **Step 2: Add the auto-match logic — fit into the existing two-phase architecture**
 
-Open `src/daemon/approvals/require-approvals.ts`. The function currently iterates bindings and for each one:
-1. Checks if `approval_ids` contains a matching one.
-2. If `session_id` is supplied, calls `canMatchSession` / `mintFromSession`.
-3. Otherwise mints a fresh approval (returns `approval_required`).
+Open `src/daemon/approvals/require-approvals.ts`. Phase 1 builds an array of `Plan` entries (one per binding) — `synth` / `session` / `consume` / `mint`. The existing `session` kind is selected when `opts.sessionId` is supplied and matches. Auto-match adds the `session` kind *without* requiring an explicit `sessionId` — selected by scanning owned-active sessions whose pattern matches the binding.
 
-Insert a new step between (2) and (3): when no `approval_ids` AND no `session_id` is supplied, query the session store for owned-by-current-agent sessions and try to match.
+Locate the per-binding planning step in Phase 1 (after the `approvalIdsFromClient` matching attempt, before the `synth`/`mint` fallback). Insert an auto-match attempt that returns a `{ kind: "session", binding, sessionId }` plan entry if a candidate matches. Phase 2 already handles the `session` kind via the same `mintFromSession` (or equivalent) primitive used when `opts.sessionId` is supplied — reuse it.
 
 ```ts
-  // NEW: auto-match against owned active sessions before falling through to approval prompt
-  const currentAgent = getCurrentAgentId();
-  if (!opts.approval_ids?.length && !opts.session_id && currentAgent) {
-    const candidates = sessionStore.list()
-      .filter((s) => s.owner_agent_id === currentAgent)
-      .filter((s) => s.status === "granted")
-      .filter((s) => s.expires_at > Date.now())
-      .filter((s) => s.uses_remaining === null || s.uses_remaining > 0)
-      .sort((a, b) => (b.approved_at ?? 0) - (a.approved_at ?? 0));
+import { matchesSessionPattern } from "./session-matchers.js";
+// (use `callerAgentId` already captured at line 64; do not re-read getCurrentAgentId())
 
-    for (const candidate of candidates) {
-      if (canMatchSession(candidate, binding)) {
-        try {
-          const grant = mintFromSession(candidate, binding);
-          collectedGrants.push(grant);
-          continue outerBindingLoop;
-        } catch (err) {
-          // Race: max_uses exhausted between check and mint. Retry once with fresh list, then fall through.
-          const refreshed = sessionStore.list()
-            .filter((s) => s.id !== candidate.id) // skip the now-exhausted one
-            .filter((s) => s.owner_agent_id === currentAgent)
-            .filter((s) => s.status === "granted")
-            .filter((s) => s.expires_at > Date.now())
-            .filter((s) => s.uses_remaining === null || s.uses_remaining > 0)
-            .sort((a, b) => (b.approved_at ?? 0) - (a.approved_at ?? 0));
-          for (const c2 of refreshed) {
-            if (canMatchSession(c2, binding)) {
-              const grant = mintFromSession(c2, binding);
-              collectedGrants.push(grant);
-              continue outerBindingLoop;
-            }
-          }
-          // Fall through
-        }
-      }
+function planFromAutoMatchedSession(
+  binding: ApprovalBinding,
+  sessionStore: SessionStore,
+  ownerAgentId: string,
+  now: number,
+): Plan | null {
+  // Candidate filter — owner-scoped, granted, not expired, has uses left
+  const candidates = sessionStore.list()
+    .filter((s) => s.owner_agent_id === ownerAgentId)
+    .filter((s) => s.status === "granted")
+    .filter((s) => s.expires_at > now)
+    .filter((s) => s.max_uses === undefined || s.uses < s.max_uses)
+    .sort((a, b) => (b.approved_at ?? 0) - (a.approved_at ?? 0));
+
+  for (const candidate of candidates) {
+    if (matchesSessionPattern(binding, candidate)) {
+      // Return a `session` plan referencing this candidate. The retry-once
+      // on max_uses race happens at commit time (Phase 2): if mintFromSession
+      // throws because uses raced to max_uses, Phase 2 re-runs the
+      // auto-match lookup once (skipping `candidate.id`) and either picks a
+      // sibling candidate or falls through to kind:"mint" for this binding.
+      return { kind: "session", binding, sessionId: candidate.id };
+    }
+  }
+  return null;
+}
+```
+
+Wiring point: in the existing per-binding planning loop in Phase 1, after the "supplied ID" branch and before the synth/mint default, add:
+```ts
+  // BURST 5 §2: auto-match owned active session when no explicit sessionId
+  if (
+    opts.sessionStore !== undefined &&
+    opts.sessionId === undefined &&
+    callerAgentId !== "root"  // root requests skip session auto-match — keep predictable behavior for admin tooling
+  ) {
+    const autoPlan = planFromAutoMatchedSession(binding, opts.sessionStore, callerAgentId, Date.now());
+    if (autoPlan !== null) {
+      plan.push(autoPlan);
+      continue;  // next binding
     }
   }
 ```
 
-(Adjust to the actual code structure — the existing function may not use a labeled loop. Refactor as needed.)
+Phase 2 race handling: in the commit step where `kind: "session"` is consumed (existing code), wrap the `mintFromSession` call. If it throws because `uses === max_uses` (race condition — another caller used the last slot since we planned), re-run `planFromAutoMatchedSession` excluding the exhausted candidate. If the second attempt returns a plan, consume that. Otherwise fall through to fresh-mint for this binding (re-enter Phase 1's `kind: "mint"` path for just this binding — implementation detail: build a `kind: "mint"` plan entry on the fly and commit it via the existing mint-and-wait code path).
+
+(If the existing commit code does not cleanly support per-binding re-planning, the simplest fix is to surface a structured "race" outcome from the session commit and have the outer caller retry once. Document whichever approach lands in the implementation commit.)
 
 - [ ] **Step 3: Run tests**
 
@@ -3418,14 +3552,18 @@ import { ShuttleError } from "../../../shared/errors.js";
 import { getCurrentAgentId } from "../../auth/auth-context.js";
 import { getShuttlePaths } from "../../../shared/config.js";
 import type { BootstrapStore } from "../../bootstrap/store.js";
+import { asObject, optBool, optString } from "../validate.js";
 
 export function registerAuditSummaryRoute(server: DaemonServer, deps: { bootstrapStore: BootstrapStore }): void {
+  // server.addRoute handlers receive ALREADY-PARSED JSON via readJsonBody
+  // (see src/daemon/server.ts:223). Use the existing asObject/req-helpers
+  // pattern from src/daemon/api/routes/bootstrap.ts:31.
   server.addRoute("POST", "/v1/audit/summary", async (_req, raw) => {
-    const body = JSON.parse(raw.toString("utf8") || "{}");
+    const o = asObject(raw);
     const actorAgent = getCurrentAgentId();
-    const includeAll = body.include_all_actors === true && actorAgent === "root";
-    const sinceMs = typeof body.since_ms === "number" ? body.since_ms : null;
-    const batchIdReq = typeof body.batch_id === "string" ? body.batch_id : null;
+    const includeAll = optBool(o, "include_all_actors") === true && actorAgent === "root";
+    const sinceMs = typeof o.since_ms === "number" ? o.since_ms : null;
+    const batchIdReq = optString(o, "batch_id") ?? null;
 
     if (batchIdReq) {
       const live = await deps.bootstrapStore.get(batchIdReq);
@@ -3450,7 +3588,7 @@ export function registerAuditSummaryRoute(server: DaemonServer, deps: { bootstra
 
     return {
       ok: true,
-      since: body.since_ms ? `${Math.round(body.since_ms / 60_000)}m` : "all",
+      since: sinceMs !== null ? `${Math.round(sinceMs / 60_000)}m` : "all",
       now: new Date().toISOString(),
       summary: { batches, individual_ops },
     };
