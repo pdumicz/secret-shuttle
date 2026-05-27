@@ -95,6 +95,16 @@ test("hub-ui.html: bootstrap_capture_step coordinator card renders with Capture/
   assert.match(html, /\/ui\/bootstrap\/abandon\?token=/);
 });
 
+test("hub-ui.html: renderCaptureStep does NOT add 1 to event.step_idx (executor emits 1-based)", async () => {
+  // The executor's entryIdx is incremented BEFORE emit, so step_idx in the
+  // event is already 1-based. A `+ 1` in the renderer would surface "step 2
+  // of N" on the first capture step. Drift guard: the template literal must
+  // reference step_idx directly without a trailing `+ 1`.
+  const html = await loadHtml();
+  assert.match(html, /\$\{event\.step_idx\}\s*of/);
+  assert.doesNotMatch(html, /event\.step_idx\s*\+\s*1/);
+});
+
 test("hub-ui.html: in-page recovery (takeOver) replaces reload-based recovery", async () => {
   const html = await loadHtml();
   // Because history.replaceState strips the token, a bare reload would

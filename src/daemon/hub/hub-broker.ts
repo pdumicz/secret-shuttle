@@ -132,7 +132,12 @@ export class HubBroker {
 
   /**
    * Attach a new subscriber. Displaces any prior. Resends the active
-   * operation (recovery path) OR promotes the front of the queue.
+   * operation (recovery path) OR promotes the front of the queue. After
+   * the navigate (if any), replays any pending bootstrap_capture_step
+   * event so a user who closed and reopened the hub mid-capture sees the
+   * card again (the executor has only one chance to emit and is blocked
+   * awaiting the registry's Promise — if we drop the event the user has
+   * no UI for 5 minutes).
    * Returns a detach callback that nulls currentSubscriber iff it
    * still equals this subscriber.
    */
@@ -157,6 +162,15 @@ export class HubBroker {
         type: "navigate",
         url: withHubSeq(front, this.activeSeq),
         seq: this.activeSeq,
+      });
+    }
+    // Replay the most-recent pending capture step (Option C from the review
+    // findings: don't try to clear pendingCaptureStep here — stale tokens
+    // are 404'd by the bootstrap-capture-ui routes when the user clicks).
+    if (this.pendingCaptureStep !== null) {
+      sub.write({
+        type: "bootstrap_capture_step",
+        ...this.pendingCaptureStep,
       });
     }
     return () => {
@@ -210,16 +224,35 @@ export class HubBroker {
    * actual SSE broadcast (via currentSubscriber); the payload is ALSO
    * recorded into `lastBootstrapCaptureStep` so unit tests (which run with no
    * UI attached, currentSubscriber === null) can still assert ordering
-   * ("emit happened after register, before await"). When no UI is attached
-   * the SSE write is skipped via optional chaining — the executor's contract
-   * (register → emit → await) does not change.
+   * ("emit happened after register, before await").
+   *
+   * Two delivery paths:
+   *   1. Hub attached → write the event on the SSE channel.
+   *   2. Hub detached → spawn (or re-spawn) the hub tab via openUrlImpl,
+   *      mirroring `surface()`. The event is stashed in `pendingCaptureStep`
+   *      and replayed by `attach()` once the user-agent connects.
+   *
+   * Without the spawn fallback, a user who closed the hub between the
+   * approval grant and the capture step would never see the coordinator
+   * card and the executor would wait the full 5-minute registry timeout
+   * with no visible UI.
    */
-  emitBootstrapCaptureStep(event: BootstrapCaptureStepEvent): void {
+  emitBootstrapCaptureStep(event: BootstrapCaptureStepEvent, port: number): void {
     this.lastBootstrapCaptureStep = event;
-    this.currentSubscriber?.write({
-      type: "bootstrap_capture_step",
-      ...event,
-    });
+    this.pendingCaptureStep = event;
+    if (this.currentSubscriber !== null) {
+      this.currentSubscriber.write({
+        type: "bootstrap_capture_step",
+        ...event,
+      });
+      return;
+    }
+    // No hub attached. Spawn it so the user sees the capture-step card.
+    // Debounced via the same spawn-in-flight guard `surface()` uses.
+    if (!this.isSpawnInFlight()) {
+      this.spawnInFlightSince = this.nowFn();
+      this.openUrlImpl(this.hubUrl(port));
+    }
   }
 
   /**
@@ -229,6 +262,17 @@ export class HubBroker {
    * register and await.
    */
   lastBootstrapCaptureStep: BootstrapCaptureStepEvent | null = null;
+
+  /**
+   * Latest unconsumed bootstrap_capture_step event. Set by emit, replayed
+   * on attach. We intentionally do NOT clear this on resolve/reject: the
+   * pending-captures registry already enforces single-use semantics on
+   * the capture_token (subsequent UI POSTs 404), and a stale replay just
+   * shows a card whose button presses harmlessly fail. Keeping it simple
+   * (Option C from the review) avoids coupling the hub broker to the
+   * bootstrap-capture-ui route handlers.
+   */
+  private pendingCaptureStep: BootstrapCaptureStepEvent | null = null;
 
   private isSpawnInFlight(): boolean {
     if (this.spawnInFlightSince === null) return false;

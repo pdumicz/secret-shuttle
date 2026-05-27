@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import { registerRoutes } from "../router.js";
 import { PENDING_TTL_MS } from "../../approvals/session.js";
 import { withAuthContext } from "../../auth/auth-context.js";
 import { deriveHmac, formatBearer } from "../../auth/token-derive.js";
+import { getShuttlePaths } from "../../../shared/config.js";
 
 async function withDaemon<T>(
   fn: (ctx: { port: number; token: string; services: DaemonServices }) => Promise<T>,
@@ -371,5 +372,161 @@ test("POST /v1/approvals/sessions/revoke as root: succeeds across owners", async
     // observe state independent of the GET filter.
     const after = ctx.services.sessionStore.get(sessionId)!;
     assert.equal(after.status, "revoked");
+  });
+});
+
+// ── /v1/approvals/poll owner-enforcement (existence non-disclosure) ─────────
+
+test("POST /v1/approvals/poll: non-root cross-owner → approval_not_found (existence non-disclosure)", async () => {
+  // Pre-fix: any caller could poll any approval id and learn its status. Now
+  // non-root callers can only poll grants they own; cross-owner poll returns
+  // the SAME approval_not_found error as a truly missing id — mirrors the
+  // semantics ApprovalStore.consume/consumeBatch already enforce (A9).
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+
+    // Agent A mints a grant. We stamp the grant's owner via the store-level
+    // ALS (the public route surface would do the same via per-agent bearer).
+    let grantId = "";
+    await withAuthContext({ agent_id: "claude-aaa", isRoot: false }, () => {
+      const g = ctx.services.approvals.create({
+        action: "inject",
+        ref: "ss://x/dev/Y",
+        environment: "development",
+        destination_domain: "x.com",
+        target_id: "T1",
+        field_fingerprint: "f",
+        template_id: null,
+        template_params: null,
+      });
+      grantId = g.id;
+    });
+
+    // Agent B polls A's grant via a derived bearer → must look identical to
+    // a missing id from B's perspective (existence non-disclosure).
+    const bBearer = agentBearer(ctx.token, "cursor-bbb");
+    const r = await callWithBearer(ctx, bBearer, "POST", "/v1/approvals/poll", { id: grantId });
+    assert.equal(r.status, 400, "non-root cross-owner must hit error mapper");
+    assert.equal(
+      (r.body as { error: { code: string } }).error.code,
+      "approval_not_found",
+      "owner mismatch must return the same code as truly-missing — leaks no existence info",
+    );
+  });
+});
+
+test("POST /v1/approvals/poll: same-owner non-root → 200 with status", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    let grantId = "";
+    await withAuthContext({ agent_id: "claude-aaa", isRoot: false }, () => {
+      const g = ctx.services.approvals.create({
+        action: "inject",
+        ref: "ss://x/dev/Y",
+        environment: "development",
+        destination_domain: "x.com",
+        target_id: "T1",
+        field_fingerprint: "f",
+        template_id: null,
+        template_params: null,
+      });
+      grantId = g.id;
+    });
+    const aBearer = agentBearer(ctx.token, "claude-aaa");
+    const r = await callWithBearer(ctx, aBearer, "POST", "/v1/approvals/poll", { id: grantId });
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { status: string }).status, "pending");
+    assert.equal((r.body as { id: string }).id, grantId);
+  });
+});
+
+test("ApprovalStore onEvent audit attributes events to the grant's owner_agent_id (not 'daemon')", async () => {
+  // Regression for the P2 finding: raw UI approve/deny routes have no ALS
+  // context, so writeDaemonAudit's auto-stamp would fall back to
+  // actor_agent_id: "daemon". The grant's persisted owner_agent_id is the
+  // correct attribution and is now passed explicitly from the onEvent
+  // callback in DaemonServices.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Capture the audit path NOW (before any await could let a parallel test
+    // file shift SECRET_SHUTTLE_HOME). writeDaemonAudit reads getShuttlePaths
+    // synchronously at call time, so as long as the .approve() call happens
+    // while our env is current, the audit lands here.
+    const auditPath = getShuttlePaths().auditLogPath;
+
+    // Mint a grant as "claude-abc". The create event already fires here
+    // under withAuthContext, but the critical event is the GRANT one which
+    // we trigger next OUTSIDE any auth context to simulate the raw UI route.
+    let grantId = "";
+    await withAuthContext({ agent_id: "claude-abc", isRoot: false }, () => {
+      const g = ctx.services.approvals.create({
+        action: "inject",
+        ref: "ss://x/dev/Y",
+        environment: "development",
+        destination_domain: "x.com",
+        target_id: "T1",
+        field_fingerprint: "f",
+        template_id: null,
+        template_params: null,
+      });
+      grantId = g.id;
+    });
+
+    // Drive the grant lifecycle from OUTSIDE any withAuthContext — mirrors
+    // the raw /ui/approvals/:id/approve route which has no bearer parse.
+    ctx.services.approvals.approve(grantId);
+
+    // Poll the audit log for the expected record. The onEvent callback is
+    // void-bound (fire-and-forget) so we must wait for the appendFile to
+    // settle. Polling avoids a magic-number sleep.
+    let granted: Record<string, unknown> | undefined;
+    let created: Record<string, unknown> | undefined;
+    for (let i = 0; i < 50; i++) {
+      await new Promise<void>((r) => setImmediate(r));
+      const log = await readFile(auditPath, "utf8").catch(() => "");
+      const records = log
+        .trim()
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      granted = records.find((r) => r.action === "approval_granted" && r.approval_id === grantId);
+      created = records.find((r) => r.action === "approval_created" && r.approval_id === grantId);
+      if (granted !== undefined && created !== undefined) break;
+    }
+    assert.ok(granted, "an approval_granted record must exist for the grant");
+    assert.equal(
+      granted!.actor_agent_id,
+      "claude-abc",
+      "actor must be the grant's owner_agent_id (not 'daemon')",
+    );
+    // The create event also fires (under ALS for "claude-abc"). Both should
+    // carry the same actor; the regression is about the GRANT event written
+    // outside the ALS context.
+    assert.ok(created);
+    assert.equal(created!.actor_agent_id, "claude-abc");
+  });
+});
+
+test("POST /v1/approvals/poll: root → 200 with status across owners", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    let grantId = "";
+    await withAuthContext({ agent_id: "claude-aaa", isRoot: false }, () => {
+      const g = ctx.services.approvals.create({
+        action: "inject",
+        ref: "ss://x/dev/Y",
+        environment: "development",
+        destination_domain: "x.com",
+        target_id: "T1",
+        field_fingerprint: "f",
+        template_id: null,
+        template_params: null,
+      });
+      grantId = g.id;
+    });
+    // call() uses the root token → isRoot: true should bypass owner check.
+    const r = await call(ctx, "POST", "/v1/approvals/poll", { id: grantId });
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { status: string }).status, "pending");
   });
 });

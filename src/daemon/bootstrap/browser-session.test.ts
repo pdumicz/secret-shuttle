@@ -166,6 +166,58 @@ test("ensureBootstrapBrowser: reuses pre-existing user session unchanged", async
   assert.deepEqual(services.browserSession?.owner, { kind: "user" });
 });
 
+test("ensureBootstrapBrowser: same bootstrap batchId → idempotent reuse", async () => {
+  // Repeated /continue calls within the same batch must NOT spawn a second
+  // Chrome — the lock-based serialization in /continue prevents parallel
+  // executions, but the ensure call itself should still be idempotent within
+  // a batch (defensive — covers retry-after-crash flows).
+  const session = makeStubSession({ owner: { kind: "bootstrap", batchId: "b1" } });
+  let calls = 0;
+  const services = new DaemonServices({
+    createBrowserSessionImpl: async () => {
+      calls += 1;
+      throw new Error("must not spawn — same-batch session must be reused");
+    },
+  });
+  services.browserSession = session;
+
+  const got = await services.ensureBootstrapBrowser("b1");
+
+  assert.equal(calls, 0);
+  assert.equal(got, session);
+});
+
+test("ensureBootstrapBrowser: different bootstrap batchId → throws bootstrap_browser_busy", async () => {
+  // Two bootstrap batches racing each other must NOT share Chrome. Batch A's
+  // stopBootstrapBrowser would tear down the session out from under batch B
+  // mid-capture, racing the proxy/cdp teardown. The cross-batch path throws
+  // bootstrap_browser_busy so callers can wait + retry instead of
+  // silently corrupting B's state.
+  const aSession = makeStubSession({ owner: { kind: "bootstrap", batchId: "batch-A" } });
+  let calls = 0;
+  const services = new DaemonServices({
+    createBrowserSessionImpl: async () => {
+      calls += 1;
+      throw new Error("must not spawn — cross-batch must be rejected, not silently joined");
+    },
+  });
+  services.browserSession = aSession;
+
+  await assert.rejects(
+    () => services.ensureBootstrapBrowser("batch-B"),
+    (err: Error & { code?: string }) => {
+      assert.equal(err.code, "bootstrap_browser_busy");
+      // The error message must name the holder so an operator (or retry
+      // policy) knows which batch they're waiting on.
+      assert.match(err.message, /batch-A/);
+      return true;
+    },
+  );
+  assert.equal(calls, 0);
+  // The existing session must be left in place; batch A is still running.
+  assert.equal(services.browserSession, aSession);
+});
+
 // ---------------------------------------------------------------------------
 // stopBootstrapBrowser
 // ---------------------------------------------------------------------------

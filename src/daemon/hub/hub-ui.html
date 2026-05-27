@@ -207,7 +207,10 @@
       // SSE event (either another bootstrap_capture_step for the next plan
       // entry, or a navigate when the executor moves on).
       function renderCaptureStep(event) {
-        const stepLabel = `step ${event.step_idx + 1} of ${event.step_total}`;
+        // event.step_idx is already 1-based (executor.ts increments entryIdx
+        // BEFORE emitting the event), so render as-is. The drift guard in
+        // hub-ui-html-drift.test.ts asserts the absence of "+ 1" here.
+        const stepLabel = `step ${event.step_idx} of ${event.step_total}`;
         captureEl.innerHTML = `
           <div class="card">
             <h2>Capture <code>${esc(event.secret_name)}</code></h2>

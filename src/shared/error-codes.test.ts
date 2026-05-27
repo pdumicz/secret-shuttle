@@ -156,12 +156,15 @@ test("registry total entry count (sanity check)", () => {
   // Burst 4 Task C16 adds 4 more (bootstrap_capture_skipped,
   // bootstrap_capture_timeout, bootstrap_capture_aborted,
   // bootstrap_capture_cleanup_failed) = 139 total.
+  // Burst 4 pre-launch review adds 1 more (bootstrap_browser_busy — emitted
+  // when two concurrent bootstrap batches try to share the daemon-owned
+  // browser) = 140 total.
   // Note: daemon_start_failed was removed (P3.1) — it was registered but never
   // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 139, `expected 139 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 140, `expected 140 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -237,6 +240,23 @@ test("error-codes: bootstrap_capture_redirect_blocked registered with CONFLICT +
     entry.hint("") ?? "",
     /expected host/i,
     "hint should reference the expected host",
+  );
+});
+
+test("error-codes: bootstrap_browser_busy registered with CONFLICT + null nextAction", () => {
+  // Emitted when ensureBootstrapBrowser is called for a batch while a
+  // DIFFERENT bootstrap batch already owns the daemon-owned browser. No
+  // automatic recovery — the user (or a retry policy) must wait for the
+  // in-flight batch to finish, then retry.
+  const entry = lookupErrorCode("bootstrap_browser_busy");
+  assert.ok(entry, "bootstrap_browser_busy must be registered");
+  assert.strictEqual(entry.exitCode, EXIT_CODE_CONFLICT);
+  const next = entry.nextAction ? entry.nextAction("") : null;
+  assert.strictEqual(next, null, "no automatic recovery — caller must wait");
+  assert.match(
+    entry.hint("") ?? "",
+    /another bootstrap batch/i,
+    "hint should reference another bootstrap batch holding the browser",
   );
 });
 

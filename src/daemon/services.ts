@@ -20,6 +20,7 @@ import { createBrowserSession as createBrowserSessionReal } from "./bootstrap/br
 import type { BrowserSession, BrowserSessionChild } from "./bootstrap/browser-session.js";
 import { PendingCapturesRegistry } from "./bootstrap/pending-captures.js";
 import type { KeychainAdapter } from "../vault/keychain/types.js";
+import { ShuttleError } from "../shared/errors.js";
 
 export interface UnlockSession {
   id: string;
@@ -79,6 +80,13 @@ export class DaemonServices {
   readonly vault = new Vault(() => this.lock.requireKey());
   readonly approvals = new ApprovalStore({
     onEvent: (e) => {
+      // Audit attribution: pass the persisted grant's owner_agent_id explicitly.
+      // Raw UI routes (/ui/approvals/:id/approve, etc.) have no ALS context, so
+      // writeDaemonAudit's auto-stamp would otherwise fall back to "daemon".
+      // The grant's owner is the right attribution for every lifecycle event:
+      // it was stamped at create-time from the minter's ALS (A8) and that
+      // identity owns the entire lifecycle.
+      const ownerAgentId = e.kind === "mismatch" ? e.existingGrant.owner_agent_id : e.grant.owner_agent_id;
       void writeDaemonAudit({
         action:
           e.kind === "created" ? "approval_created" :
@@ -90,6 +98,7 @@ export class DaemonServices {
           "approval_mismatch",
         ok: e.kind === "granted" || e.kind === "used" || e.kind === "created",
         approval_id: e.kind === "mismatch" ? e.existingGrant.id : e.grant.id,
+        actor_agent_id: ownerAgentId,
         ...(e.kind === "mismatch" ? {
           ...(e.binding.ref !== null && e.binding.ref !== undefined ? { ref: e.binding.ref } : {}),
           environment: e.binding.environment,
@@ -241,16 +250,38 @@ export class DaemonServices {
   /**
    * Ensure a BrowserSession exists for the duration of a bootstrap batch.
    *
-   * - If a session is already present (any owner — user or another bootstrap),
-   *   return it unchanged. Crucially, a pre-existing user session is never
-   *   overwritten or re-owned: a user who has `browser start`ed gets to keep
-   *   their session, and the outer `/continue` finally must NOT stop it.
+   * - If a user-owned session already exists, return it unchanged.
+   *   A pre-existing user session is never overwritten or re-owned: a user who
+   *   has `browser start`ed gets to keep their session, and the outer
+   *   `/continue` finally must NOT stop it.
+   * - If a bootstrap-owned session for the SAME batchId already exists,
+   *   return it (idempotent reuse — repeated /continue calls within the same
+   *   batch are safe).
+   * - If a bootstrap-owned session for a DIFFERENT batchId already exists,
+   *   throw `bootstrap_browser_busy`. Two concurrent bootstrap batches must
+   *   not share Chrome: batch A's `stopBootstrapBrowser` would tear down the
+   *   shared session out from under batch B mid-capture, racing the proxy and
+   *   crashing in-flight CDP traffic.
    * - If no session exists, spawn one with `owner = { kind: "bootstrap", batchId }`.
    *   The owner tag is what `stopBootstrapBrowser` checks to decide whether it
    *   may kill the session — see `stopBootstrapBrowser` below.
    */
   async ensureBootstrapBrowser(batchId: string): Promise<BrowserSession> {
-    if (this.browserSession !== null) return this.browserSession;
+    if (this.browserSession !== null) {
+      // User-owned: reuse unchanged.
+      if (this.browserSession.owner.kind === "user") {
+        return this.browserSession;
+      }
+      // Bootstrap-owned with the SAME batchId: idempotent reuse.
+      if (this.browserSession.owner.batchId === batchId) {
+        return this.browserSession;
+      }
+      // Bootstrap-owned by a DIFFERENT batch: globally serialize.
+      throw new ShuttleError(
+        "bootstrap_browser_busy",
+        `Another bootstrap batch (${this.browserSession.owner.batchId}) is already driving the daemon-owned browser. Retry after that batch completes.`,
+      );
+    }
     this.browserSession = await this.createBrowserSessionImpl({
       profile: "bootstrap",
       blind: this.blind,

@@ -270,6 +270,16 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     hint: () => "This batch was abandoned. Start a new one with `secret-shuttle bootstrap`.",
     nextAction: () => null,
   },
+  bootstrap_browser_busy: {
+    // CONFLICT: another bootstrap batch already owns the daemon-owned browser.
+    // Two concurrent capture batches must not share Chrome — batch A's
+    // teardown would race batch B's in-flight capture. The recovery is to
+    // wait for the in-flight batch to finish, then retry.
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () =>
+      "Another bootstrap batch owns the daemon-owned browser. Wait for it to finish, then retry.",
+    nextAction: () => null,
+  },
   secret_exists: {
     exitCode: EXIT_CODE_CONFLICT,
     hint: () => "Re-run with --force to overwrite.",

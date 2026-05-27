@@ -258,3 +258,91 @@ test("FIFO ordering across interleavings", () => {
     .map((e) => new URL((e as Extract<HubEvent, { type: "navigate" }>).url).searchParams.get("id"));
   assert.deepEqual(ids, ["a", "b", "c"]);
 });
+
+test("emitBootstrapCaptureStep: attached → writes event on SSE", () => {
+  const { broker } = newBroker();
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  broker.emitBootstrapCaptureStep(
+    {
+      batch_id: "b1",
+      secret_name: "STRIPE_KEY",
+      url: "https://dashboard.stripe.com/login",
+      step_idx: 1,
+      step_total: 3,
+      capture_token: "tok-xyz",
+    },
+    5555,
+  );
+  const cap = events.find((e) => e.type === "bootstrap_capture_step");
+  assert.ok(cap, "bootstrap_capture_step must be written when attached");
+  assert.equal((cap as { capture_token: string }).capture_token, "tok-xyz");
+});
+
+test("emitBootstrapCaptureStep: detached → spawns hub via openUrlImpl", () => {
+  // Pre-fix: when no hub was attached, the event was silently dropped via
+  // optional chaining (this.currentSubscriber?.write). The executor would
+  // then deadlock awaiting the registry timeout (5 minutes) with no UI.
+  // Now: detached emit MUST spawn the hub tab so the user sees the card.
+  const { broker, opens } = newBroker();
+  broker.emitBootstrapCaptureStep(
+    {
+      batch_id: "b1",
+      secret_name: "STRIPE_KEY",
+      url: "https://dashboard.stripe.com/login",
+      step_idx: 1,
+      step_total: 3,
+      capture_token: "tok-xyz",
+    },
+    7777,
+  );
+  assert.equal(opens.length, 1, "openUrlImpl must be called when detached");
+  const u = new URL(opens[0]!);
+  assert.equal(u.port, "7777");
+  assert.equal(u.pathname, "/ui/hub");
+  // Capture is stashed so a later attach can replay it.
+  assert.ok(broker.lastBootstrapCaptureStep);
+});
+
+test("attach: replays pending bootstrap_capture_step from earlier detached emit", () => {
+  // Companion to the spawn-on-emit fix: once the user-agent attaches, the
+  // hub must replay the latest pending capture step so the coordinator card
+  // surfaces. Without this, the spawn opens an empty hub.
+  const { broker } = newBroker();
+  broker.emitBootstrapCaptureStep(
+    {
+      batch_id: "b1",
+      secret_name: "STRIPE_KEY",
+      url: "https://dashboard.stripe.com/login",
+      step_idx: 2,
+      step_total: 3,
+      capture_token: "tok-replay",
+    },
+    5555,
+  );
+  const { sub, events } = makeSubscriber();
+  broker.attach(sub);
+  const cap = events.find((e) => e.type === "bootstrap_capture_step");
+  assert.ok(cap, "attach must replay the pending capture step");
+  assert.equal((cap as { capture_token: string }).capture_token, "tok-replay");
+  assert.equal((cap as { step_idx: number }).step_idx, 2);
+});
+
+test("emitBootstrapCaptureStep: detached + already spawning → no duplicate spawn", () => {
+  // The same debounce as surface(): if spawn is in flight, a second emit
+  // must not stack another openUrlImpl call.
+  const { broker, opens } = newBroker();
+  broker.emitBootstrapCaptureStep(
+    {
+      batch_id: "b1", secret_name: "K", url: "https://x", step_idx: 1, step_total: 1, capture_token: "t1",
+    },
+    5555,
+  );
+  broker.emitBootstrapCaptureStep(
+    {
+      batch_id: "b1", secret_name: "K", url: "https://x", step_idx: 1, step_total: 1, capture_token: "t2",
+    },
+    5555,
+  );
+  assert.equal(opens.length, 1, "spawn-in-flight must debounce a second emit");
+});

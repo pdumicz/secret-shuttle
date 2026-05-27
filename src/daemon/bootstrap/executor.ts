@@ -612,7 +612,7 @@ async function runCaptureStep(
     step_idx: ctx.step_idx,
     step_total: ctx.step_total,
     capture_token,
-  });
+  }, deps.daemonPortRef());
 
   let captured: { value: string; field_fingerprint: string } | null = null;
   let failureCode: string | null = null;
