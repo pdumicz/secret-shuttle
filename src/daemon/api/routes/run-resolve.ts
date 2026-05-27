@@ -349,124 +349,140 @@ export function registerRunResolveRoute(
     const stdoutMasker = createMasker(secretValues);
     const stderrMasker = createMasker(secretValues);
 
-    // Switch into streaming response mode.
-    res.statusCode = 200;
-    res.setHeader("content-type", "application/x-ndjson");
-    res.setHeader("cache-control", "no-store");
-    res.flushHeaders();
+    // NOTE: maskers are disposed in the finally below. dispose() itself is
+    // unit-tested in src/daemon/run/masker-scrub.test.ts; the wire-up here
+    // is verified by code review (Burst 4 cleanup pass). dispose() scrubs
+    // the pattern Buffers (raw secret bytes) and the lookback Buffer via
+    // .fill(0) so the bytes don't linger until GC after the request ends.
+    try {
+      // Switch into streaming response mode.
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/x-ndjson");
+      res.setHeader("cache-control", "no-store");
+      res.flushHeaders();
 
-    // Track whether the client has disconnected. This is the source of truth
-    // for "can we still write to res?" — on cancellation, the chain is:
-    //   client aborts fetch
-    //   → res.on('close') fires (responseClosed = true; abort the spawner)
-    //   → spawner SIGTERMs the child
-    //   → child exits
-    //   → spawnAndStream resolves
-    //   → spawner calls writer.writeExit(code)  ← THIS write must be skipped
-    //
-    // Without these guards, writer.writeExit would call res.write() on a
-    // destroyed socket → Node emits ERR_STREAM_WRITE_AFTER_END / crashes the
-    // daemon if it isn't handled. We belt-and-braces with both the explicit
-    // `responseClosed` flag AND res.destroyed / res.writableEnded checks so we
-    // ALSO skip writes if some other Node-internal path destroys res first.
-    let responseClosed = false;
-    const isWritable = (): boolean =>
-      !responseClosed && !res.destroyed && !res.writableEnded;
+      // Track whether the client has disconnected. This is the source of truth
+      // for "can we still write to res?" — on cancellation, the chain is:
+      //   client aborts fetch
+      //   → res.on('close') fires (responseClosed = true; abort the spawner)
+      //   → spawner SIGTERMs the child
+      //   → child exits
+      //   → spawnAndStream resolves
+      //   → spawner calls writer.writeExit(code)  ← THIS write must be skipped
+      //
+      // Without these guards, writer.writeExit would call res.write() on a
+      // destroyed socket → Node emits ERR_STREAM_WRITE_AFTER_END / crashes the
+      // daemon if it isn't handled. We belt-and-braces with both the explicit
+      // `responseClosed` flag AND res.destroyed / res.writableEnded checks so we
+      // ALSO skip writes if some other Node-internal path destroys res first.
+      let responseClosed = false;
+      const isWritable = (): boolean =>
+        !responseClosed && !res.destroyed && !res.writableEnded;
 
-    const writer: OutputWriter = {
-      writeStdout(chunk) {
-        const masked = stdoutMasker.process(chunk);
-        if (masked.length === 0 || !isWritable()) return;
-        res.write(JSON.stringify({ stream: "stdout", data: masked.toString("base64") }) + "\n");
-      },
-      writeStderr(chunk) {
-        const masked = stderrMasker.process(chunk);
-        if (masked.length === 0 || !isWritable()) return;
-        res.write(JSON.stringify({ stream: "stderr", data: masked.toString("base64") }) + "\n");
-      },
-      writeExit(code) {
-        // Flush each masker to ITS OWN stream — no cross-stream emission.
-        // Even if the response is closed, we still call masker.flush() so the
-        // masker state resets cleanly; we just don't write the bytes.
-        const stdoutFlush = stdoutMasker.flush();
-        const stderrFlush = stderrMasker.flush();
-        if (!isWritable()) return;
-        if (stdoutFlush.length > 0) {
-          res.write(JSON.stringify({ stream: "stdout", data: stdoutFlush.toString("base64") }) + "\n");
-        }
-        if (stderrFlush.length > 0) {
-          res.write(JSON.stringify({ stream: "stderr", data: stderrFlush.toString("base64") }) + "\n");
-        }
-        res.write(JSON.stringify({ exit: code }) + "\n");
-        // NOTE: do NOT call res.end() here. The route handler ends the
-        // response AFTER markUsed + auditPerRef complete so a test (or a
-        // pipeline consumer) that observes the response close can safely
-        // read updated last_used_at and audit entries. Calling res.end()
-        // here would race with the post-spawn async work that runs after
-        // spawnAndStream resolves.
-      },
-      writeError(err) {
-        if (!isWritable()) return;
-        // Forward exit_code on the wire so the CLI's daemonErrorFromPayload
-        // path picks it up — without this, spawn_failed would fall back to
-        // the registry default (TRANSIENT=1) and `run -- missing-binary`
-        // would exit 1 instead of the POSIX-canonical 127.
-        const errorPayload: { code: string; message: string; exit_code?: number } = {
-          code: err.code,
-          message: err.message,
-        };
-        if (err.exit_code !== undefined) errorPayload.exit_code = err.exit_code;
-        res.write(JSON.stringify({ error: errorPayload }) + "\n");
-      },
-    };
-
-    // CLI disconnect → abort → SIGTERM child (5s grace) → SIGKILL.
-    const abortController = new AbortController();
-    res.on("close", () => {
-      responseClosed = true;
-      abortController.abort();
-    });
-
-    let childExitCode = 0;
-    // Plan 4c: thread the resolved stdin value into the spawner via stdinBytes.
-    // The exactOptionalPropertyTypes flag means we can't pass `stdinBytes: undefined`
-    // when the field is optional — use the optional-spread idiom instead.
-    // The bytes themselves are NEVER seen by the CLI; the daemon writes them
-    // directly to the child's fd 0 (see spawner.ts).
-    const stdinBytes = body.stdin_ref !== undefined
-      ? Buffer.from(resolved.get(body.stdin_ref)!.value, "utf8")
-      : undefined;
-    await spawnAndStream({
-      cmd: body.command,
-      args: body.args,
-      env,
-      cwd: body.cwd,
-      outputWriter: {
-        ...writer,
-        writeExit(code) {
-          childExitCode = code;
-          writer.writeExit(code);
+      const writer: OutputWriter = {
+        writeStdout(chunk) {
+          const masked = stdoutMasker.process(chunk);
+          if (masked.length === 0 || !isWritable()) return;
+          res.write(JSON.stringify({ stream: "stdout", data: masked.toString("base64") }) + "\n");
         },
-      },
-      signal: abortController.signal,
-      ...(stdinBytes !== undefined ? { stdinBytes } : {}),
-    });
+        writeStderr(chunk) {
+          const masked = stderrMasker.process(chunk);
+          if (masked.length === 0 || !isWritable()) return;
+          res.write(JSON.stringify({ stream: "stderr", data: masked.toString("base64") }) + "\n");
+        },
+        writeExit(code) {
+          // Flush each masker to ITS OWN stream — no cross-stream emission.
+          // Even if the response is closed, we still call masker.flush() so the
+          // masker state resets cleanly; we just don't write the bytes.
+          const stdoutFlush = stdoutMasker.flush();
+          const stderrFlush = stderrMasker.flush();
+          if (!isWritable()) return;
+          if (stdoutFlush.length > 0) {
+            res.write(JSON.stringify({ stream: "stdout", data: stdoutFlush.toString("base64") }) + "\n");
+          }
+          if (stderrFlush.length > 0) {
+            res.write(JSON.stringify({ stream: "stderr", data: stderrFlush.toString("base64") }) + "\n");
+          }
+          res.write(JSON.stringify({ exit: code }) + "\n");
+          // NOTE: do NOT call res.end() here. The route handler ends the
+          // response AFTER markUsed + auditPerRef complete so a test (or a
+          // pipeline consumer) that observes the response close can safely
+          // read updated last_used_at and audit entries. Calling res.end()
+          // here would race with the post-spawn async work that runs after
+          // spawnAndStream resolves.
+        },
+        writeError(err) {
+          if (!isWritable()) return;
+          // Forward exit_code on the wire so the CLI's daemonErrorFromPayload
+          // path picks it up — without this, spawn_failed would fall back to
+          // the registry default (TRANSIENT=1) and `run -- missing-binary`
+          // would exit 1 instead of the POSIX-canonical 127.
+          const errorPayload: { code: string; message: string; exit_code?: number } = {
+            code: err.code,
+            message: err.message,
+          };
+          if (err.exit_code !== undefined) errorPayload.exit_code = err.exit_code;
+          res.write(JSON.stringify({ error: errorPayload }) + "\n");
+        },
+      };
 
-    // markUsed + audit AFTER the child exits. Success criterion: child exit == 0.
-    // These run BEFORE res.end() so the response close happens-after the side
-    // effects — a fetch caller that awaits the response body to completion can
-    // safely inspect last_used_at and the audit log without racing.
-    const ok = childExitCode === 0;
-    for (const ref of resolved.keys()) {
-      await services.vault.markUsed(ref).catch(() => undefined);
-    }
-    await auditPerRef(allRefs, body.stdin_ref, resolved, ok, ok ? undefined : "child_exit_nonzero", grant?.session_id);
+      // CLI disconnect → abort → SIGTERM child (5s grace) → SIGKILL.
+      const abortController = new AbortController();
+      res.on("close", () => {
+        responseClosed = true;
+        abortController.abort();
+      });
 
-    // Close the response only if we still can. On the cancel path, res is
-    // already destroyed/ended — writableEnded check prevents the double-end
-    // that would otherwise emit ERR_STREAM_WRITE_AFTER_END.
-    if (!responseClosed && !res.destroyed && !res.writableEnded) {
-      res.end();
+      let childExitCode = 0;
+      // Plan 4c: thread the resolved stdin value into the spawner via stdinBytes.
+      // The exactOptionalPropertyTypes flag means we can't pass `stdinBytes: undefined`
+      // when the field is optional — use the optional-spread idiom instead.
+      // The bytes themselves are NEVER seen by the CLI; the daemon writes them
+      // directly to the child's fd 0 (see spawner.ts).
+      const stdinBytes = body.stdin_ref !== undefined
+        ? Buffer.from(resolved.get(body.stdin_ref)!.value, "utf8")
+        : undefined;
+      await spawnAndStream({
+        cmd: body.command,
+        args: body.args,
+        env,
+        cwd: body.cwd,
+        outputWriter: {
+          ...writer,
+          writeExit(code) {
+            childExitCode = code;
+            writer.writeExit(code);
+          },
+        },
+        signal: abortController.signal,
+        ...(stdinBytes !== undefined ? { stdinBytes } : {}),
+      });
+
+      // markUsed + audit AFTER the child exits. Success criterion: child exit == 0.
+      // These run BEFORE res.end() so the response close happens-after the side
+      // effects — a fetch caller that awaits the response body to completion can
+      // safely inspect last_used_at and the audit log without racing.
+      const ok = childExitCode === 0;
+      for (const ref of resolved.keys()) {
+        await services.vault.markUsed(ref).catch(() => undefined);
+      }
+      await auditPerRef(allRefs, body.stdin_ref, resolved, ok, ok ? undefined : "child_exit_nonzero", grant?.session_id);
+
+      // Close the response only if we still can. On the cancel path, res is
+      // already destroyed/ended — writableEnded check prevents the double-end
+      // that would otherwise emit ERR_STREAM_WRITE_AFTER_END.
+      if (!responseClosed && !res.destroyed && !res.writableEnded) {
+        res.end();
+      }
+    } finally {
+      // Scrub pattern Buffers + lookback Buffer. After dispose, the maskers
+      // are unusable — but that's fine: the response has already been sent
+      // (success path) or aborted (error / client-disconnect paths). flush()
+      // during writeExit already self-sanitized the lookback for normal
+      // exits; dispose() now covers ALL paths and additionally scrubs the
+      // pattern Buffers that flush() does not touch.
+      stdoutMasker.dispose();
+      stderrMasker.dispose();
     }
   });
 
