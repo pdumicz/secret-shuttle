@@ -180,7 +180,7 @@ Add inside the `REGISTRY` constant, preserving the existing grouping comments (T
 command_renamed: {
   exitCode: EXIT_CODE_USAGE,
   hint: () => null,
-  // No nextAction — the message itself names the replacement verb.
+  nextAction: () => "secret-shuttle provision",
 },
 provision_mode_conflict: {
   exitCode: EXIT_CODE_USAGE,
@@ -213,15 +213,6 @@ audit_window_invalid: {
 audit_batch_not_found: {
   exitCode: EXIT_CODE_NOT_FOUND,
   hint: () => null,
-},
-```
-
-Note: `command_renamed` is listed with `hint: () => null` and no `nextAction` above — the spec at §1 specifies `next_action` should point at `provision`, so update that entry to include the nextAction (matches the bootstrap-stub throw site):
-```ts
-command_renamed: {
-  exitCode: EXIT_CODE_USAGE,
-  hint: () => null,
-  nextAction: () => "secret-shuttle provision",
 },
 ```
 
@@ -2031,9 +2022,15 @@ Open `src/daemon/api/routes/approvals-session.ts` and find `parseSessionPatternF
   }
 ```
 
-In the section of `parseSessionPatternFromBody` that builds the returned `SessionPattern` literal, add:
+In the section of `parseSessionPatternFromBody` that builds the returned `SessionPattern` literal, **use a conditional spread, not an explicit `undefined`** — `tsconfig.json:10` enables `exactOptionalPropertyTypes`, which rejects explicit `undefined` assignment to optional fields:
+
 ```ts
-  required_params: p.required_params as Record<string, string> | undefined,
+return {
+  // ...existing whitelisted fields...
+  ...(p.required_params !== undefined
+    ? { required_params: p.required_params as Record<string, string> }
+    : {}),
+};
 ```
 
 (The cast is safe because the validator in step 2a.2 is the single source of truth for shape enforcement.)
@@ -2624,6 +2621,41 @@ test("capture-only PlanEntry with no template-run destinations → no patterns",
   const r = inferSessionPatternFromPlan([e]);
   assert.equal(r.patterns.length, 0);
 });
+
+test("registered template with MISSING defining param → excluded with reason missing_defining_params", () => {
+  // vercel-env-add registers ["name", "environment"]. If `environment` is
+  // missing (config drift / corrupted plan), the destination must be
+  // excluded fail-closed — emitting a less-constrained session would
+  // silently widen consent.
+  const e = entry({
+    destinations: [
+      { shorthand: "vercel:?", template_id: "vercel-env-add",
+        template_params: { name: "STRIPE_KEY" }, // environment missing
+        domain: "vercel.com" },
+    ],
+  });
+  const r = inferSessionPatternFromPlan([e]);
+  assert.equal(r.patterns.length, 0);
+  assert.equal(r.excluded.length, 1);
+  const x = r.excluded[0]!;
+  assert.equal(x.reason, "missing_defining_params");
+  if (x.reason === "missing_defining_params") {
+    assert.deepEqual(x.missing_keys, ["environment"]);
+  }
+});
+
+test("registered template with EMPTY-STRING defining param → also excluded", () => {
+  const e = entry({
+    destinations: [
+      { shorthand: "vercel:?", template_id: "vercel-env-add",
+        template_params: { name: "STRIPE_KEY", environment: "" },
+        domain: "vercel.com" },
+    ],
+  });
+  const r = inferSessionPatternFromPlan([e]);
+  assert.equal(r.patterns.length, 0);
+  assert.equal(r.excluded.length, 1);
+});
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2653,7 +2685,10 @@ import { destinationDefiningParamsFor } from "../templates/destination-defining-
 
 export interface InferSessionPatternResult {
   patterns: SessionPattern[];
-  excluded: Array<{ secret: string; ref: string; destination: ResolvedDestination; reason: "template_unregistered"; template_id: string }>;
+  excluded: Array<
+    | { secret: string; ref: string; destination: ResolvedDestination; reason: "template_unregistered"; template_id: string }
+    | { secret: string; ref: string; destination: ResolvedDestination; reason: "missing_defining_params"; template_id: string; missing_keys: string[] }
+  >;
 }
 
 const DEFAULT_TTL_MS = 15 * 60 * 1000; // 15 min — overridden by ui body at create time
@@ -2669,18 +2704,41 @@ export function inferSessionPatternFromPlan(plan: PlanEntry[], ttl_ms: number = 
         excluded.push({ secret: entry.secret, ref: entry.ref, destination: dest, reason: "template_unregistered", template_id: dest.template_id });
         continue;
       }
+
+      // Fail-closed: if a registered template lists ["name", "environment"]
+      // and the destination's template_params is missing one of them
+      // (or has a non-string value), we cannot construct a narrowing
+      // SessionPattern for it. Emitting a broader pattern is the exact
+      // consent-widening footgun this primitive closes. Exclude instead.
       const required_params: Record<string, string> = {};
+      const missingKeys: string[] = [];
       for (const k of definingKeys) {
         const v = dest.template_params[k];
-        if (typeof v === "string") required_params[k] = v;
+        if (typeof v === "string" && v.length > 0) {
+          required_params[k] = v;
+        } else {
+          missingKeys.push(k);
+        }
       }
+      if (missingKeys.length > 0) {
+        excluded.push({
+          secret: entry.secret,
+          ref: entry.ref,
+          destination: dest,
+          reason: "missing_defining_params",
+          template_id: dest.template_id,
+          missing_keys: missingKeys,
+        });
+        continue;
+      }
+
       const pattern: SessionPattern = {
         actions: ["template-run"],
         ref_glob: entry.ref, // ALWAYS exact ref — no globbing
         destination_domains: [dest.domain],
         template_ids: [dest.template_id],
         ttl_ms,
-        ...(Object.keys(required_params).length > 0 ? { required_params } : {}),
+        required_params, // guaranteed non-empty above
       };
       patterns.push(pattern);
     }
@@ -2784,11 +2842,13 @@ export function registerUiRoutes(server: DaemonServer, deps: ApprovalsUiDeps): v
 ```
 
 ```ts
-// src/daemon/api/router.ts — at line 36, where registerUiRoutes is called:
+// src/daemon/api/router.ts — at line 36, where registerUiRoutes is called.
+// Field name on DaemonServices is `bootstrapStore` (services.ts:137), not
+// `bootstrap`. The `ApprovalsUiDeps` keys are local to this DI struct.
 registerUiRoutes(server, {
   approvals: services.approvals,
   sessions: services.sessionStore,
-  bootstrap: services.bootstrap,
+  bootstrap: services.bootstrapStore,
 });
 ```
 
@@ -2796,9 +2856,13 @@ registerUiRoutes(server, {
 
 - [ ] **Step 4: Update the POST `/ui/approvals/:id/approve|deny` handler**
 
-Find the existing handler (around line 74 of `ui-server.ts`). The approve branch needs to:
-1. Read the optional `{ session: { ttl_minutes } }` body via `readBoundedJson(req, 1024, { allowEmpty: true })` from the relocated helper (Task 2b.1).
-2. After recording the approval grant (existing behavior), if the session affordance was checked, derive patterns from the batch's plan and mint sessions.
+**Mutation-ordering constraint:** `ApprovalStore.approve()` (`src/daemon/approvals/store.ts:110`) is an **irreversible** mutation — it flips the grant to `granted` and emits a "granted" event. There is no `un-approve`. If session minting fails AFTER approval, we'd leave the main grant approved with the user's "session-on-approve" intent partially honored — the operation they consented to has succeeded, but the session affordance hasn't.
+
+Two acceptable resolutions:
+- **(A) Two-phase: validate + precreate sessions BEFORE approving the main grant.** Mint session grants in PENDING state, then approve the main grant, then mark sessions granted. If any session create fails, revoke whatever we precreated and throw — main grant has not been approved yet, so the user sees a clean error and can retry. **Recommended.**
+- **(B) Best-effort: approve the main grant first, then mint sessions; on session failure, return success-with-warning.** Simpler to implement; the main operation succeeded so the user gets what they asked for; warning surfaces session creation failure. The next batch they run will still pop a fresh approval, which is the right behavior anyway.
+
+This task uses **option A** for predictability: either the user gets both the approval and their session, or they get a clean error.
 
 ```ts
     // BURST 5: read optional session-on-approve body. allowEmpty:true so a
@@ -2806,6 +2870,7 @@ Find the existing handler (around line 74 of `ui-server.ts`). The approve branch
     // sends an empty POST when the checkbox is unchecked).
     const sessionBody = await readBoundedJson(req, 1024, { allowEmpty: true }) as { session?: { ttl_minutes?: number } };
 
+    let sessionPlan: { ttl_ms: number; patterns: SessionPattern[] } | null = null;
     const sessionRequest = sessionBody.session;
     if (sessionRequest && typeof sessionRequest === "object") {
       const ttl_minutes = sessionRequest.ttl_minutes;
@@ -2814,36 +2879,52 @@ Find the existing handler (around line 74 of `ui-server.ts`). The approve branch
       }
       const ttl_ms = (ttl_minutes as number) * 60 * 1000;
 
-      // The bootstrap batch_id is stored at grant.template_params.batch_id
-      // (set by the bootstrap route at src/daemon/api/routes/bootstrap.ts:107),
-      // NOT a top-level grant.batch_id.
+      // grant.template_params.batch_id (set by the bootstrap route at
+      // src/daemon/api/routes/bootstrap.ts:107) — NOT a top-level grant.batch_id.
       const batchId = grant.template_params?.batch_id;
       if (typeof batchId === "string") {
         const batch = await deps.bootstrap.get(batchId);
         if (batch !== null) {
           const { patterns } = inferSessionPatternFromPlan(batch.plan, ttl_ms);
-
-          // All-or-nothing rollback. SessionStore exposes `revoke(id)`
-          // (src/daemon/approvals/session-store.ts:69) — there is NO delete()
-          // method. revoke flips status to "revoked" so the grant becomes
-          // immediately unconsumable, which is the correct rollback semantics.
-          const createdIds: string[] = [];
-          try {
-            for (const pattern of patterns) {
-              const sess = deps.sessions.createForOwner(pattern, grant.owner_agent_id);
-              createdIds.push(sess.id);
-              // Auto-approve — patterns came from the card the user just
-              // approved, so they go straight to status: granted.
-              deps.sessions.approve(sess.id);
-            }
-          } catch (err) {
-            for (const id of createdIds) {
-              try { deps.sessions.revoke(id); } catch { /* swallow — best-effort rollback */ }
-            }
-            throw err;
-          }
+          sessionPlan = { ttl_ms, patterns };
         }
       }
+    }
+
+    // ───── PHASE A: precreate sessions in PENDING state BEFORE approval. ─────
+    // Session creation here can throw (validator rejects pattern shape,
+    // server OOM on Map.set, etc.). If it throws, we have NOT yet flipped
+    // the main grant to granted, so the user sees a clean error and the
+    // approval can be retried fresh.
+    const precreatedIds: string[] = [];
+    if (sessionPlan !== null) {
+      try {
+        for (const pattern of sessionPlan.patterns) {
+          const sess = deps.sessions.createForOwner(pattern, grant.owner_agent_id);
+          precreatedIds.push(sess.id);
+        }
+      } catch (err) {
+        // Roll back what we precreated. SessionStore has revoke(id), NOT
+        // delete (src/daemon/approvals/session-store.ts:69). Revoke is fine:
+        // these grants were never approved, never reachable by other actors.
+        for (const id of precreatedIds) {
+          try { deps.sessions.revoke(id); } catch { /* best-effort */ }
+        }
+        throw err;
+      }
+    }
+
+    // ───── PHASE B: approve the main grant. Irreversible from here. ─────
+    deps.approvals.approve(grantId);
+
+    // ───── PHASE C: flip precreated sessions to granted. ─────
+    // If approve() throws here (extremely unlikely — a non-pending session
+    // would mean concurrent revocation), best-effort: log and continue.
+    // The main approval has already committed; we can't un-do that. The
+    // session is then effectively missing from the user's POV; the next
+    // matching op will pop a fresh approval, which is correct behavior.
+    for (const id of precreatedIds) {
+      try { deps.sessions.approve(id); } catch { /* see comment above */ }
     }
 ```
 
@@ -2924,13 +3005,27 @@ function renderSessionAffordance(aff) {
     return;
   }
   container.hidden = false;
+
+  // Three modes:
+  //   patterns.length > 0                       → checkbox + TTL + pattern list (+ optional excluded notice)
+  //   patterns.length === 0 && excluded.length > 0 → excluded notice ONLY (no checkbox, no TTL — nothing session-eligible)
+  //   both === 0                                → container hidden above
+  const excludedHtml = aff.excluded.length === 0 ? '' :
+    `<p><em>Note: ${aff.excluded.length} destination(s) excluded from any session derivation
+    (template not registered, or required destination param missing). Pushes to those
+    destinations will require fresh approval each time.</em></p>`;
+
+  if (aff.patterns.length === 0) {
+    // Excluded-only path: surface the notice, no checkbox/dropdown.
+    container.innerHTML = `<fieldset style="margin: 1em 0; padding: 0.75em; border: 1px solid #ddd;">${excludedHtml}</fieldset>`;
+    return;
+  }
+
   const patternHtml = aff.patterns.map((p) =>
     `<li><code>${esc(p.template_id ?? '?')}</code> &nbsp; <code>${esc(p.ref_glob)}</code> &nbsp; ${
       Object.entries(p.required_params).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(', ')
     }</li>`
   ).join('');
-  const excludedHtml = aff.excluded.length === 0 ? '' :
-    `<p><em>Note: ${aff.excluded.length} destination(s) excluded (template not registered for session-derivation). Pushes to those destinations will require fresh approval each time.</em></p>`;
   container.innerHTML = `
     <fieldset style="margin: 1em 0; padding: 0.75em; border: 1px solid #ddd;">
       <label>
@@ -2953,6 +3048,8 @@ function renderSessionAffordance(aff) {
 }
 // In load(): renderSessionAffordance(g.session_affordance);
 ```
+
+The approve-POST handler reads `session-on-approve` and `ttl-minutes` only when the elements exist. The body-build snippet (shown earlier) already guards with `if (sessionCheck && sessionCheck.checked && ttlSelect)`, so the excluded-only path naturally produces an empty POST body (legacy unchecked behavior).
 
 In the existing approve-button click handler, read the checkbox state and include `session` in the body:
 ```js
@@ -3169,7 +3266,8 @@ for (let i = 0; i < plans.length; i++) {
 }
 ```
 
-4. **Auto-match helper** (new) — selects a candidate and returns a `session` plan entry with its id:
+4. **Auto-match helper** (new) — selects a candidate and returns a `session` plan entry with its id. **Critical: tracks already-planned uses per sessionId** so Phase 1 cannot plan two bindings against the same `max_uses: 1` session — Phase 2 would fail the second `mintFromSession`. The existing explicit-sessionId path already uses `plannedSessionUses` at `require-approvals.ts:112`; the auto-match path needs the same discipline, but **keyed by sessionId** (since each binding may pick a different session):
+
 ```ts
 import { matchesSessionPattern } from "./session-matchers.js";
 
@@ -3178,6 +3276,7 @@ function planFromAutoMatchedSession(
   sessionStore: SessionStore,
   ownerAgentId: string,
   now: number,
+  plannedSessionUsesById: Map<string, number>,
   excludeIds: ReadonlySet<string> = new Set(),
 ): Plan | null {
   const candidates = sessionStore.list()
@@ -3185,11 +3284,23 @@ function planFromAutoMatchedSession(
     .filter((s) => s.owner_agent_id === ownerAgentId)
     .filter((s) => s.status === "granted")
     .filter((s) => s.expires_at > now)
-    .filter((s) => s.max_uses === undefined || s.uses < s.max_uses)
+    // Effective remaining uses = max_uses - (live uses) - (planned-this-call)
+    .filter((s) => {
+      if (s.max_uses === undefined) return true;
+      const planned = plannedSessionUsesById.get(s.id) ?? 0;
+      return s.uses + planned < s.max_uses;
+    })
     .sort((a, b) => (b.approved_at ?? 0) - (a.approved_at ?? 0));
 
   for (const candidate of candidates) {
     if (matchesSessionPattern(binding, candidate)) {
+      // Mark this binding as planning to consume one use of `candidate.id`.
+      // Phase 1 must update the counter BEFORE returning, so the next
+      // binding's lookup sees the bumped count.
+      plannedSessionUsesById.set(
+        candidate.id,
+        (plannedSessionUsesById.get(candidate.id) ?? 0) + 1,
+      );
       return { kind: "session", binding, sessionId: candidate.id };
     }
   }
@@ -3200,6 +3311,11 @@ function planFromAutoMatchedSession(
 5. **Wiring**: in the existing per-binding planning loop in Phase 1, after the `approvalIdsFromClient` match attempt and before the `synth` / `mint` default, add:
 ```ts
   // BURST 5 §2: auto-match an owned active session when no explicit sessionId is supplied.
+  // The plannedSessionUsesById map is initialized once OUTSIDE this loop,
+  // alongside the existing `plannedSessionUses: number` counter (which is
+  // for the explicit-sessionId path). For symmetry consider renaming the
+  // existing scalar to `plannedExplicitSessionUses` and adding the new
+  // Map<string, number> as `plannedAutoSessionUsesById`.
   if (
     opts.sessionStore !== undefined &&
     opts.sessionId === undefined &&
@@ -3207,6 +3323,7 @@ function planFromAutoMatchedSession(
   ) {
     const autoPlan = planFromAutoMatchedSession(
       binding, opts.sessionStore, callerAgentId, Date.now(),
+      plannedAutoSessionUsesById,
     );
     if (autoPlan !== null) {
       plan.push(autoPlan);
@@ -3214,6 +3331,8 @@ function planFromAutoMatchedSession(
     }
   }
 ```
+
+Add `const plannedAutoSessionUsesById = new Map<string, number>();` just above the Phase-1 binding loop (alongside the existing `plannedSessionUses = 0` counter at line 112).
 
 6. **Race handling** at Phase 2: the existing Step-2 `canMatchSession` re-check (line 329) already covers the "pattern stopped matching" race. For the more-specific `uses === max_uses` race, wrap the `mintFromSession` call (line 344) with a one-shot retry **only for auto-matched entries** (telling them apart from explicit-sessionId entries via a Phase-1 flag or by checking `opts.sessionId === undefined`):
 
@@ -3227,6 +3346,7 @@ if (p.kind === "session") {
     if (opts.sessionId === undefined && isMaxUsesExhausted(err)) {
       const retry = planFromAutoMatchedSession(
         p.binding, opts.sessionStore!, callerAgentId, Date.now(),
+        plannedAutoSessionUsesById,
         new Set([p.sessionId]),
       );
       if (retry !== null) {
@@ -3315,6 +3435,37 @@ test("/v1/health active_sessions is owner-scoped", async () => {
     });
   });
 });
+
+test("secret-shuttle status (text mode) prints an active-sessions section when sessions exist", async () => {
+  // CLI-level test: spawn the actual CLI process so we exercise statusCommand
+  // end-to-end including the report.health.active_sessions nested-path read.
+  await withDaemonForTest(async (ctx) => {
+    await asAgent(ctx, "claude-abc", async () => {
+      const s = await ctx.sessionStore.createForOwner({
+        actions: ["template-run"],
+        ref_glob: "ss://stripe/prod/STRIPE_KEY",
+        destination_domains: ["vercel.com"],
+        template_ids: ["vercel-env-add"],
+        required_params: { name: "STRIPE_KEY", environment: "production" },
+        ttl_ms: 15 * 60 * 1000,
+      }, "claude-abc");
+      ctx.sessionStore.approve(s.id);
+    });
+
+    const { stdout } = await execp("node", [
+      path.join(process.cwd(), "dist/cli/index.js"),
+      "status",
+    ], { env: { ...process.env, SECRET_SHUTTLE_DAEMON_PORT: String(ctx.port) } });
+    assert.match(stdout, /active sessions:/);
+    assert.match(stdout, /vercel-env-add/);
+    assert.match(stdout, /name=STRIPE_KEY/);
+  });
+});
+
+test("secret-shuttle status --json includes nested report.health.active_sessions", async () => {
+  // Same setup as above; spawn CLI with --json; assert the field flows
+  // through at the nested path (no flattening regression).
+});
 ```
 
 - [ ] **Step 2: Add the field to the health route**
@@ -3352,15 +3503,26 @@ function summarizePattern(s: SessionGrant): string {
 
 - [ ] **Step 3: Update `src/cli/commands/status.ts` text mode**
 
-In the text rendering, add a section showing active sessions:
+`statusCommand` (`src/cli/commands/status.ts:58`) builds a `StatusResult = { ready, next_action, report: { ..., health } }`. The `/v1/health` body lives at `result.report.health`. After Step 2 added `active_sessions` to the health response, surface it from there in both modes:
+
+For JSON mode: it's already in `report.health.active_sessions` — agents read `result.report.health.active_sessions[*].pattern_summary`. No CLI change needed for JSON output (the field flows through unchanged).
+
+For text mode: read from the nested path:
 ```ts
-if (status.active_sessions?.length) {
-  lines.push(`Active sessions:`);
-  for (const s of status.active_sessions) {
-    lines.push(`  - ${s.pattern_summary} (expires in ${s.minutes_remaining} min)`);
+const activeSessions = (result.report.health as Record<string, unknown> | null)?.active_sessions as
+  | Array<{ id: string; pattern_summary: string; minutes_remaining: number }>
+  | undefined;
+if (activeSessions !== undefined && activeSessions.length > 0) {
+  process.stdout.write(`active sessions:\n`);
+  for (const s of activeSessions) {
+    process.stdout.write(`  - ${s.pattern_summary} (expires in ${s.minutes_remaining} min)\n`);
   }
 }
 ```
+
+Place this block alongside the other text-mode `process.stdout.write` calls in `statusCommand` (find them via `grep -n "process.stdout.write" src/cli/commands/status.ts`).
+
+If promoting `active_sessions` to the top level of `StatusResult` would be cleaner, that's a follow-up — keeping it nested under `report.health` for this burst matches today's shape and avoids changing the `StatusResult` type signature.
 
 - [ ] **Step 4: Run tests**
 
@@ -3815,11 +3977,12 @@ function isUserFacingAction(a: string): boolean { return !["tokens_mint", "daemo
 
 - [ ] **Step 3: Register the route + the CLI verb**
 
-In `src/daemon/api/routes.ts` (or the file where routes are mounted), add:
+In `src/daemon/api/router.ts` (where every route is mounted; verify the path with `grep -n "registerBootstrapRoutes\|register.*Route" src/daemon/api/router.ts`), add:
 ```ts
 import { registerAuditSummaryRoute } from "./routes/audit-summary.js";
-// ...
-registerAuditSummaryRoute(server, { bootstrapStore });
+// ... in the route-registration body (note: router has `services`, not a
+// local `bootstrapStore` — read services.bootstrapStore from services.ts:137):
+registerAuditSummaryRoute(server, { bootstrapStore: services.bootstrapStore });
 ```
 
 In `src/cli/index.ts`:
