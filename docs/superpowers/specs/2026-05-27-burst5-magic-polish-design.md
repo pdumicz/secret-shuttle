@@ -64,9 +64,13 @@ secret-shuttle provision --list
 secret-shuttle provision --abandon --batch <id>
 ```
 
-**Flag conflict resolution:** `--infer`, `--yml`, `--secret`, `--continue`, `--list`, `--abandon` are mutually exclusive (the input-shape selectors). Multiple selectors → `bad_request` with the conflicting flags named in `message`. Single selector required (or default to `--yml secret-shuttle.yml` if file exists; otherwise error).
+**Flag conflict resolution:** `--infer`, `--yml`, `--secret`, `--continue`, `--list`, `--abandon` are mutually exclusive (the input-shape selectors). Multiple selectors → `provision_mode_conflict` with the conflicting flags named in `message`. Single selector required; if no selector and `./secret-shuttle.yml` exists, default to `--yml ./secret-shuttle.yml`; if neither selector nor file → `provision_no_mode`.
 
-**Return shape:** unchanged from today's `bootstrap`. Every mode produces a batch (single-secret modes produce a 1-step batch), every batch returns `approval_required` with `batch_id` + `details.approvals[*]`. `--continue` consumes and executes.
+**Return shape — non-`--dry-run` modes (`--yml`, `--secret`, `--infer` when fully executable):** mint a batch, return `approval_required` with `batch_id` + `details.approvals[*]`. `--continue` consumes and executes.
+
+**Return shape — `--dry-run` (`--infer` only):** print the planned yml to stdout, do not write any file, do not mint any batch, exit 0 with `{ ok: true, mode: "dry_run", yml: "<rendered yml>" }`. `--dry-run` combined with any other mode → `provision_mode_conflict`.
+
+**Return shape — `--infer` when generated yml is NOT fully executable** (see "Executability gate" below): write the yml, do not mint a batch, return a success payload with `needs_edit: true` (no error).
 
 ### Single-secret mode (Item B)
 
@@ -112,11 +116,29 @@ secret-shuttle provision --infer
 
 Rule table lives in `src/cli/provision/infer-rules.ts` as a flat data structure. Adding a row in future is a one-line change.
 
+**Executability gate** — a generated yml is *fully executable* if and only if **all** of the following hold for every `secrets[*]` entry:
+- `source.kind ∈ {capture, random_32_bytes, random_64_bytes, existing}` (i.e. not `unknown`)
+- If `source.kind == capture`: `source.url` is a non-null https URL that passes the strict validator from Burst 4 §3
+- If `source.kind == existing`: `source.ref` is a real `ss://source/env/NAME` string (not a placeholder; ref-prefix exists in the vault is NOT required — `provision --yml` already errors clearly at execution time if missing)
+- `destinations` is a non-empty array
+- No destination shorthand contains the literal placeholder substring `OWNER/REPO`
+- (Note: an `existing` ref pointing at an empty vault slot is allowed at infer time and surfaces at execute time as `secret_not_found` — that's where the existing per-step error path takes over.)
+
+The gate is enforced by a pure function `isInferYmlExecutable(plan) → { ok, issues[] }` in `src/cli/provision/infer-gate.ts`.
+
 **Output behavior:**
-- Default: write generated yml to `./secret-shuttle.yml`. If file already exists → error `infer_yml_exists` with `next_action` suggesting `--force` to overwrite or `--dry-run` to stdout-only.
-- `--dry-run`: print generated yml to stdout. Do not write file. Do not mint a batch.
-- `--force`: overwrite existing `./secret-shuttle.yml`.
-- After write (default or `--force`): treat the result as if the user had run `provision --yml secret-shuttle.yml` — mint a batch, return `approval_required`. Agent must show the generated plan to the user before `--continue` (mandated in SKILL.md).
+
+| Flag combo | File written? | Batch minted? | Return shape |
+|---|---|---|---|
+| `--infer` (executable) | yes (refuse if exists, see below) | yes | `approval_required` (mint batch) |
+| `--infer` (NOT executable) | yes (same refuse-if-exists rule) | **no** | `{ ok: true, needs_edit: true, yml_path, issues[], next_action: "edit ./secret-shuttle.yml then run: secret-shuttle provision --yml ./secret-shuttle.yml" }` |
+| `--infer --dry-run` | **no** | no | `{ ok: true, mode: "dry_run", yml: "<rendered>", executable: bool, issues[] }` |
+| `--infer --force` | yes (overwrite allowed) | same as above (gate still applies) | same as above |
+| `--infer` when `./secret-shuttle.yml` exists and no `--force` | no | no | error `infer_yml_exists` (exit 5 CONFLICT, `next_action` suggests `--force` or `--dry-run`) |
+
+The gate keeps the strict parser strict — only fully-runnable yml flows into the batch executor. Non-executable yml is treated as a *draft* the user (or agent) must edit, not as an error.
+
+**Agent contract on `needs_edit`:** the agent shows the generated yml + `issues[]` to the user, explains what to fill in, asks the user to edit (or guides them through the edits), then runs `provision --yml ./secret-shuttle.yml` once happy. No approval has been minted yet, so no time pressure.
 
 **Generated yml format example:**
 
@@ -189,11 +211,12 @@ Examples:
 |---|---|---|
 | `command_renamed` | 2 (USAGE) | Stub for removed `bootstrap` verb; `next_action` points at `provision`. |
 | `infer_no_env_example` | 3 (NOT_FOUND) | `--infer` couldn't find `.env.example`. Hint: create one. |
-| `infer_yml_exists` | 5 (CONFLICT) | `./secret-shuttle.yml` already exists. `next_action: "--force"` or `--dry-run`. |
-| `provision_mode_conflict` | 2 (USAGE) | Multiple mode-selector flags. `message` names the conflicting flags. |
+| `infer_yml_exists` | 5 (CONFLICT) | `./secret-shuttle.yml` already exists. `next_action`: `--force` or `--dry-run`. |
+| `provision_mode_conflict` | 2 (USAGE) | Multiple mode-selector flags, or `--dry-run` with a non-`--infer` mode. `message` names the conflict. |
 | `provision_no_mode` | 2 (USAGE) | No mode selector and no `secret-shuttle.yml` to default to. |
+| `session_ttl_exceeds_cap` | 2 (USAGE) | (New, replacing today's `bad_request` for this case.) Session pattern `ttl_ms` exceeds the cap. `message` names the cap. |
 
-All existing `bootstrap_*` error codes are kept verbatim (they describe internal batch operations that didn't change).
+All existing `bootstrap_*` error codes are kept verbatim (they describe internal batch operations that didn't change). `needs_edit` is a SUCCESS shape, not an error — no error code.
 
 ### Tests
 
@@ -211,90 +234,161 @@ All existing `bootstrap_*` error codes are kept verbatim (they describe internal
 
 Today: pre-approved sessions exist (Plan 4a) but the only way to create one is `secret-shuttle internal session create` — hidden from agents, requires the agent to compose the pattern correctly. Result: real-world agent flows hit a fresh popup on every operation, even when the human just approved an identical-shape one 30 seconds earlier.
 
-After this burst: when the hub renders any batch approval, the user sees a checkbox offering to extend their consent to matching future operations. One click at consent time. The agent doesn't have to know sessions exist.
+After this burst: when the user approves a provisioning batch, the approval card offers a checkbox to extend their consent to matching future operations. One click at consent time. The agent doesn't have to know sessions exist.
 
-### Hub UI change
+### Where the UI change lives (corrects v1 spec)
 
-The batch-approval card in `src/daemon/hub/hub-ui.html` (rendered for any multi-binding approval, including every `provision` batch) gains a footer block:
+The approval card lives in `src/daemon/approvals/ui.html` + the routes in `src/daemon/approvals/ui-server.ts`. The hub (`src/daemon/hub/`) is the iframe-shell + SSE queue; it does NOT render approval content directly. All UI/UX changes in this section apply to `ui.html` (the per-approval page that the hub frames).
+
+The hub's only role for this feature is unchanged: it queues navigations and frames the per-approval URL. No hub-ui.html changes are required.
+
+### Approval card change
+
+`src/daemon/approvals/ui.html` is rendered per approval at `/ui/approvals/:approval_id?token=<ui_token>`. For approvals whose `action == "bootstrap"` (i.e. every `provision` batch), the page gains a footer block above the [Approve]/[Deny] buttons:
 
 ```
 ─────────────────────────────────────────────
 ☐ Also approve any matching shape for the next
   [ 15 min ▾ ] (options: 5 / 15 / 30 / 60)
-  Matching shape: same actions on the same refs + destinations.
+  Matching shape: identical destination templates on the same
+  (source, env) ref prefix as this batch.
   You can revoke at any time via:
     secret-shuttle internal session revoke --id <id>
 ─────────────────────────────────────────────
    [ Approve ]   [ Deny ]
 ```
 
-If the checkbox is checked at approve-time:
-1. The daemon mints the per-op grant(s) as usual (the in-flight batch proceeds).
-2. The daemon *additionally* mints a `SessionGrant` via the existing Plan 4a primitive. Pattern is derived from the batch bindings (see "Pattern derivation" below). TTL is the dropdown selection. Owner: same agent that owns the batch.
-3. The daemon stores the session as "auto-active for this agent" — see "Daemon-side auto-application" below.
+The checkbox is default-unchecked. The dropdown defaults to 15 min when the user checks the box. The block does not render at all if the derived pattern would be empty (see "Pattern derivation" below).
 
-If the checkbox is unchecked: behavior is unchanged from today.
+When the user clicks [Approve] with the checkbox checked, the POST to `/ui/approvals/:id/approve` includes `{ session: { ttl_minutes: <selection> } }` in its body. The route reads this and, after recording the approval grant, calls the new daemon method `createSessionFromApproval(approvalGrant, pattern, ttlMs)` — see "Owner stamping" below.
 
-### Pattern derivation
+### Pattern derivation — from `BatchState.plan`, not from bindings (corrects v1 spec)
 
-The session pattern is derived from the batch's bindings, restricted to session-eligible actions:
+The provision batch is approved as a single `action: "bootstrap"` binding (the executor bypasses inner approvals via `bootstrapAuthority`). So we cannot "derive from the batch's bindings" as the v1 spec said — there is only one binding, and its shape is opaque to the session pattern surface.
 
-- For each binding in the batch with action ∈ `{template-run, inject-submit, reveal-capture, secrets-set}`:
-  - `template-run` → contribute `template_ids: [binding.template_id]` + `ref_pattern: binding.ref`
-  - `inject-submit` → contribute `destination_domains: [binding.destination_domain]` + `ref_pattern: binding.ref`
-  - `reveal-capture` → contribute `destination_domains: [binding.destination_domain]` + `ref_pattern: binding.planned_ref`
-  - `secrets-set` → contribute `destination_domains: ⊆ binding.allowed_domains` + `allowed_actions: ⊆ binding.allowed_actions` + `ref_pattern: binding.planned_ref`
-- Bindings with non-session-eligible actions (`bootstrap`, `run`, `run_stdin`, `inject_render`, `secrets-delete`, `secrets-rotate`, `compare`) **do not** contribute. They remain per-op-approval forever.
-- If the resulting pattern would be empty (e.g., batch consists entirely of one capture step), the session checkbox **does not render** in the hub UI for that batch. The user simply approves or denies the batch as today.
+Instead, the session pattern is derived **server-side from `BatchState.plan: PlanEntry[]`**:
 
-`ref_pattern` is `prefix*` form per Plan 4a (literal prefix + optional single trailing `*`). For a batch covering `ss://stripe/prod/STRIPE_WEBHOOK_SECRET` and `ss://stripe/prod/STRIPE_PUBLISHABLE`, the inferred pattern is `ss://stripe/prod/*`. For a batch covering one ref, the pattern is that exact ref.
+```
+inferSessionPatternFromPlan(plan: PlanEntry[]) → {
+  patterns: SessionPattern[];          // possibly multiple — see narrowness below
+  summary_lines: string[];             // what to display in the UI footer
+}
+```
+
+**Rules:**
+- For each `PlanEntry`, the destinations carry resolved `template_id` + `domain` (see `ResolvedDestination` in `src/daemon/bootstrap/store.ts`).
+- Group plan entries by `(template_id, source, env)` — where `source, env` are extracted from the entry's `ref` (`ss://<source>/<env>/<NAME>`).
+- For each group, emit ONE `SessionPattern` of action `template-run`:
+  - `template_ids: [<template_id>]`
+  - `ref_pattern: ss://<source>/<env>/*` (if group has ≥2 entries with the same `(source, env)`) OR the single exact ref (if group has 1 entry)
+  - `destination_domains: [<domain>]` (informational; not used in `template-run` matcher per Plan 4a, but emitted for audit/display consistency)
+
+**Capture-step exclusion:** capture is one-shot human-attended; future captures are not session-eligible (the user has to click Capture every time anyway). Plan entries with `source.kind == capture` contribute their template-run destination groups to the session pattern (the *push* is repeatable) but do NOT contribute any capture/reveal action to the session.
+
+**Empty-pattern guard:** if the derivation produces zero patterns (e.g., the batch is a single `source.kind == existing` entry whose only destination is `vercel:production` — exactly one push, no possible repeat), the affordance is not rendered.
+
+### Ref glob narrowness rule (corrects v1 spec ambiguity)
+
+The reviewer flagged that one `SessionPattern.ref_glob` can become too broad for mixed providers/envs. Rules to keep patterns narrow:
+
+- **Group by `(template_id, source, env)`.** Refs sharing all three become one pattern with `ss://<source>/<env>/*`. Refs differing in any of those become separate patterns.
+- **Never emit a pattern broader than `ss://<source>/<env>/*`.** A would-be pattern like `ss://*/prod/*` or `ss://stripe/*/*` is split into multiple `ss://<source>/<env>/*` patterns.
+- **Single-ref groups use the exact ref**, not a glob.
+
+For a mixed batch (e.g., Stripe→Vercel and Supabase→Vercel and Stripe→GitHub Actions), the derivation produces 3 distinct patterns, all attached to the same `SessionGrant.id`. The hub UI footer shows them as three lines (one per pattern) so the user sees exactly what they're consenting to.
+
+### Owner stamping — UI route → store, explicit propagation (corrects v1 spec)
+
+The approval UI routes (`/ui/approvals/:id/approve|deny`) are registered via `addRouteRaw`, which has no ALS auth context. Today `SessionStore.create()` reads `getCurrentAgentId()` inside `create()` — that would return `"daemon"` for these routes, breaking owner-enforcement consumption.
+
+Fix: a new factory on SessionStore that takes the owner explicitly:
+
+```ts
+class SessionStore {
+  // Existing — reads owner from ALS:
+  create(pattern: SessionPattern): SessionGrant { /* owner = getCurrentAgentId() */ }
+
+  // New — owner supplied explicitly. Used by UI routes that act on a
+  // persisted grant outside any ALS context.  Mirrors the existing
+  // AuditActorSite.persisted-owner pattern (src/daemon/audit.ts:84).
+  createForOwner(pattern: SessionPattern, owner_agent_id: string): SessionGrant {
+    return this.createInternal(pattern, owner_agent_id);
+  }
+}
+```
+
+The `/ui/approvals/:id/approve` route, when the session checkbox was checked, calls:
+```ts
+const grant = await approvalStore.getOrThrow(approvalId);   // grant carries owner_agent_id
+const { patterns } = inferSessionPatternFromPlan(batchState.plan);
+for (const pattern of patterns) {
+  sessionStore.createForOwner(pattern, grant.owner_agent_id);
+}
+```
+
+Owner is the **approval grant's** `owner_agent_id`, which equals the batch's `owner_agent_id` (both are stamped from ALS at plan time per Burst 4). The session is therefore owned by the same agent that owns the batch — matching the user's mental model ("approve this for the agent that asked for it").
+
+Audit writes for the session creation use `AuditActorSite.persisted-owner` (see `src/daemon/audit.ts:84-99`) so the audit record correctly attributes to the agent, not to "daemon".
 
 ### Daemon-side auto-application
 
-The CLI **does not** need to track `--session <id>`. The daemon resolves automatically:
+The CLI **does not** need to track `--session <id>` for the auto-match case. The daemon resolves automatically:
 
 - `requireApprovals` (today) checks for an `approval_id` in the request, falls through to mint a new one.
-- After this change: when no `approval_id` is supplied, `requireApprovals` *first* consults the SessionStore for active session grants owned by the requesting agent that match the binding shape. If a match exists, a per-op grant is minted from the session (existing `mintFromSession` primitive, unchanged) and the operation proceeds without a hub popup.
+- After this change: when no `approval_id` AND no `session_id` is supplied, `requireApprovals` *first* consults the SessionStore for owned-by-this-agent active session grants whose pattern matches the binding shape. If a match exists, a per-op grant is minted via the existing `canMatchSession` + `mintFromSession` primitives (Plan 4d) and the operation proceeds without a hub popup.
 - If no session matches and the operation requires approval, behavior falls through to the existing per-op approval flow.
 
 This means the agent calling `template run vercel-env-add --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET ...` ten seconds after the user approved a session pattern matching that ref will silently succeed — no hub UI appearance, no `--session` flag, no agent code change.
 
-**Multi-match resolution:** if multiple owned-by-this-agent active sessions match the binding, the daemon picks the most recently approved (`approved_at` DESC, tiebreaker `created_at` DESC). The selected session's `max_uses` is decremented per existing Plan 4a semantics. The audit record includes the session_id consumed.
+**Auto-match candidate filtering** — applied before pattern matching:
+- Exclude sessions where `status != "granted"` (skip pending, denied, expired, revoked).
+- Exclude sessions where `expires_at < now` (defensive — `SessionStore.get/list` already flip these to `expired`).
+- Exclude sessions where `max_uses != null && uses_remaining <= 0`.
+- Of the remainder, sort by `approved_at` DESC (tiebreaker `created_at` DESC), match patterns in order, return the first match.
 
-**Existing `--session <id>` flag:** continues to work as today (Plan 4a). When supplied explicitly, the daemon uses that specific session and does not consult others. When omitted, the daemon performs the auto-match lookup. Explicit `--session <id>` for a session that exists but does not match still falls back to per-op approval (no behavioral change).
+**Race on `max_uses`:** if `canMatchSession` returns success but `mintFromSession` fails because `max_uses` was raced to zero by a sibling call, the daemon retries the auto-match lookup ONCE (which will skip the now-exhausted candidate). If still no match → fall through to per-op approval. Documented in test.
+
+**Explicit `--session <id>` (separate from auto-match):** continues to behave as today (Plan 4a). When supplied, the daemon uses that specific session and does not consult auto-match. Explicit `--session <id>` for a session that exists but does not match still falls back to per-op approval (no behavioral change). Auto-match is ONLY consulted when `--session` is absent.
 
 ### TTL hard cap raise
 
-Plan 4a caps session TTL at 15 min. This burst raises the cap to 60 min, because:
-- The previous cap was set when sessions were minted via a hidden CLI flag (low information asymmetry — user might be 0 seconds informed).
-- The new affordance presents the dropdown at the moment of consent inside the hub UI, with the matching pattern visible. Information asymmetry is much smaller.
-- 15 min is too short for realistic provisioning flows (capturing 3 secrets across 3 dashboards + verifying in destinations often exceeds 15 min).
+Plan 4a caps session TTL at 15 min (`TTL_MAX_MS = 900_000`, source: `src/daemon/approvals/session.ts:66,252`). The current overflow error is `bad_request` ("ttl_ms cannot exceed 900000ms (15 minutes)."). This burst:
 
-`SessionStore.create()` validation: TTL_MS_MAX = 60 * 60 * 1000. Any pattern with `ttl_ms` above the cap → `session_ttl_exceeds_cap` (existing error code, threshold updated).
+- Raises `TTL_MAX_MS` to 60 * 60 * 1000 (60 min).
+- Adds new explicit error code `session_ttl_exceeds_cap` (registered in `src/shared/error-codes.ts`), replacing the `bad_request` throw for this specific case. Code is exit 2 (USAGE) with `message` interpolating the actual cap.
+
+Reasoning for the raise:
+- The previous cap was set when sessions were minted via a hidden CLI flag (low information — user might be zero-seconds-informed).
+- The new affordance presents the dropdown at the moment of consent inside the approval card, with the matching pattern visible.
+- 15 min is too short for realistic provisioning flows (capturing 3 secrets across 3 dashboards + verifying in destinations often exceeds 15 min).
 
 ### Status surface
 
 `secret-shuttle status` (and `status --json`) gain a new field:
-```
-active_sessions: [
-  {
-    id: "sess_abc",
-    pattern_summary: "template-run on ss://stripe/prod/* via vercel-env-add",
-    expires_at: "2026-05-27T14:32:00Z",
-    minutes_remaining: 12
-  }
-]
+```json
+{
+  "active_sessions": [
+    {
+      "id": "sess_abc",
+      "pattern_summary": "template-run on ss://stripe/prod/* via vercel-env-add",
+      "expires_at": "2026-05-27T14:32:00Z",
+      "minutes_remaining": 12
+    }
+  ]
+}
 ```
 
-The agent reads this to know whether subsequent ops in the same shape will be silent. If the agent observes `active_sessions: []`, it knows the next op will pop a hub approval — useful for "I'm about to ask you to approve" messaging.
+The agent reads this to know whether subsequent ops in the same shape will be silent. If the agent observes `active_sessions: []`, it knows the next op will pop a hub approval — useful for "I'm about to ask you to approve" messaging in advance. Owner-scoped: agents see only their own sessions.
 
 ### Tests
 
-- `hub-ui-session-affordance.test.ts`: drift-guard text patterns on the new HTML/JS (checkbox + dropdown + submission shape).
-- `session-pattern-derivation.test.ts`: pure-function test of pattern derivation from batch bindings, exercising mixed-eligibility batches and the "empty pattern → no affordance" path.
-- `require-approvals-session-auto.test.ts`: an active session grant silently satisfies a matching operation; mismatched ops fall through to per-op approval.
-- `session-ttl-cap-bump.test.ts`: TTL of exactly 60 min accepted; 60 min + 1 ms rejected with `session_ttl_exceeds_cap`.
-- `status-active-sessions.test.ts`: `status --json` includes the new field; empty array when no sessions.
+- `approval-ui-session-affordance.test.ts`: drift-guard text patterns on the new HTML/JS in `ui.html` (checkbox + dropdown + POST body shape).
+- `infer-session-pattern.test.ts`: pure-function test of pattern derivation from `BatchState.plan`, exercising single-group/multi-group/mixed-provider/all-capture/single-existing cases.
+- `session-store-create-for-owner.test.ts`: `createForOwner` stamps the supplied owner; ALS context is not consulted.
+- `approval-ui-creates-session.test.ts`: POST `/ui/approvals/:id/approve` with `session: { ttl_minutes: 15 }` creates a session owned by the approval grant's owner_agent_id.
+- `require-approvals-auto-match.test.ts`: matching active session silently satisfies a matching operation; expired/revoked/exhausted candidates are skipped; max_uses race retries once then falls through.
+- `session-ttl-cap-bump.test.ts`: TTL of exactly 60 min accepted; 60 min + 1 ms rejected with `session_ttl_exceeds_cap`; the explicit code replaces the prior `bad_request` for this case.
+- `status-active-sessions.test.ts`: `status --json` includes the new field, owner-scoped; empty array when no sessions.
 
 ---
 
@@ -331,7 +425,7 @@ Replace the current 163-line single-flow SKILL.md with a layered structure:
 
 ### Above-the-fold structure rules
 
-- Every code block is **copy-paste runnable** (no `<placeholder>` that requires substitution before the example works in a test project).
+- Every code block is **runnable as written for its phase**: bootstrap-time commands (e.g., `npx secret-shuttle init`, `secret-shuttle provision --infer`) require zero substitution. Continuation commands that pass ids returned from a prior step use `<batch_id_from_prior_step>` / `<approval_id_from_prior_step>` placeholders — the prose surrounding the code block names them as "interpolate the ids the previous step returned." Avoid placeholders that require config-time substitution before any command works (e.g. `<URL>`, `<API_KEY>`).
 - Every section ends with one **clear directive** (what the agent should do next).
 - The error table includes only the top ~8 codes by frequency (the agent jumps below the fold for rarer ones).
 
@@ -351,9 +445,12 @@ npx secret-shuttle init
 
 # Provision an entire project's secrets in one approval:
 secret-shuttle provision --infer
-# → reviews .env.example, generates a plan, returns approval_required.
-# Tell the user: "I'm about to provision <count> secrets to <destinations>. Approve in the popup."
-secret-shuttle provision --continue --batch <batch_id> --approval-id <approval_id>
+# → If the inferred yml is fully executable: returns approval_required with details.batch_id + details.approvals[].
+#   If not: returns { needs_edit: true, yml_path, issues[] } — show the user the issues and ask for edits.
+# Once approved, continue with the ids the prior step returned:
+secret-shuttle provision --continue \
+  --batch <batch_id_from_prior_step> \
+  --approval-id <approval_id_from_prior_step>
 
 # Use a secret in a child process (value never enters your context):
 secret-shuttle run --env-file .env -- npm start
@@ -386,11 +483,13 @@ Every error JSON includes `error_code` + `next_action`. When `next_action` is a 
 | `daemon_not_running` | `secret-shuttle daemon start` | Daemon isn't running. |
 | `vault_not_initialized` | `secret-shuttle init` | No vault exists. |
 | `vault_locked` | `secret-shuttle unlock` | Vault is locked. |
-| `approval_required` | null (human required) | Hub popup opens. Wait, or pass `--approval-id` to retry. |
-| `bootstrap_step_failed` | `secret-shuttle provision --continue --batch <id>` | Resume from the failed step. |
+| `approval_required` | null (human required) | Approval popup opens. Wait, or pass `--approval-id` to retry. |
 | `secret_not_found` | null | Use `secrets list` to see what's available. |
 | `infer_no_env_example` | null (human required) | Create a `.env.example` listing your secret names. |
+| `infer_yml_exists` | `secret-shuttle provision --infer --force` (or `--dry-run`) | Generated yml would overwrite an existing file. |
 | `command_renamed` | (printed in error) | A verb was renamed; the error names the replacement. |
+
+For a provision batch that ends `failed_partial`, the response carries a non-null `next_action` (typically `secret-shuttle provision --continue --batch <id>`) — run it to resume from the failed step. Same rule everywhere: **trust `next_action` over error_code recognition**.
 
 Less common codes are in the daemon's full error table — call `secret-shuttle status --json` to surface the current state machine, or read [docs/cli-reference.md](docs/cli-reference.md) below the fold.
 
@@ -478,13 +577,38 @@ Recovery: secret-shuttle provision --continue --batch b_abc
 
 `individual_ops` carries any non-batched relevant operations (e.g., a `run` invocation with prod refs). Excludes infrastructure noise (`token mint`, `status check`, `keychain status`).
 
-**Implementation:** read the existing audit log file under `<SHUTTLE_HOME>`. No new audit fields needed. Curate the summary by grouping records on `batch_id` and synthesizing the digest shape. Implementation in `src/cli/commands/audit.ts` + daemon route `POST /v1/audit/summary` (CLI is a thin client; daemon owns the file read).
+**Two distinct read paths — corrects v1 spec ("no new audit fields needed" was wrong):**
 
-**Owner scoping:** by default, the agent calling `audit` sees only its own actions (matching the owner-enforcement model from Burst 4). Root can pass `--all` to see every actor.
+| Mode | Source of truth | Completeness |
+|---|---|---|
+| `--batch <batch-id>` | `BootstrapStore.get(batch_id)` (live `BatchState`) | Full plan + step results + per-destination push outcomes. The richest view. Returns `audit_batch_not_found` if the batch has been pruned from the operational store. |
+| `--since <window>` | Audit log file under `<SHUTTLE_HOME>` (durable history) | Grouped by `batch_id` audit field (see below). Per-step ref + source_kind + destination_template_id reconstructable from existing audit fields (`ref`, `template_id`, `domain`, `destination_environment`). Source_kind requires a new durable field — see "Required durable audit field" below. |
+
+The `audit` route tries `BootstrapStore` first when given `--batch`; on miss it falls back to audit-log reconstruction with a `details.reconstructed_from: "audit"` flag in the response (so the caller knows the view may be partial — destination push results are not always durably recorded today).
+
+**Required durable audit field (one new field):**
+
+`DaemonAuditEvent` (in `src/daemon/audit.ts`) gains:
+```ts
+batch_id?: string;       // Set on every bootstrap_plan / bootstrap_step row
+                         // (and on any future provision-batch-related row).
+source_kind?: string;    // Set on bootstrap_step rows ("capture" | "random_32_bytes" | "random_64_bytes" | "existing").
+                         // Enables `--since` summaries to display source_kind per ref without consulting BatchState.
+```
+
+These are additive optional fields. Existing audit rows without them remain valid; the summary just shows "—" for missing source_kind. The fields populate from `BatchState.plan[i].source.kind` and `BatchState.batch_id` at audit-write time in `src/daemon/bootstrap/executor.ts`.
+
+Destination shorthand (e.g., `vercel:production`) is reconstructed at summary time from existing fields: `template_id` + `domain` + `destination_environment`. No new field needed for destinations.
+
+`approved_at` for the batch summary is derived from the `approval_granted` audit row matching the batch's `approval_id`. Both `actor_agent_id` and `session_id` (already durable per Burst 4) flow through unchanged.
+
+**Implementation:** `src/cli/commands/audit.ts` + daemon route `POST /v1/audit/summary` (CLI is a thin client; daemon owns the file read). Audit-log reading: stream the JSONL file from EOF backwards until the time window is satisfied, parse, group by `batch_id`. No new on-disk format.
+
+**Owner scoping:** by default, the agent calling `audit` sees only its own actions (`actor_agent_id` filter, matching the owner-enforcement model from Burst 4). Root can pass `--all` to see every actor.
 
 **Error codes:**
 - `audit_window_invalid` (2, USAGE): malformed `--since`.
-- `audit_batch_not_found` (3, NOT_FOUND): `--batch <id>` doesn't exist (with owner-scoped non-disclosure: cross-owner returns the same code).
+- `audit_batch_not_found` (3, NOT_FOUND): `--batch <id>` doesn't exist in operational store AND no audit rows match the id (with owner-scoped non-disclosure: cross-owner returns the same code).
 
 ### Item F — Discoverability tweaks
 
@@ -529,11 +653,13 @@ Implementation: change in `src/daemon/bootstrap/executor.ts` where the final res
 
 ### Tests
 
-- `audit.test.ts`: text format + JSON format snapshot; window parsing; cross-owner non-disclosure.
-- `audit-route.test.ts`: daemon route exists, returns owner-scoped subset.
-- `bootstrap-resume-hint.test.ts`: a failed step emits `next_action` pointing at `provision --continue`; an abandoned batch does not.
-- `cli-help-discoverability.test.ts`: `--help` no-args output includes the AGENT QUICKSTART line.
-- `readme-header.test.ts`: README starts with the agent callout block.
+- `audit.test.ts`: text + JSON format snapshots; window parsing (`5m`, `1h`, `1d`); cross-owner non-disclosure.
+- `audit-route.test.ts`: daemon `POST /v1/audit/summary` route exists; owner-scoped; `--all` requires root.
+- `audit-batch-live-vs-reconstructed.test.ts`: `--batch <id>` reads `BootstrapStore` first; on miss, falls back to audit-log reconstruction with `details.reconstructed_from: "audit"` set; cleanly missing both → `audit_batch_not_found`.
+- `audit-fields-batch-id-source-kind.test.ts`: `bootstrap_step` audit rows written by the executor carry `batch_id` and `source_kind` fields. Older rows without them parse cleanly and surface as "—" in summary output.
+- `provision-resume-hint.test.ts`: a `failed_partial` batch response carries `next_action: "secret-shuttle provision --continue --batch <id>"`; an abandoned batch does not; an expired-approval batch omits `next_action` and sets `details.requires_new_approval: true`.
+- `cli-help-discoverability.test.ts`: `--help` no-args output includes the AGENT QUICKSTART line; `help` command output mentions SKILL.md.
+- `readme-header.test.ts`: README starts with the agent callout block linking to SKILL.md.
 
 ---
 
