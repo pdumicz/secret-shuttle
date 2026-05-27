@@ -25,7 +25,7 @@
 - `bootstrap` verb is **hard-removed**, replaced by `provision`. Running `secret-shuttle bootstrap` exits with a `command_renamed` error pointing at `provision`.
 - Deprecated shims (`list`, `inspect`, `generate`, `doctor`) are **hard-removed** per the v0.3.0 schedule already noted in CHANGELOG. Their replacements (`secrets list`, `secrets get-ref`, `secrets set`, `status`) are unchanged.
 - Pre-approved session TTL hard cap raised from 15 min to 60 min, because the new affordance asks the user at the moment of consent rather than via a hidden CLI.
-- **Plan 4a `template-run` session matcher contract is evolved (additive, narrows-only):** `SessionPattern` gains optional `required_params` for template-run; the matcher enforces strict-equal on every key listed. Sessions created before this burst (none in production) have empty `required_params` and behave exactly as before. New sessions minted via the approval-UI affordance DO carry `required_params`, so they never widen consent beyond the displayed destination. The change is additive and narrows-only — no existing match can become broader. See §2 "Template-param constraint primitive" for the full rationale.
+- **Plan 4a `template-run` session matcher contract is evolved (additive, narrows-only):** `SessionPattern` gains one optional field `required_params?: Record<string, string>`. The matcher enforces strict-equal on every key listed (no-op when empty/absent — Plan 4a behavior preserved for manually-created sessions). The change is additive and narrows-only — no existing match can become broader. New sessions minted via the approval-UI affordance fill in `required_params` from the per-template destination-defining-params config; destinations whose template has no registered config are **excluded** from the derived patterns (fail-closed, no over-broad session ever auto-minted). See §2 "Template-param constraint primitive" for the full rationale.
 
 ### Unifying theme
 
@@ -255,7 +255,7 @@ The hub's only role for this feature is unchanged: it queues navigations and fra
   This would let the same secret(s) be pushed again to the
   exact destinations below, within the time window:
     • vercel-env-add        ss://stripe/prod/*         environment=production
-    • github-actions-...    ss://stripe/prod/*         owner=patryk, repo=secret-shuttle
+    • github-actions-...    ss://stripe/prod/*         repo=patryk/secret-shuttle
     • supabase-edge-...     ss://supabase/prod/X       project_ref=abc123
 
   Different environments, repos, or projects are NOT covered.
@@ -264,7 +264,7 @@ The hub's only role for this feature is unchanged: it queues navigations and fra
    [ Approve ]   [ Deny ]
 ```
 
-The pattern lines are server-rendered from the derivation result — one line per derived `SessionPattern`, showing `template_id`, `ref_pattern`, and the human-readable `required_params` key=value pairs. The user sees the **exact** scope they're consenting to, and the "Different environments, repos, or projects are NOT covered." line makes the param-strict semantics explicit.
+The pattern lines are server-rendered from the derivation result — one line per derived `SessionPattern`, showing `template_ids[0]`, `ref_glob`, and the human-readable `required_params` key=value pairs. The user sees the **exact** scope they're consenting to, and the "Different environments, repos, or projects are NOT covered." line makes the param-strict semantics explicit.
 
 The checkbox is default-unchecked. The dropdown defaults to 15 min when the user checks the box. The block does not render at all if the derived pattern set is empty (see "Empty-pattern guard" below).
 
@@ -287,22 +287,40 @@ Body shape (when present): `{ session?: { ttl_minutes: 5|15|30|60 } }`. Empty bo
 
 The Plan 4a `template-run` session matcher (`src/daemon/approvals/session-matchers.ts`) matches by `ref_glob` + `template_id` only. It does NOT constrain `template_params`. For provision batches that approve "push to vercel:production via vercel-env-add" the matcher would silently authorize "push to vercel:preview via vercel-env-add with the same ref" — a real over-broadening of consent. We need a param-equality matcher before sessions can be derived safely from provision batches.
 
-**SessionPattern extension (additive, template-run variant only):**
+**SessionPattern extension (additive, single new optional field):**
+
+The real shape (`src/daemon/approvals/session.ts:60`) is flat — one interface with `actions: SessionAction[]` and `ref_glob: string`. This burst adds exactly one optional field:
 
 ```ts
-// src/daemon/approvals/session.ts — SessionPattern.template-run variant
-interface TemplateRunSessionPattern {
-  action: "template-run";
-  ref_pattern: string;          // existing
-  template_ids: string[];       // existing
+// src/daemon/approvals/session.ts
+export interface SessionPattern {
+  actions: SessionAction[];                   // existing — unchanged
+  ref_glob: string;                           // existing — unchanged
+  destination_domains?: string[];             // existing — unchanged
+  template_ids?: string[];                    // existing — unchanged
+  allowed_actions?: SecretAction[];           // existing — unchanged
+  ttl_ms: number;                             // existing — unchanged
+  max_uses?: number | null;                   // existing — unchanged
+
   // NEW:
   required_params?: Record<string, string>;
-  // When present, the matcher requires the binding's template_params to
-  // contain every key here with strict-equal value (extra keys in the
-  // binding are allowed — the pattern constrains only what's listed).
-  // When absent/empty, today's matcher behavior is preserved.
+  // Applies ONLY to the template-run matcher branch (other action
+  // matchers ignore this field). When present and non-empty, the
+  // template-run matcher requires the binding's template_params to
+  // contain every key here with strict-equal value (extra keys in
+  // the binding are allowed — the pattern constrains only what's
+  // listed). When absent/empty, today's matcher behavior is
+  // preserved.
+  //
+  // Patterns whose `actions` does NOT include "template-run" are
+  // unaffected — the field is silently ignored by other matchers.
+  // Patterns whose `actions` includes "template-run" alongside
+  // other actions: required_params applies on the template-run
+  // branch only.
 }
 ```
+
+No other field changes. No new discriminated-union shape. No schema refactor.
 
 **Per-template "destination-defining params" config:**
 
@@ -316,32 +334,47 @@ interface TemplateRunSessionPattern {
 // session can ONLY match operations with the same destination shape.
 export const DESTINATION_DEFINING_PARAMS: Record<string, readonly string[]> = {
   "vercel-env-add":             ["environment"],
-  "github-actions-secret-set":  ["owner", "repo"],   // or "repository" — match the actual template param names at impl time
+  "github-actions-secret-set":  ["repo"],            // template uses one combined "owner/repo" string param
   "cloudflare-secret-put":      ["env"],
   "supabase-edge-secret-set":   ["project_ref"],
 };
 ```
 
-**Future-template fallback:** a `template-run` binding whose `template_id` is not in the config (e.g., a template added in a later burst without a registered entry) is treated as "no destination-defining params" — `required_params` ends up empty/absent, and the matcher behavior matches Plan 4a's pre-burst contract. The daemon emits a startup-time warning log line listing any registered template_ids without an entry in the destination-defining-params config, so new templates get noticed in review rather than silently shipping over-broad sessions.
+**Two distinct fallback contexts — derivation fails closed, manual paths unchanged:**
+
+- **Provision-derived sessions (the new affordance):** if a `PlanEntry.destination`'s `template_id` is NOT in `DESTINATION_DEFINING_PARAMS`, that destination is **excluded from the derived patterns** — it cannot contribute a session. Rationale: deriving a no-constraint pattern from an unregistered template would silently re-introduce the consent-widening bug this primitive closes. Excluding it is fail-closed: future pushes to that destination will require fresh approval each time, which is correct.
+  - The approval-card footer shows a notice when any destinations were excluded:
+    ```
+    Note: 2 destination(s) excluded from this session (template
+    `railway-variable-set` has no destination-defining-params config).
+    Pushes to those destinations will require fresh approval each time.
+    ```
+  - If ALL destinations are excluded (e.g., the batch only pushes to unregistered templates), the affordance does NOT render at all — exactly as the empty-pattern guard.
+- **Manually-created sessions (`secret-shuttle internal session create` and any future direct API caller):** the existing Plan 4a contract is preserved. A pattern with empty/absent `required_params` is accepted by `SessionStore.create` / `createForOwner` and matches per Plan 4a's original semantics (ref + template_id only). The operator setting that pattern via the CLI is informed consent — they explicitly chose not to constrain params. The derivation path is the only one that gets the new fail-closed behavior; the matcher's `required_params` clause is identical in both paths (strict equality on listed keys; empty/absent means unconstrained).
+
+The daemon also emits a startup-time warning log line listing registered template_ids without an entry in `DESTINATION_DEFINING_PARAMS`, and `destination-defining-params-config.test.ts` is a CI gate that fails when a shipped template lands without its entry. These two layers — runtime warning + CI gate — are belt-and-suspenders against the config drifting silently.
 
 **Matcher extension** (`src/daemon/approvals/session-matchers.ts`):
 
 ```ts
-function templateRunMatches(pattern: TemplateRunSessionPattern, binding: TemplateRunBinding): boolean {
-  // Existing checks (unchanged):
-  if (!pattern.template_ids.includes(binding.template_id)) return false;
-  if (!refGlobMatches(pattern.ref_pattern, binding.ref)) return false;
-  // NEW: param equality
-  if (pattern.required_params) {
+// Extends the existing template-run matcher branch.  The function
+// signature matches the file's existing pattern — pattern: SessionPattern,
+// binding: ApprovalBinding (with action === "template-run").
+function templateRunMatches(pattern: SessionPattern, binding: ApprovalBinding): boolean {
+  // Existing checks (unchanged from Plan 4a):
+  if (!pattern.template_ids?.includes(binding.template_id)) return false;
+  if (pattern.ref_glob.length > 0 && !refGlobMatches(pattern.ref_glob, binding.ref)) return false;
+  // NEW: param equality (no-op when required_params is empty/absent)
+  if (pattern.required_params && Object.keys(pattern.required_params).length > 0) {
     for (const [key, expected] of Object.entries(pattern.required_params)) {
-      if (binding.template_params[key] !== expected) return false;
+      if (binding.template_params?.[key] !== expected) return false;
     }
   }
   return true;
 }
 ```
 
-Strict equality is the right semantics: the user approved consent for an exact destination, not for a class of destinations. Defense-in-depth: the matcher never widens, only narrows or equal-matches.
+Strict equality is the right semantics: the user approved consent for an exact destination, not for a class of destinations. Defense-in-depth: the matcher never widens, only narrows or equal-matches. The `required_params` check is the last clause — a pattern that already fails on ref/template still fails fast.
 
 ### Pattern derivation — from `BatchState.plan`, with destination-defining params (corrects v1 spec)
 
@@ -365,12 +398,12 @@ The grouping key becomes:
 (template_id, source, env, ...sorted destination-defining param key=value pairs)
 ```
 
-So a batch pushing `ss://stripe/prod/X` to both `vercel:production` AND `vercel:preview` produces TWO patterns (one per environment), each correctly scoped via `required_params.environment`. A batch pushing the same ref to two distinct GitHub repos produces two patterns. A batch pushing two different refs to the same `(vercel-env-add, environment=production)` produces ONE pattern with `ref_pattern: ss://<source>/<env>/*` and `required_params: { environment: "production" }`.
+So a batch pushing `ss://stripe/prod/X` to both `vercel:production` AND `vercel:preview` produces TWO patterns (one per environment), each correctly scoped via `required_params.environment`. A batch pushing the same ref to two distinct GitHub repos produces two patterns. A batch pushing two different refs to the same `(vercel-env-add, environment=production)` produces ONE pattern with `ref_glob: "ss://<source>/<env>/*"` and `required_params: { environment: "production" }`.
 
 **Per-group output (rules):**
 - `action: "template-run"`
 - `template_ids: [<template_id>]`
-- `ref_pattern: ss://<source>/<env>/*` (if group has ≥2 entries with the same `(source, env)`) OR the single exact ref (if group has 1 entry)
+- `ref_glob: "ss://<source>/<env>/*"` (if group has ≥2 entries with the same `(source, env)`) OR the single exact ref (if group has 1 entry)
 - `required_params: { <param>: <value>, ... }` — populated from the group key's destination-defining params (empty/absent when the template has no registered destination-defining params, matching Plan 4a's pre-burst behavior)
 - `destination_domains: [<domain>]` — informational; emitted for audit/display consistency; not consulted by the template-run matcher
 
@@ -487,8 +520,8 @@ The agent reads this to know whether subsequent ops in the same shape will be si
   - single-group, multi-group, mixed-provider, all-capture, single-existing cases
   - single-entry `(template_id, source, env, destination-defining-params)` groups produce one exact-ref pattern (not suppressed)
   - **multi-environment**: a single ref pushed to `vercel:production` AND `vercel:preview` produces TWO patterns, each with the corresponding `required_params.environment`
-  - **multi-repo**: same ref pushed to two distinct GitHub Actions repos produces TWO patterns, each with the corresponding `required_params.owner` + `required_params.repo`
-  - **template without registered destination-defining-params**: pattern emits with empty/absent `required_params`; a startup-time daemon warning logs the missing config
+  - **multi-repo**: same ref pushed to two distinct GitHub Actions repos (e.g., `repo=patryk/a` and `repo=patryk/b`) produces TWO patterns, each with the corresponding `required_params.repo` value (the template takes one combined `owner/repo` string)
+  - **template without registered destination-defining-params**: derivation **excludes** that destination from the patterns (fail-closed). If at least one destination remains registered, the affordance still renders with a footer notice about the excluded destinations. If ALL destinations are unregistered, derivation returns empty patterns and the affordance does not render. (This is the derivation path. The `SessionStore.create` / `createForOwner` paths still accept empty `required_params` patterns for manual / CLI use — only derivation fails closed.)
 - `session-matcher-required-params.test.ts`: pure-function test of the extended `templateRunMatches`. Coverage:
   - `required_params` empty/absent → today's behavior (ref + template_id only)
   - all `required_params` keys present and equal in binding → match
@@ -877,10 +910,10 @@ Each section is a discrete commit set. Sections do not depend on each other for 
 
 5. **Dogfood may surface a magic gap I missed.** Accepted. The 2-day buffer at the end is exactly for this; if the gap is small enough, it ships in the same burst. Larger gaps inform v0.3.1.
 
-6. **Destination-defining-params config drift.** Adding a new template (`railway-variable-set`, `clerk-env-set`, etc.) without a `DESTINATION_DEFINING_PARAMS` entry would silently produce no-constraint sessions for that template — a session approved for "push to railway:production" would match "push to railway:preview" because the matcher has no params to enforce. Mitigations:
+6. **Destination-defining-params config drift.** Adding a new template (`railway-variable-set`, `clerk-env-set`, etc.) without a `DESTINATION_DEFINING_PARAMS` entry would mean that destinations using that template are **excluded** from any provision-derived session — pushes to those destinations always require fresh per-op approval. The user-visible symptom is "the session checkbox keeps appearing without that destination in the consent list" — annoying, not unsafe. The unsafe case (silent widening) is closed by the fail-closed derivation. Mitigations:
    - Startup-time daemon warning lists registered templates missing destination-defining-params entries. Operator sees it on first run.
-   - `destination-defining-params-config.test.ts` asserts that **every shipped template has a registered entry**. CI fails when a template lands without its entry.
-   - The fallback "no constraint" behavior matches Plan 4a's pre-burst contract — narrowing-only invariant is preserved (a missing entry produces a session with the same scope as today's matcher).
+   - `destination-defining-params-config.test.ts` asserts that **every shipped template has a registered entry**. CI fails when a template lands without its entry — catches the issue at PR time, before it ships.
+   - Approval-card UI surfaces excluded destinations with an inline notice — the operator sees the drift the first time it bites.
    - Long-term: collapse template definitions and destination-defining-params into one file per template; rely on a structural test for "every template exports a `sessionDefiningParams` field."
 
 ---
