@@ -79,6 +79,8 @@ When a step's code snippet appears to disagree with these facts, the facts win �
 
 **Create:**
 - `src/daemon/templates/destination-defining-params.ts` — config map + startup validation hook
+- `src/daemon/templates/registry.ts` — add `sessionDefiningParams?: readonly string[]` to `TemplateDefinition` (per-template self-declaration for the spec's CI gate, Option B)
+- `src/daemon/templates/builtin/*.ts` — each shipped template adds its own `sessionDefiningParams: [...] as const`
 - `src/daemon/templates/destination-defining-params.test.ts`
 - `src/daemon/approvals/session-pattern-required-params-validator.test.ts`
 
@@ -851,9 +853,14 @@ async function detectGitOwnerRepo(cwd: string): Promise<string | null> {
     const { stdout } = await execp("git config --get remote.origin.url", { cwd, encoding: "utf8" });
     const url = stdout.trim();
     // Match git@github.com:owner/repo.git OR https://github.com/owner/repo(.git)?
-    const m = url.match(/[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/);
-    if (!m) return null;
-    return `${m[1]}/${m[2]}`;
+    const m = /[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/.exec(url);
+    if (m === null) return null;
+    // Capture groups are `string | undefined` under noUncheckedIndexedAccess.
+    // The regex guarantees both groups capture on match; narrow explicitly.
+    const owner = m[1];
+    const repo = m[2];
+    if (owner === undefined || repo === undefined) return null;
+    return `${owner}/${repo}`;
   } catch {
     return null;
   }
@@ -1005,6 +1012,7 @@ Create `src/cli/commands/provision.ts`:
 import { Command } from "commander";
 import { writeFile, access, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { stringify as yamlStringify } from "yaml";
 import { ShuttleError, errorToJson } from "../../shared/errors.js";
 import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
@@ -1168,32 +1176,65 @@ async function runSecretMode(opts: ProvisionOpts): Promise<void> {
   if (!opts.secret || !opts.from || !opts.to) {
     throw new ShuttleError("missing_param", "--secret requires --from <kind> and --to <dest[,dest...]>.");
   }
-  // Build a 1-secret yml in-memory.
-  const sourceBlock = buildSecretSource(opts);
+  // Build a 1-secret yml via the `yaml` package (already a runtime dep —
+  // package.json line 59). String interpolation would be vulnerable to
+  // injection if --secret/--url/--ref contained YAML metacharacters or
+  // newlines; stringify() handles escaping correctly. Validate scalars
+  // first (cheap defense-in-depth even with the structured builder).
+  validateSecretScalars(opts);
+  const sourceObj = buildSecretSourceObject(opts);
   const dests = opts.to.split(",").map((d) => d.trim()).filter(Boolean);
-  const yml = [
-    "version: 1",
-    "secrets:",
-    `  ${opts.secret}:`,
-    `    source: ${sourceBlock}`,
-    `    destinations:`,
-    ...dests.map((d) => `      - ${d}`),
-  ].join("\n") + "\n";
-  const r = await daemonRequest("POST", "/v1/bootstrap/plan", { plan_yml: yml });
+  if (dests.length === 0) {
+    throw new ShuttleError("missing_param", "--to must contain at least one destination shorthand.");
+  }
+  const planDoc = {
+    version: 1,
+    secrets: {
+      [opts.secret]: {
+        source: sourceObj,
+        destinations: dests,
+      },
+    },
+  };
+  const ymlText: string = yamlStringify(planDoc);
+  const r = await daemonRequest("POST", "/v1/bootstrap/plan", { plan_yml: ymlText });
   outputJson(ok(r as Record<string, unknown>));
 }
 
-function buildSecretSource(opts: ProvisionOpts): string {
+// Cheap input validation BEFORE serialization — never let attacker-controlled
+// newlines / colons / YAML directives reach the yaml writer untouched.
+function validateSecretScalars(opts: ProvisionOpts): void {
+  // env-var name: standard shell-name regex
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.secret!)) {
+    throw new ShuttleError("bad_request", `--secret name must match /^[A-Za-z_][A-Za-z0-9_]*$/; got '${opts.secret}'.`);
+  }
+  if (opts.url !== undefined) {
+    // Must be https; no embedded credentials; no whitespace. Strict URL
+    // validation also runs server-side at /v1/bootstrap/plan (Burst 4 §3)
+    // but failing early in the CLI yields a clearer error.
+    let u: URL;
+    try { u = new URL(opts.url); } catch { throw new ShuttleError("bad_request", `--url is not a valid URL: ${opts.url}`); }
+    if (u.protocol !== "https:") throw new ShuttleError("bad_request", `--url must be https; got ${u.protocol}`);
+    if (u.username !== "" || u.password !== "") throw new ShuttleError("bad_request", "--url must not contain embedded credentials.");
+  }
+  if (opts.ref !== undefined) {
+    if (!/^ss:\/\/[a-z0-9_-]+\/[a-z0-9_-]+\/[A-Za-z_][A-Za-z0-9_]*$/.test(opts.ref)) {
+      throw new ShuttleError("bad_request", `--ref must match ss://<source>/<env>/<NAME>; got '${opts.ref}'.`);
+    }
+  }
+}
+
+function buildSecretSourceObject(opts: ProvisionOpts): Record<string, string> {
   switch (opts.from) {
     case "capture":
       if (!opts.url) throw new ShuttleError("missing_param", "--from=capture requires --url <url>.");
-      return `{ kind: capture, url: "${opts.url}" }`;
+      return { kind: "capture", url: opts.url };
     case "random_32_bytes":
     case "random_64_bytes":
-      return `{ kind: ${opts.from} }`;
+      return { kind: opts.from };
     case "existing":
       if (!opts.ref) throw new ShuttleError("missing_param", "--from=existing requires --ref <ss://...>.");
-      return `{ kind: existing, ref: "${opts.ref}" }`;
+      return { kind: "existing", ref: opts.ref };
     default:
       throw new ShuttleError("bad_request", `Unknown source kind: ${opts.from}.`);
   }
@@ -1745,6 +1786,11 @@ git commit -m "feat(session-matchers): template-run honors required_params stric
 **Files:**
 - Create: `src/daemon/templates/destination-defining-params.ts`
 - Create: `src/daemon/templates/destination-defining-params.test.ts`
+- Modify: `src/daemon/templates/registry.ts` — add `sessionDefiningParams?: readonly string[]` to the `TemplateDefinition` interface (spec config-drift CI gate, Option B)
+- Modify: `src/daemon/templates/builtin/vercel-env-add.ts` — add `sessionDefiningParams: ["name", "environment"] as const`
+- Modify: `src/daemon/templates/builtin/github-actions-secret-set.ts` — add `sessionDefiningParams: ["name", "repo"] as const`
+- Modify: `src/daemon/templates/builtin/cloudflare-secret-put.ts` — add `sessionDefiningParams: ["name", "env"] as const`
+- Modify: `src/daemon/templates/builtin/supabase-edge-secret-set.ts` — add `sessionDefiningParams: ["name", "project_ref"] as const`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1771,21 +1817,99 @@ test("every shipped template has a registered entry", () => {
   }
 });
 
+// Helper that reads via the public accessor so the test code itself
+// typechecks under noUncheckedIndexedAccess (no `T | undefined` leaking).
+function paramsOrFail(id: string): readonly string[] {
+  const v = destinationDefiningParamsFor(id);
+  assert.ok(v !== null, `expected ${id} to be registered`);
+  return v;
+}
+
 test("vercel-env-add has [name, environment]", () => {
-  assert.deepEqual([...DESTINATION_DEFINING_PARAMS["vercel-env-add"]], ["name", "environment"]);
+  assert.deepEqual([...paramsOrFail("vercel-env-add")], ["name", "environment"]);
 });
 
 test("github-actions-secret-set has [name, repo]", () => {
-  assert.deepEqual([...DESTINATION_DEFINING_PARAMS["github-actions-secret-set"]], ["name", "repo"]);
+  assert.deepEqual([...paramsOrFail("github-actions-secret-set")], ["name", "repo"]);
 });
 
 test("cloudflare-secret-put has [name, env]", () => {
-  assert.deepEqual([...DESTINATION_DEFINING_PARAMS["cloudflare-secret-put"]], ["name", "env"]);
+  assert.deepEqual([...paramsOrFail("cloudflare-secret-put")], ["name", "env"]);
 });
 
 test("supabase-edge-secret-set has [name, project_ref]", () => {
-  assert.deepEqual([...DESTINATION_DEFINING_PARAMS["supabase-edge-secret-set"]], ["name", "project_ref"]);
+  assert.deepEqual([...paramsOrFail("supabase-edge-secret-set")], ["name", "project_ref"]);
 });
+
+// ─── Spec config-drift CI gate (spec §2 ~line 627) ───────────────────────────
+// Two implementations are documented in the spec; pick ONE for this burst.
+// Both are equally acceptable; the second is shorter and easier to maintain.
+
+// ── Option A: parse-and-observe (matches spec verbatim) ──────────────────────
+// Implement `collectAllParamRefs(template)` which returns the set of every
+// template_param key the template references across all four consumption
+// sites (`args`, `additionalArgs(params)`, `destinationEnvironment(params)`,
+// `validateParams(params)`). Then assert DESTINATION_DEFINING_PARAMS[t] ⊆ that
+// set. Implementation sketch:
+//
+//   function collectAllParamRefs(template: TemplateDefinition): Set<string> {
+//     const refs = new Set<string>();
+//     // (1) args[]: scan {{...}} placeholders
+//     for (const arg of template.args) {
+//       for (const m of arg.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g)) {
+//         refs.add(m[1] as string);
+//       }
+//     }
+//     // (2)/(3)/(4) Drive each function with a recording Proxy whose getter
+//     // adds the property name to `refs` and returns "":
+//     const recorder = new Proxy({} as Record<string, string>, {
+//       get(_t, prop, _r) {
+//         if (typeof prop === "string") refs.add(prop);
+//         return "";
+//       },
+//     });
+//     try { template.additionalArgs?.(recorder); } catch { /* ignore — we only want refs */ }
+//     try { template.destinationEnvironment?.(recorder); } catch { /* same */ }
+//     try { template.validateParams?.(recorder); } catch { /* same */ }
+//     return refs;
+//   }
+//
+// test("DESTINATION_DEFINING_PARAMS[t] ⊆ collectAllParamRefs(t) for every shipped template", () => {
+//   for (const t of new TemplateRegistry().list()) {
+//     const defining = destinationDefiningParamsFor(t.id);
+//     if (defining === null) continue; // covered by the "every template registered" test
+//     const refs = collectAllParamRefs(t);
+//     for (const k of defining) {
+//       assert.ok(refs.has(k), `template ${t.id}: destination-defining param '${k}' is not referenced anywhere in args/additionalArgs/destinationEnvironment/validateParams`);
+//     }
+//   }
+// });
+
+// ── Option B: per-template self-declaration (spec's acceptable alternative) ──
+// Add `sessionDefiningParams?: readonly string[]` to TemplateDefinition
+// (registry.ts:7). Each built-in template self-declares its own array
+// (e.g., `vercel-env-add.ts` adds `sessionDefiningParams: ["name", "environment"] as const`).
+// The CI gate then becomes a one-liner equality check:
+//
+// test("DESTINATION_DEFINING_PARAMS matches per-template sessionDefiningParams declarations", () => {
+//   for (const t of new TemplateRegistry().list()) {
+//     const central = destinationDefiningParamsFor(t.id);
+//     if (t.sessionDefiningParams === undefined) {
+//       assert.equal(central, null, `template ${t.id} has central entry but no per-template sessionDefiningParams`);
+//       continue;
+//     }
+//     assert.deepEqual([...(central ?? [])], [...t.sessionDefiningParams], `template ${t.id}: central vs per-template mismatch`);
+//   }
+// });
+
+// **Choose Option B** for this burst (smaller, no Proxy magic, single source
+// of truth migration-ready for the §8 risk #6 long-term path). The hard-coded
+// per-template tests above stay as belt-and-suspenders — they keep failing
+// loudly if anyone edits the central map without updating the corresponding
+// template file.
+//
+// If a future maintainer disagrees and prefers Option A, swap the Option B
+// test out for the Option A test — both satisfy the spec.
 
 test("destinationDefiningParamsFor returns null for unregistered template", () => {
   assert.equal(destinationDefiningParamsFor("railway-variable-set"), null);
@@ -1839,10 +1963,14 @@ export const DESTINATION_DEFINING_PARAMS: Record<string, readonly string[]> = {
  * (fail-closed)."
  */
 export function destinationDefiningParamsFor(template_id: string): readonly string[] | null {
-  if (template_id in DESTINATION_DEFINING_PARAMS) {
-    return DESTINATION_DEFINING_PARAMS[template_id];
-  }
-  return null;
+  // Under tsconfig `noUncheckedIndexedAccess` (line 9), index access on
+  // Record<string, T> returns `T | undefined`, not `T`. The `in`-check
+  // narrows runtime correctness but does NOT narrow the type, so a direct
+  // `return DESTINATION_DEFINING_PARAMS[template_id]` would yield
+  // `readonly string[] | undefined`, which is not the declared return type
+  // `readonly string[] | null`. Coalesce to null explicitly.
+  const keys = DESTINATION_DEFINING_PARAMS[template_id];
+  return keys ?? null;
 }
 
 export interface Logger {
@@ -1877,7 +2005,7 @@ export function validateDestinationDefiningParamsCoverage(
 }
 ```
 
-The function takes a `TemplateRegistry` instance — the real registry is a class with a `list()` method (see `src/daemon/templates/registry.ts:47`). No module-level `TEMPLATES` constant exists. The startup wiring (Task 2a.6) passes the registry from `DaemonServices.templates`.
+The function takes a `TemplateRegistry` instance — the real registry is a class with a `list()` method (see `src/daemon/templates/registry.ts:47`). No module-level `TEMPLATES` constant exists. The startup wiring (Task 2a.6) imports the module-scoped registry from `src/daemon/api/routes/templates.ts:25` directly — `DaemonServices` has no `templates` field (verified at `services.ts`).
 
 - [ ] **Step 4: Run tests**
 
@@ -3852,13 +3980,32 @@ import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
 import { ShuttleError } from "../../shared/errors.js";
 
+// `as const` makes MULTIPLIERS' value type the union of literal numbers and
+// its key type the union of literal strings. `unit as keyof typeof MULTIPLIERS`
+// is safe ONLY after the type guard below; without the guard,
+// noUncheckedIndexedAccess would surface `MULTIPLIERS[unit]` as
+// `number | undefined`.
+const MULTIPLIERS = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+type DurationUnit = keyof typeof MULTIPLIERS;
+function isDurationUnit(s: string): s is DurationUnit {
+  return s === "s" || s === "m" || s === "h" || s === "d";
+}
+
 function parseDuration(input: string): number {
-  const m = input.match(/^(\d+)\s*([smhd])$/);
-  if (!m) throw new ShuttleError("audit_window_invalid", `Invalid --since '${input}'. Format: Ns/Nm/Nh/Nd.`);
-  const n = parseInt(m[1], 10);
-  const unit = m[2];
-  const mult: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-  return n * mult[unit];
+  const m = /^(\d+)\s*([smhd])$/.exec(input);
+  if (m === null) {
+    throw new ShuttleError("audit_window_invalid", `Invalid --since '${input}'. Format: Ns/Nm/Nh/Nd.`);
+  }
+  // m[1] and m[2] are string | undefined under noUncheckedIndexedAccess.
+  // The regex guarantees both groups capture on match, but TS doesn't know
+  // that — explicit narrowing keeps both runtime and types clean.
+  const nStr = m[1];
+  const unitStr = m[2];
+  if (nStr === undefined || unitStr === undefined || !isDurationUnit(unitStr)) {
+    throw new ShuttleError("audit_window_invalid", `Invalid --since '${input}'.`);
+  }
+  const n = Number.parseInt(nStr, 10);
+  return n * MULTIPLIERS[unitStr];
 }
 
 export function auditCommand(): Command {
