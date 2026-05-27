@@ -292,15 +292,24 @@ The Plan 4a `template-run` session matcher (`src/daemon/approvals/session-matche
 The real shape (`src/daemon/approvals/session.ts:60`) is flat — one interface with `actions: SessionAction[]` and `ref_glob: string`. This burst adds exactly one optional field:
 
 ```ts
-// src/daemon/approvals/session.ts
+// src/daemon/approvals/session.ts — real shape, transcribed verbatim
+// from the existing interface; the only diff is the NEW field at the bottom.
 export interface SessionPattern {
-  actions: SessionAction[];                   // existing — unchanged
-  ref_glob: string;                           // existing — unchanged
-  destination_domains?: string[];             // existing — unchanged
-  template_ids?: string[];                    // existing — unchanged
-  allowed_actions?: SecretAction[];           // existing — unchanged
-  ttl_ms: number;                             // existing — unchanged
-  max_uses?: number | null;                   // existing — unchanged
+  actions: SessionAction[];                   // existing
+  ref_glob: string;                           // existing
+  destination_domains: string[];              // existing — REQUIRED (non-empty
+                                              //   for inject-submit, reveal-
+                                              //   capture, secrets-set)
+  template_ids?: string[];                    // existing — REQUIRED non-empty
+                                              //   when actions includes
+                                              //   template-run
+  allowed_actions?: string[];                 // existing — REQUIRED non-empty
+                                              //   when actions includes
+                                              //   secrets-set
+  ttl_ms: number;                             // existing
+  max_uses?: number;                          // existing (1..1000, optional;
+                                              //   NOT nullable — undefined or
+                                              //   a positive integer)
 
   // NEW:
   required_params?: Record<string, string>;
@@ -320,7 +329,7 @@ export interface SessionPattern {
 }
 ```
 
-No other field changes. No new discriminated-union shape. No schema refactor.
+No other field changes. No new discriminated-union shape. No schema refactor. The existing field-optionality conventions (required `destination_domains`, optional non-nullable `max_uses`) are preserved.
 
 **Per-template "destination-defining params" config:**
 
@@ -353,6 +362,41 @@ export const DESTINATION_DEFINING_PARAMS: Record<string, readonly string[]> = {
 - **Manually-created sessions (`secret-shuttle internal session create` and any future direct API caller):** the existing Plan 4a contract is preserved. A pattern with empty/absent `required_params` is accepted by `SessionStore.create` / `createForOwner` and matches per Plan 4a's original semantics (ref + template_id only). The operator setting that pattern via the CLI is informed consent — they explicitly chose not to constrain params. The derivation path is the only one that gets the new fail-closed behavior; the matcher's `required_params` clause is identical in both paths (strict equality on listed keys; empty/absent means unconstrained).
 
 The daemon also emits a startup-time warning log line listing registered template_ids without an entry in `DESTINATION_DEFINING_PARAMS`, and `destination-defining-params-config.test.ts` is a CI gate that fails when a shipped template lands without its entry. These two layers — runtime warning + CI gate — are belt-and-suspenders against the config drifting silently.
+
+### Threading `required_params` through the existing whitelist surfaces
+
+Three places already exist where session patterns are parsed in / rendered out. They are all whitelist-shaped — adding a field requires explicit work at each site, otherwise the field silently drops on the wire even though the matcher would honor it. The burst threads `required_params` through every site:
+
+1. **POST `/v1/approvals/session` body parser** (`src/daemon/api/routes/approvals-session.ts:103`, function `parseSessionPatternFromBody`):
+   - Add `required_params` to the whitelist.
+   - **Runtime validation** (the parser owns input shape — `SessionPattern.assertSessionPatternValid` in `session.ts:145` may also enforce):
+     - If `required_params` is absent → leave undefined.
+     - If present, must be a non-array object (`typeof === "object" && !Array.isArray && !== null`) — else `bad_request`.
+     - Every value must be a string (no number, boolean, null, nested object) — else `bad_request` with the offending key.
+     - Every key must match `/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/` (the param-name regex template params already validate against) — else `bad_request`.
+     - No size cap explicitly required; the surrounding 1 MB body cap covers it.
+   - The CLI's `secret-shuttle internal session create` flag-parse code that builds the body adds an analogous `--required-param k=v` repeatable flag for manual session creation use (defense-in-depth — the CLI never bypasses the daemon's validation; both layers validate).
+
+2. **`session-ui-server.ts:44` `safePattern` whitelist** (the JSON template fragment substituted into the session approval HTML at `/ui/session?id=`):
+   - Add `required_params: grant.required_params` to the whitelisted object.
+   - The HTML page (`src/daemon/approvals/session-ui.html`) renders the pattern shape as JSON for the operator to read before they click [Approve]. Without this thread, an operator manually creating a session pattern with `required_params` would see "destination_domains: …, template_ids: …, max_uses: …" but NOT see the param constraint they just supplied — surprising and unsafe.
+   - The session approval HTML template also gains a human-readable rendering of `required_params` (e.g., a "Required params:" row showing `environment=production`) so operators don't have to JSON-parse to understand the scope.
+
+3. **GET `/v1/approvals/sessions` list response** (`approvals-session.ts:57`): the list returns session-grant JSON. Add `required_params` to the response shape so:
+   - `secret-shuttle internal session list` shows the constraint per session.
+   - `status --json`'s `active_sessions[].pattern_summary` derives correctly (it consumes the same data the list endpoint exposes).
+   - Auto-match candidate inspection during debugging (developers reading the log + JSON list) can see exactly what each session matches.
+
+4. **`SessionGrant` persisted shape** (in-memory + any future on-disk persistence): `SessionGrant extends SessionPattern` (`session.ts:77`) — so once `required_params` is on `SessionPattern`, the grant inherits it for free. No additional storage migration needed.
+
+5. **`secret-shuttle internal session list` CLI text format**: when `required_params` is non-empty, the text rendering includes a "params: key=value, …" line. Aligns with the JSON list.
+
+**Tests added for threading:**
+- `approvals-session-route-required-params.test.ts`: POST `/v1/approvals/session` with `required_params` parses cleanly; invalid shapes (array, non-string value, malformed key) → `bad_request`; pattern with `required_params` matches a binding only when params strict-equal.
+- `session-ui-server-required-params.test.ts`: GET `/ui/session?id=` returns HTML with the rendered `required_params` lines; the embedded JSON pattern includes the field; no field-drop.
+- `session-list-required-params.test.ts`: GET `/v1/approvals/sessions` returns `required_params` per session; missing field on legacy grants renders as empty/absent without breaking parsers.
+- `cli-internal-session-create-required-params.test.ts`: `internal session create --required-param environment=production` builds a body that includes `required_params: { environment: "production" }`; multiple flags merge; malformed `k=v` → CLI usage error.
+- `cli-internal-session-list-required-params.test.ts`: list output text format includes "params: environment=production" when set; omits the line when unset.
 
 **Matcher extension** (`src/daemon/approvals/session-matchers.ts`):
 
