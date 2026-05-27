@@ -262,9 +262,18 @@ The checkbox is default-unchecked. The dropdown defaults to 15 min when the user
 
 When the user clicks [Approve] with the checkbox checked, the POST to `/ui/approvals/:id/approve` includes `{ session: { ttl_minutes: <selection> } }` in its body. The route reads this and, after recording the approval grant, mints session grants — see "Owner stamping" below.
 
-**Body parsing in the raw route (corrects v1 spec gap):** `DaemonServer.addRouteRaw` (`src/daemon/server.ts:69`) does not parse JSON bodies — its handler receives an opaque body argument. The `/ui/approvals/:id/approve|deny` route currently does not need to read a body. After this burst, the approve POST DOES need to read a small JSON body. The route reads the body via the existing `readBoundedJson(req, 1024)` helper currently colocated in `src/daemon/hub/hub-server.ts:141`; that helper is **moved to `src/daemon/helpers/bounded-json.ts`** in this burst (no behavior change — just a relocation so both hub and approval UI routes import it).
+**Body parsing in the raw route (corrects v1 spec gap):** `DaemonServer.addRouteRaw` (`src/daemon/server.ts:69`) does not parse JSON bodies — its handler receives an opaque body argument. The `/ui/approvals/:id/approve|deny` route currently does not read a body. After this burst, the approve POST DOES read a small JSON body when one is sent (the checkbox path); legacy clients that POST nothing must continue to work unchanged.
 
-Body shape: `{ session?: { ttl_minutes: 5|15|30|60 } }`. Missing `session` key → no session minted (today's behavior preserved). Malformed body → `bad_request`. Oversize body → `request_too_large` (existing code).
+The relocated helper at `src/daemon/helpers/bounded-json.ts` (moved from `src/daemon/hub/hub-server.ts:141`) gains a third optional argument:
+```ts
+readBoundedJson(req, maxBytes, { allowEmpty?: boolean } = {}): Promise<unknown>
+```
+- `allowEmpty: false` (default) — preserves today's behavior at the hub `/ui/hub/done` site: empty body → `bad_request` ("Empty body."). Existing test pin retained.
+- `allowEmpty: true` — empty body resolves to `{}`. Used by the approve route only.
+
+The approve route calls `readBoundedJson(req, 1024, { allowEmpty: true })`.
+
+Body shape (when present): `{ session?: { ttl_minutes: 5|15|30|60 } }`. Empty body or `{}` or missing `session` key → no session minted (today's behavior preserved). Malformed JSON → `bad_request`. Oversize → `request_too_large`. Unknown `ttl_minutes` value → `bad_request` listing the allowed set.
 
 ### Pattern derivation — from `BatchState.plan`, not from bindings (corrects v1 spec)
 
@@ -289,7 +298,7 @@ inferSessionPatternFromPlan(plan: PlanEntry[]) → {
 
 **Capture-step exclusion:** capture is one-shot human-attended; future captures are not session-eligible (the user has to click Capture every time anyway). Plan entries with `source.kind == capture` contribute their template-run destination groups to the session pattern (the *push* is repeatable) but do NOT contribute any capture/reveal action to the session.
 
-**Empty-pattern guard:** if the derivation produces zero patterns (e.g., the batch is a single `source.kind == existing` entry whose only destination is `vercel:production` — exactly one push, no possible repeat), the affordance is not rendered.
+**Empty-pattern guard:** if the derivation produces zero patterns, the affordance is not rendered. The only realistic way to hit zero is a batch consisting entirely of capture steps that have no template-run destinations attached (capture without a downstream push). Any batch with at least one resolved destination produces at least one pattern — including single-entry ones (see "Single-entry patterns are allowed" below).
 
 ### Ref glob narrowness rule (corrects v1 spec ambiguity)
 
@@ -597,7 +606,7 @@ Recovery: secret-shuttle provision --continue --batch b_abc
 | Mode | Source of truth | Completeness |
 |---|---|---|
 | `--batch <batch-id>` | `BootstrapStore.get(batch_id)` (live `BatchState`) | Full plan + step results + per-destination push outcomes. The richest view. Returns `audit_batch_not_found` if the batch has been pruned from the operational store. |
-| `--since <window>` | Audit log file under `<SHUTTLE_HOME>` (durable history) | Grouped by `batch_id` audit field (see below). Per-step ref + source_kind + destination_template_id reconstructable from existing audit fields (`ref`, `template_id`, `domain`, `destination_environment`). Source_kind requires a new durable field — see "Required durable audit field" below. |
+| `--since <window>` | Audit log file under `<SHUTTLE_HOME>` (durable history) | Grouped by `batch_id` audit field (see below). Per-step ref + source_kind + destination shorthand list come from the NEW durable fields added to `bootstrap_step` rows in this burst (`batch_id`, `source_kind`, `destination_shorthands[]`, `destinations_ok_count`, `destinations_failed_count`). The pre-burst audit shape did NOT carry enough to reconstruct destination shorthands or push outcomes — the v1 spec's "reconstructable from existing fields" claim was wrong. See "Required durable audit fields" below for the additions and rationale. |
 
 The `audit` route tries `BootstrapStore` first when given `--batch`; on miss it falls back to audit-log reconstruction with a `details.reconstructed_from: "audit"` flag in the response (so the caller knows the view may be partial — destination push results are not always durably recorded today).
 
@@ -636,7 +645,7 @@ destinations_failed_count?: number;
 
 All four fields are additive optional. Existing audit rows without them remain valid; the summary surfaces "—" or "(unknown)" where missing.
 
-**Why both `bootstrap_step.destinations_shorthands` AND `template_run.batch_id`:**
+**Why both `bootstrap_step.destination_shorthands` AND `template_run.batch_id`:**
 - `bootstrap_step` rows give a self-contained per-secret summary line (ref, source_kind, destinations attempted, push outcome counts). This is what `audit --since` lists.
 - Inner `template_run` rows carrying `batch_id` enable a drilled-down view (`audit --batch <id>` reconstructed-from-audit fallback) — without it, a pruned batch shows no per-destination detail, only the bootstrap_step summary. With it, the drill-down can show "template_run vercel-env-add → vercel.com → production: ok" per push.
 - Operationally cheap: `bootstrapAuthority` already carries the batch_id; one extra field per audit call.
