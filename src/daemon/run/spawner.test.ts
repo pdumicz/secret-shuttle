@@ -330,6 +330,55 @@ test("spawnAndStream stdin scrub: stdinBytes is scrubbed on EPIPE (child closes 
   assert.equal(payload.includes(Buffer.from(secretText, "utf8")), false);
 });
 
+test("spawnAndStream stdin scrub: sync spawn() failure (null byte in cmd) still scrubs stdinBytes", async () => {
+  // Reproducer for a P2 edge case: when spawn() throws synchronously (e.g.
+  // TypeError "must not contain null bytes" from an argv with a NUL), the
+  // catch block previously wrote spawn_failed + resolved without scrubbing.
+  // The child never existed, so the regular .end(buf, cb) path never
+  // installed — the Buffer leaked plaintext until GC.
+  const writer = makeTestWriter();
+  const secretText = "needle-spawner-sync-throw-do-not-leak";
+  const payload = Buffer.from(secretText, "utf8");
+  // Sanity: payload starts as the secret bytes.
+  assert.equal(payload.toString("utf8"), secretText);
+
+  await spawnAndStream({
+    // Null byte in argv triggers a synchronous TypeError from Node's
+    // spawn(): "The argument 'file' must be a string without null bytes."
+    cmd: "bad\0cmd",
+    args: [],
+    env: { ...process.env },
+    cwd: process.cwd(),
+    outputWriter: writer,
+    stdinBytes: payload,
+  });
+
+  // Preserved behavior: spawn_failed + exit 127.
+  assert.equal(writer.exit, 127);
+  assert.equal(writer.errors.length, 1);
+  assert.equal(writer.errors[0]!.code, "spawn_failed");
+  assert.equal(writer.errors[0]!.exit_code, 127);
+
+  // New behavior under test: the Buffer must be zeroed.
+  for (let i = 0; i < payload.length; i++) {
+    assert.equal(
+      payload[i],
+      0,
+      `byte ${i} should be zero on sync-throw path but is ${payload[i]}`,
+    );
+  }
+  assert.equal(payload.includes(Buffer.from(secretText, "utf8")), false);
+});
+
+// Note: a unit test for the `c.stdin === null` defensive branch is
+// intentionally skipped. With the current spawnAndStream implementation,
+// stdio[0] is always set to "pipe" when stdinBytes is defined, so
+// c.stdin === null is unreachable without dependency-injecting a stubbed
+// child_process.spawn — which would require a substantial test harness
+// change (the spawner imports `spawn` directly). The defensive branch is
+// guarded by a code comment and exists solely to harden against future
+// refactors. Coverage relies on code review.
+
 test("spawnAndStream stdin scrub: empty stdinBytes Buffer still completes without throwing", async () => {
   // Edge case: a zero-length Buffer. fill(0) is a no-op on len=0; the boolean
   // guard still sets scrubbed=true so multi-fire is safe. Verifies the scrub

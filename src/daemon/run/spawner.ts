@@ -76,6 +76,11 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
           : ["ignore", "pipe", "pipe"],
       });
     } catch (e) {
+      // Scrub stdinBytes even on sync-spawn failure — the child never
+      // existed so the regular end(buf, cb) path never installs. Without
+      // this, a payload like cmd: "bad\0cmd" (TypeError: must not contain
+      // null bytes) leaves the secret bytes lingering on the heap.
+      input.stdinBytes?.fill(0);
       input.outputWriter.writeError({
         code: "spawn_failed",
         message: e instanceof Error ? e.message : String(e),
@@ -119,43 +124,52 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
     // clobber not-yet-flushed bytes. error/close fallbacks handle abnormal
     // termination (child crashes pre-write, broken pipe). The scrub helper
     // is idempotent so triple-fire (error + close + cb) is safe.
-    if (input.stdinBytes !== undefined && c.stdin !== null) {
-      const stdinBuf = input.stdinBytes;
-      let scrubbed = false;
-      const scrub = (): void => {
-        if (scrubbed) return;
-        scrubbed = true;
-        stdinBuf.fill(0);
-      };
+    if (input.stdinBytes !== undefined) {
+      if (c.stdin !== null) {
+        const stdinBuf = input.stdinBytes;
+        let scrubbed = false;
+        const scrub = (): void => {
+          if (scrubbed) return;
+          scrubbed = true;
+          stdinBuf.fill(0);
+        };
 
-      c.stdin.on("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EPIPE") {
-          // EPIPE: child closed stdin early. The bytes are either already
-          // flushed to the kernel pipe or weren't going to be read — scrub
-          // immediately rather than waiting for an end-callback that may
-          // never fire after the pipe tore down.
+        c.stdin.on("error", (err: NodeJS.ErrnoException) => {
+          if (err.code === "EPIPE") {
+            // EPIPE: child closed stdin early. The bytes are either already
+            // flushed to the kernel pipe or weren't going to be read — scrub
+            // immediately rather than waiting for an end-callback that may
+            // never fire after the pipe tore down.
+            scrub();
+            return;
+          }
+          // Non-EPIPE errors should still bubble through writeError but
+          // not crash the daemon. Log via outputWriter so the route can
+          // surface as a structured stream event.
+          input.outputWriter.writeError({
+            code: "stdin_write_failed",
+            message: err.message,
+          });
+          // Bytes may have partially flushed; we can't selectively zero only
+          // the unread tail, so scrub defensively.
           scrub();
-          return;
-        }
-        // Non-EPIPE errors should still bubble through writeError but
-        // not crash the daemon. Log via outputWriter so the route can
-        // surface as a structured stream event.
-        input.outputWriter.writeError({
-          code: "stdin_write_failed",
-          message: err.message,
         });
-        // Bytes may have partially flushed; we can't selectively zero only
-        // the unread tail, so scrub defensively.
-        scrub();
-      });
-      // Belt-and-suspenders: even if neither the error nor the end-callback
-      // fires (which shouldn't happen in practice), the 'close' event will.
-      c.stdin.once("close", scrub);
+        // Belt-and-suspenders: even if neither the error nor the end-callback
+        // fires (which shouldn't happen in practice), the 'close' event will.
+        c.stdin.once("close", scrub);
 
-      // end(buf, cb): write the bytes then close the stream; the callback
-      // fires AFTER the write completes so the scrub doesn't clobber
-      // not-yet-flushed bytes (this is the primary, normal-path trigger).
-      c.stdin.end(stdinBuf, () => { scrub(); });
+        // end(buf, cb): write the bytes then close the stream; the callback
+        // fires AFTER the write completes so the scrub doesn't clobber
+        // not-yet-flushed bytes (this is the primary, normal-path trigger).
+        c.stdin.end(stdinBuf, () => { scrub(); });
+      } else {
+        // Defensive: stdin pipe was not configured, so there's no
+        // end-callback path to install. This should not happen in practice
+        // — when stdinBytes is set, spawnAndStream configures stdio[0] as
+        // a pipe — but if a future refactor or platform quirk leaves
+        // c.stdin null, scrub immediately rather than leaking the Buffer.
+        input.stdinBytes.fill(0);
+      }
     }
 
     c.on("error", (err: Error) => {
