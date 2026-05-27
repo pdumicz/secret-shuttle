@@ -222,29 +222,37 @@ export function initCommand(): Command {
       // emitted so the user can re-run init after the daemon writes the file.
       const configured: string[] = [];
       const pendingManual: string[] = [];
+      const failed: Array<{ runtime: string; error_code: string }> = [];
       const nextActions: string[] = [];
       if (runtimes.length > 0) {
         const machineId = await readMachineId(getSecretShuttleHome());
         if (machineId !== null) {
-          // TODO(post-launch): if one runtime's mint fails, accumulate the failure
-          // into `agent_runtimes_failed: [{runtime, error_code}]` and continue with
-          // the others. Currently a mid-loop failure halts init with a stack trace
-          // and leaves partial state. Tracked as a Phase-B follow-up.
           for (const runtime of runtimes) {
-            const agentId = deriveAutoAgentId(runtime, machineId);
-            const { token } = await daemonRequest<{ token: string; agent_id: string }>(
-              "POST",
-              "/v1/tokens/mint",
-              { agent_id: agentId },
-            );
-            const result: InstallResult = await installAgentToken(runtime, agentId, token);
-            if (result.status === "configured") {
-              configured.push(runtime);
-            } else {
-              pendingManual.push(runtime);
-              if (result.manualInstructions !== undefined) {
-                nextActions.push(result.manualInstructions);
+            try {
+              const agentId = deriveAutoAgentId(runtime, machineId);
+              const { token } = await daemonRequest<{ token: string; agent_id: string }>(
+                "POST",
+                "/v1/tokens/mint",
+                { agent_id: agentId },
+              );
+              const result: InstallResult = await installAgentToken(runtime, agentId, token);
+              if (result.status === "configured") {
+                configured.push(runtime);
+              } else {
+                pendingManual.push(runtime);
+                if (result.manualInstructions !== undefined) {
+                  nextActions.push(result.manualInstructions);
+                }
               }
+            } catch (err) {
+              // Isolate this runtime's failure: record it and continue with the
+              // others. Without this, a mid-loop mint failure would halt init
+              // with a stack trace and leave the user with partial state and
+              // no signal (some runtimes installed, others not).
+              failed.push({
+                runtime,
+                error_code: err instanceof ShuttleError ? err.code : "unexpected_error",
+              });
             }
           }
         }
@@ -262,6 +270,7 @@ export function initCommand(): Command {
           agent_runtimes_detected: runtimes,
           agent_runtimes_configured: configured,
           agent_runtimes_pending_manual: pendingManual,
+          agent_runtimes_failed: failed,
           next_actions: nextActions,
           next_action: vaultJustCreated
             ? "secret-shuttle import --env-file .env  # optional: migrate existing secrets"

@@ -28,6 +28,8 @@ import { readEnvelope } from "../../vault/envelope.js";
 import { initCommand } from "./init.js";
 import type { KeychainAdapter } from "../../vault/keychain/types.js";
 import { deriveAutoAgentId } from "../../daemon/auth/agent-id.js";
+import { ShuttleError } from "../../shared/errors.js";
+import { deriveHmac, formatBearer } from "../../daemon/auth/token-derive.js";
 
 // ── Mock keychain ─────────────────────────────────────────────────────────────
 
@@ -55,6 +57,10 @@ class MockKeychain implements KeychainAdapter {
 interface HarnessCtx {
   port: number;
   services: DaemonServices;
+  /** The in-process DaemonServer — exposed so tests can override individual
+   * routes via server.addRoute() (Map.set overwrites the prior handler), which
+   * is the cleanest injection point for failure-mode tests like T1. */
+  server: DaemonServer;
   /** SECRET_SHUTTLE_HOME — temp dir where socket file + machine-id + audit live. */
   home: string;
   /** Sandboxed HOME directory — where ~/.claude/settings.json lands. */
@@ -127,7 +133,7 @@ async function withInitDaemon<T>(
   }
 
   try {
-    return await fn({ port, services, home, userHome, rootToken });
+    return await fn({ port, services, server, home, userHome, rootToken });
   } finally {
     await server.close();
     if (prevHome === undefined) delete process.env.SECRET_SHUTTLE_HOME;
@@ -746,6 +752,85 @@ test("init: codex/copilot get manual-install instructions in the summary, not co
       assert.ok(
         nextActions.some((s) => s.includes("copilot") && s.includes("SECRET_SHUTTLE_AGENT_TOKEN")),
         `next_actions must include a copilot manual-install instruction; got: ${JSON.stringify(nextActions)}`,
+      );
+    } finally {
+      process.chdir(origCwd);
+      await rm(projDir, { recursive: true, force: true });
+    }
+  }, { keychain });
+});
+
+// ── T1: per-runtime mint failure must not halt the loop ──────────────────────
+
+test("init: one runtime's /v1/tokens/mint failure does not halt the others; summary lists the failure", async () => {
+  // Injection strategy: Option A — re-register POST /v1/tokens/mint AFTER
+  // registerTokens has already run inside the harness. DaemonServer keeps
+  // routes in a Map (`this.routes.set(...)`), so the second addRoute() call
+  // overwrites the prior handler with a test-controlled one-shot-fail variant.
+  //
+  // The fake handler throws ShuttleError("agent_token_invalid", ...) on its
+  // FIRST call, then returns a valid token for every subsequent call. With
+  // two detected runtimes (claude + copilot, alphabetical order), this means
+  // claude's mint fails and copilot's mint succeeds — proving the loop kept
+  // going past the failure and emitted a structured summary.
+  const keychain = new MockKeychain();
+  await withInitDaemon(async (ctx) => {
+    await bootstrapVault(ctx, "my-passphrase");
+
+    const projDir = await mkdtemp(path.join(os.tmpdir(), "ss-init-failure-"));
+    await mkdir(path.join(projDir, ".claude"), { recursive: true });
+    await mkdir(path.join(projDir, ".github"), { recursive: true });
+    await writeFile(
+      path.join(projDir, ".github", "copilot-instructions.md"),
+      "# pre-existing copilot instructions\n",
+      "utf8",
+    );
+
+    // One-shot-fail handler. Overwrites the handler registered by
+    // registerTokens() inside the harness.
+    let failed = false;
+    ctx.server.addRoute("POST", "/v1/tokens/mint", (_req, raw) => {
+      if (!failed) {
+        failed = true;
+        throw new ShuttleError("agent_token_invalid", "synthetic test failure");
+      }
+      const o = raw as { agent_id: string };
+      const hmac = deriveHmac(ctx.rootToken, o.agent_id);
+      return { token: formatBearer(o.agent_id, hmac), agent_id: o.agent_id };
+    });
+
+    const origCwd = process.cwd();
+    process.chdir(projDir);
+    try {
+      const result = await runInit(["--no-keychain"]);
+
+      // Init MUST still emit a summary (no stack trace, no early exit).
+      assert.equal(result.ok, true, "init must still emit a summary on partial failure");
+
+      // agent_runtimes_failed must contain exactly one entry — the runtime
+      // whose mint threw on its first call.
+      const runtimesFailed = result.agent_runtimes_failed as
+        | Array<{ runtime: string; error_code: string }>
+        | undefined;
+      assert.ok(
+        Array.isArray(runtimesFailed) && runtimesFailed.length === 1,
+        `agent_runtimes_failed must have exactly 1 entry, got: ${JSON.stringify(runtimesFailed)}`,
+      );
+      assert.equal(runtimesFailed![0]!.error_code, "agent_token_invalid");
+
+      // Both runtimes must still be detected even after one failure.
+      const detected = result.agent_runtimes_detected as string[];
+      assert.equal(detected.length, 2, "both runtimes must still be detected even after one failure");
+      assert.ok(detected.includes("claude") && detected.includes("copilot"), "claude + copilot must be detected");
+
+      // The non-failing runtime must still appear in configured OR
+      // pending_manual — proving the loop kept going past the failure.
+      const configured = result.agent_runtimes_configured as string[];
+      const pending = result.agent_runtimes_pending_manual as string[];
+      assert.equal(
+        configured.length + pending.length,
+        1,
+        `exactly one runtime must have a successful outcome (configured or pending_manual); got configured=${JSON.stringify(configured)} pending=${JSON.stringify(pending)}`,
       );
     } finally {
       process.chdir(origCwd);
