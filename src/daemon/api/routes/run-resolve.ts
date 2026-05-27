@@ -41,7 +41,7 @@ export function registerRunResolveRoute(
     // Body parsing + Host + bearer-token + 1 MB cap are enforced by
     // DaemonServer.addRouteStreaming before this handler runs.
 
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
 
     // Hoisted OUTSIDE the production block so its session_id (if any) flows
     // into EVERY audit emission below — both pre-spawn failure paths (where

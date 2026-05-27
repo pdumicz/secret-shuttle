@@ -40,3 +40,31 @@ test("double unlock zeroes the prior key buffer", () => {
   s.unlock(Buffer.alloc(32, 9));
   assert.equal(s.requireKey().equals(Buffer.alloc(32, 9)), true);
 });
+
+test("assertUnlocked: throws vault_locked when locked", () => {
+  const s = new LockedVaultState();
+  assert.equal(s.isUnlocked(), false);
+  assert.throws(
+    () => s.assertUnlocked(),
+    (err) => err instanceof ShuttleError && err.code === "vault_locked",
+  );
+});
+
+test("assertUnlocked: no-op when unlocked (does not throw, does not allocate)", () => {
+  const s = new LockedVaultState();
+  s.unlock(Buffer.alloc(32, 7));
+  // Should not throw.
+  s.assertUnlocked();
+  // State remains unlocked, key is still readable via requireKey().
+  assert.equal(s.isUnlocked(), true);
+  assert.equal(s.requireKey().equals(Buffer.alloc(32, 7)), true);
+});
+
+test("assertUnlocked: returns void (no Buffer allocation in the call expression)", () => {
+  const s = new LockedVaultState();
+  s.unlock(Buffer.alloc(32, 3));
+  // TypeScript-level: return type is void. At runtime, the call expression
+  // evaluates to undefined — no Buffer.from(this.key) on the success path.
+  const ret = s.assertUnlocked() as unknown;
+  assert.equal(ret, undefined, "assertUnlocked must return undefined (void), not a Buffer");
+});

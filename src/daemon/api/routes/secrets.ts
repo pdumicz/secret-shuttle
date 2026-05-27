@@ -129,7 +129,7 @@ export async function generateSecretCore(
   input: GenerateSecretInput,
   opts: GenerateSecretOpts = {},
 ): Promise<GenerateSecretResult> {
-  services.lock.requireKey();
+  services.lock.assertUnlocked();
   // Hoisted OUTSIDE the try so a post-mint failure (e.g. vault.upsertSecret
   // throws secret_exists AFTER requireApprovals consumed the session) still
   // carries grant.session_id into the failure audit.  Optional-chained at
@@ -247,7 +247,7 @@ export async function generateSecretCore(
 
 export function registerSecrets(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/secrets/list", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const b = (raw ?? {}) as ListBody;
     const secrets = await services.vault.list({
       ...(b.environment !== undefined ? { environment: b.environment } : {}),
@@ -258,7 +258,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
   });
 
   server.addRoute("POST", "/v1/secrets/inspect", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const b = raw as { ref?: string } | null;
     if (b === null || typeof b.ref !== "string") throw new ShuttleError("bad_request", "ref is required.");
     const secret = await services.vault.inspect(b.ref);
@@ -269,7 +269,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
     // Preserve the previous ordering: vault-lock check first, then body
     // parsing. Both throw outside the audit-on-failure block, so the order
     // determines which error code surfaces when both conditions hold.
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const approvalIds = optApprovalIds(o);
     const b = raw as GenerateBody;
@@ -299,7 +299,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
   });
 
   server.addRoute("POST", "/v1/secrets/capture", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const approvalIds = optApprovalIds(o);
     const b = raw as CaptureBody;
@@ -383,7 +383,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
   });
 
   server.addRoute("POST", "/v1/secrets/inject", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const approvalIds = optApprovalIds(o);
     const b = raw as InjectBody;
@@ -474,7 +474,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
   });
 
   server.addRoute("POST", "/v1/secrets/compare", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const approvalIds = optApprovalIds(o);
     const b = raw as CompareBody;

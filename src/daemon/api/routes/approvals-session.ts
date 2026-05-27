@@ -18,7 +18,7 @@ export function registerApprovalsSessionRoutes(
   daemonPortRef: () => number,
 ): void {
   server.addRoute("POST", "/v1/approvals/session", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const pattern = parseSessionPatternFromBody(o);
     const waitForApproval = optBool(o, "wait_for_approval");
@@ -55,7 +55,7 @@ export function registerApprovalsSessionRoutes(
   });
 
   server.addRoute("GET", "/v1/approvals/sessions", () => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const callerAgentId = getCurrentAgentId();
     const isRoot = callerAgentId === "root";
     return {
@@ -81,7 +81,7 @@ export function registerApprovalsSessionRoutes(
   });
 
   server.addRoute("POST", "/v1/approvals/sessions/revoke", (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const sessionId = reqString(o, "session_id");
     // Owner check lives in the route (not the store) so direct-store callers

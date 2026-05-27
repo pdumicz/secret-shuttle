@@ -28,7 +28,7 @@ export function registerSecretsDeleteRoute(
   daemonPortRef: () => number,
 ): void {
   server.addRoute("POST", "/v1/secrets/delete", async (_req, body) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(body);
     const approvalIds = optApprovalIds(o);
     const b = (body ?? {}) as DeleteBody;

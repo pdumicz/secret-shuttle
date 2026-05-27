@@ -33,4 +33,21 @@ export class LockedVaultState {
     }
     return Buffer.from(this.key);
   }
+
+  /**
+   * Same guard as requireKey() — throws ShuttleError("vault_locked") if locked
+   * — but does NOT allocate a Buffer copy. Use this when you only need to
+   * verify the vault is unlocked, not to consume the key. The vast majority
+   * of route handlers use the guard idiom (`services.lock.requireKey();`
+   * with the return value discarded), and were thereby leaking a 32-byte
+   * Buffer per call onto the heap until GC.
+   */
+  assertUnlocked(): void {
+    if (this.key === null) {
+      throw new ShuttleError(
+        "vault_locked",
+        "The Secret Shuttle vault is locked. Run `secret-shuttle unlock`.",
+      );
+    }
+  }
 }

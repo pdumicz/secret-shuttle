@@ -35,7 +35,7 @@ export function registerTemplates(server: DaemonServer, services: DaemonServices
   }));
 
   server.addRoute("POST", "/v1/templates/run", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
 
     // Validate request body shape before everything else.  These throws fire
     // outside the try/audit block — matching the inject-submit / reveal-capture
@@ -113,7 +113,7 @@ export async function runTemplateCore(
   input: RunTemplateInput,
   opts: RunTemplateOpts = {},
 ): Promise<RunTemplateResult> {
-  services.lock.requireKey();
+  services.lock.assertUnlocked();
   const { templateId, ref, params } = input;
   // Hoisted so the catch block can include them in the failure audit record.
   let effectiveEnv: string | undefined;

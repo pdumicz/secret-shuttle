@@ -29,7 +29,7 @@ export function registerSecretsRotateRoute(
   daemonPortRef: () => number,
 ): void {
   server.addRoute("POST", "/v1/secrets/rotate", async (_req, body) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(body);
     const approvalIds = optApprovalIds(o);
     const b = (body ?? {}) as RotateBody;

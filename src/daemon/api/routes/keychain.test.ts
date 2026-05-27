@@ -139,6 +139,46 @@ test("POST /v1/keychain/enable: throws keychain_unavailable when no keychain", a
   }, keychain);
 });
 
+test("POST /v1/keychain/enable: scrubs the master-key Buffer after keychain.set", async () => {
+  // B1 scrub regression: the masterKey copy returned by lock.requireKey() must
+  // be filled with zeros after keychain.set consumes it, so the bytes don't
+  // linger on the heap until GC. We spy on keychain.set to capture the actual
+  // Buffer reference passed in, then assert it's all zeros after the route
+  // returns.
+  const base = new MockKeychain();
+  let capturedMasterKey: Buffer | null = null;
+  const spying: KeychainAdapter = {
+    async isAvailable() { return base.isAvailable(); },
+    async set(s, a, v) {
+      // Capture ONLY the call for the real master key (not the marker).
+      // The marker call passes Buffer.from("enrolled") — not the secret.
+      if (capturedMasterKey === null) {
+        capturedMasterKey = v; // same reference passed into set()
+      }
+      return base.set(s, a, v);
+    },
+    async get(s, a) { return base.get(s, a); },
+    async delete(s, a) { return base.delete(s, a); },
+  };
+
+  await withKeychainDaemon(async (ctx) => {
+    await bootstrapVault(ctx.services);
+
+    const r = await call(ctx.port, "POST", "/v1/keychain/enable");
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { ok: boolean }).ok, true);
+
+    // The captured Buffer is the same reference the daemon held during
+    // keychain.set — after the route's try/finally, every byte must be 0.
+    assert.ok(capturedMasterKey !== null, "spy must have captured the masterKey Buffer reference");
+    assert.equal(capturedMasterKey.byteLength, 32, "captured masterKey must be 32 bytes");
+    assert.ok(
+      capturedMasterKey.every((b) => b === 0),
+      "masterKey Buffer must be fully zeroed after the route returns (B1 scrub)",
+    );
+  }, spying);
+});
+
 // ── POST /v1/keychain/disable ───────────────────────────────────────────────
 
 test("POST /v1/keychain/disable: removes real key AND marker entries (idempotent)", async () => {

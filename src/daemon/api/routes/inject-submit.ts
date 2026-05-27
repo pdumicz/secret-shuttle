@@ -29,7 +29,7 @@ const SUCCESS_TIMEOUT_CAP_MS = 60_000;
 
 export function registerInjectSubmit(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/secrets/inject-submit", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const ref = reqString(o, "ref");
     const fieldHandleLabel = reqString(o, "field_handle");

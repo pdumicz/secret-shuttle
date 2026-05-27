@@ -38,7 +38,7 @@ interface RevealCaptureBody {
 
 export function registerRevealCapture(server: DaemonServer, services: DaemonServices, daemonPortRef: () => number): void {
   server.addRoute("POST", "/v1/secrets/reveal-capture", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const name = reqString(o, "name");
     const environment = reqString(o, "environment");
@@ -139,7 +139,7 @@ export async function revealCaptureCore(
   input: RevealCaptureInput,
   opts: RevealCaptureOpts = {},
 ): Promise<RevealCaptureResult> {
-  services.lock.requireKey();
+  services.lock.assertUnlocked();
   const {
     name,
     environment,

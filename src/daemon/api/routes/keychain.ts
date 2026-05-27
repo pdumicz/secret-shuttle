@@ -6,7 +6,8 @@ import type { DaemonServices } from "../../services.js";
 
 export function registerKeychainRoutes(server: DaemonServer, services: DaemonServices): void {
   server.addRoute("POST", "/v1/keychain/enable", async () => {
-    const masterKey = services.lock.requireKey(); // throws vault_locked if not unlocked
+    // Cheap guard first — fails fast on locked vault without allocating a key copy.
+    services.lock.assertUnlocked();
     const envelope = await readEnvelope();
     if (envelope === null) {
       throw new ShuttleError(
@@ -21,7 +22,14 @@ export function registerKeychainRoutes(server: DaemonServer, services: DaemonSer
         "OS keychain is not available on this platform / environment.",
       );
     }
-    await keychain.set("secret-shuttle", envelope.id, masterKey);
+    // Acquire the master-key copy ONLY now (mirrors Vault.read/write B1 pattern)
+    // and scrub in `finally` so a throw from keychain.set still wipes the bytes.
+    const masterKey = services.lock.requireKey();
+    try {
+      await keychain.set("secret-shuttle", envelope.id, masterKey);
+    } finally {
+      masterKey.fill(0);
+    }
     // P2 post-ship fix: write a non-secret marker entry alongside the real key.
     // Status checks read this marker instead of calling hasEntry (which in some
     // adapter implementations materializes ALL passwords under the service into

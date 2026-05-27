@@ -27,7 +27,7 @@ export function registerSecretsImportRoute(
   daemonPortRef: () => number,
 ): void {
   server.addRoute("POST", "/v1/secrets/import", async (_req, body) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
 
     const o = asObject(body);
     const approvalIds = optApprovalIds(o);

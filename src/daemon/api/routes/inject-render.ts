@@ -19,7 +19,7 @@ export function registerInjectRenderRoute(
   daemonPortRef: () => number,
 ): void {
   server.addRoute("POST", "/v1/inject/render", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
 
     const o = asObject(raw);
     const template = reqString(o, "template");

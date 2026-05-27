@@ -27,7 +27,7 @@ export function registerBootstrapRoutes(
 ): void {
   // ── POST /v1/bootstrap/plan ──────────────────────────────────────────────
   server.addRoute("POST", "/v1/bootstrap/plan", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const planYml = reqString(o, "plan_yml");
     const force = optBool(o, "force") ?? false;
@@ -204,7 +204,7 @@ export function registerBootstrapRoutes(
 
   // ── POST /v1/bootstrap/continue ─────────────────────────────────────────
   server.addRoute("POST", "/v1/bootstrap/continue", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const batchId = reqString(o, "batch_id");
     const approvalIds = optApprovalIds(o);
@@ -401,7 +401,7 @@ export function registerBootstrapRoutes(
 
   // ── POST /v1/bootstrap/abandon ───────────────────────────────────────────
   server.addRoute("POST", "/v1/bootstrap/abandon", async (_req, raw) => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const o = asObject(raw);
     const batchId = reqString(o, "batch_id");
 
@@ -422,7 +422,7 @@ export function registerBootstrapRoutes(
 
   // ── GET /v1/bootstrap/list ───────────────────────────────────────────────
   server.addRoute("GET", "/v1/bootstrap/list", async () => {
-    services.lock.requireKey();
+    services.lock.assertUnlocked();
     const batches = await services.bootstrapStore.list();
     // Owner-filtered (A11): non-root callers only see batches they created;
     // root sees all. Cross-agent batches are silently omitted so non-owners
