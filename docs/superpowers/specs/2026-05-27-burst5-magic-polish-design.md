@@ -359,7 +359,7 @@ export const DESTINATION_DEFINING_PARAMS: Record<string, readonly string[]> = {
 
 **Implication of `name` being destination-defining**: most realistic batches push one ref to one (provider, env, variable-name) triple — each `PlanEntry`'s `name` is the env-var name from `.env.example`, typically unique per entry. So the derivation usually produces **one pattern per (ref, destination)** rather than one pattern per (source, env, template). That's exactly the granularity the user is consenting to: "the same secret pushed to the same place again" — not "anything in this provider scope."
 
-For batches that genuinely push the same ref to multiple env-var names (rare, but possible — same source value under two different names in the destination), each name gets its own pattern. Each pattern is exact-ref + exact-params; `ref_glob: "ss://<source>/<env>/*"` form is only emitted when ≥2 ref-distinct entries share all destination-defining params (effectively never, given `name` is in the key — but the code handles it cleanly if a future template adds a many-to-many shape).
+For batches that genuinely push the same ref to multiple env-var names (rare, but possible — same source value under two different names in the destination), each name gets its own pattern. **Provision-derived patterns are always exact-ref** — see "No glob collapsing in derivation" below. The `ref_glob` schema field still supports `prefix*` form for manual session creation via `internal session create` / `POST /v1/approvals/session`, unchanged from Plan 4a.
 
 **Two distinct fallback contexts — derivation fails closed, manual paths unchanged:**
 
@@ -457,20 +457,30 @@ The grouping key becomes:
 
 Concrete examples (`name` is destination-defining for every shipped template, so it appears in every group key):
 
-- **Single ref to one Vercel environment:** one PlanEntry pushing `ss://stripe/prod/STRIPE_KEY` to `vercel:production` (variable `name=STRIPE_KEY`) → **one pattern**, `ref_glob: "ss://stripe/prod/STRIPE_KEY"` (exact ref), `required_params: { name: "STRIPE_KEY", environment: "production" }`.
-- **Same ref pushed to two Vercel environments (same variable name):** PlanEntry pushes `ss://stripe/prod/STRIPE_KEY` to both `vercel:production` AND `vercel:preview`, same env-var name `STRIPE_KEY` → **two patterns** (one per `environment` value), each exact-ref, each with `required_params.name = "STRIPE_KEY"` + the corresponding `environment`.
+**Provision-derived sessions always emit exact-ref patterns** (no `*` glob form). The grouping key still includes `(template_id, source, env, destination-defining-params)`, but for any group that ends up spanning ≥2 distinct refs, the derivation emits **one pattern per ref** rather than collapsing them into a glob. This is intentional consent narrowness — see "No glob collapsing in derivation" below.
+
+Concrete examples (`name` is destination-defining for every shipped template, so it appears in every pattern):
+
+- **Single ref to one Vercel environment:** one PlanEntry pushing `ss://stripe/prod/STRIPE_KEY` to `vercel:production` (variable `name=STRIPE_KEY`) → **one pattern**, `ref_glob: "ss://stripe/prod/STRIPE_KEY"` (the exact ref, no trailing `*`), `required_params: { name: "STRIPE_KEY", environment: "production" }`.
+- **Same ref pushed to two Vercel environments (same variable name):** PlanEntry pushes `ss://stripe/prod/STRIPE_KEY` to both `vercel:production` AND `vercel:preview`, same env-var name `STRIPE_KEY` → **two patterns** (one per `environment` value), each with the exact ref and the corresponding `environment` in `required_params`.
 - **Two different refs, same Vercel environment, different variable names:** PlanEntry A pushes `ss://stripe/prod/STRIPE_KEY` to `vercel:production` (name=STRIPE_KEY); PlanEntry B pushes `ss://stripe/prod/STRIPE_WEBHOOK_SECRET` to `vercel:production` (name=STRIPE_WEBHOOK_SECRET). Different `name` values → **two patterns**, each exact-ref + its own `required_params.name`.
-- **Two different refs, same destination variable name** (the rare aliasing case where two refs are both pushed under the same env-var name — e.g., overwrite intent): PlanEntry A pushes `ss://stripe/prod/X` to `vercel:production` (name=API_KEY); PlanEntry B pushes `ss://stripe/prod/Y` to `vercel:production` (name=API_KEY). Same `(template_id, source, env, name, environment)` group key → **one pattern**, `ref_glob: "ss://stripe/prod/*"` (a glob, because the group spans two distinct refs), `required_params: { name: "API_KEY", environment: "production" }`. This is the only case where the glob form is emitted in practice; the user's consent line shows the glob + the `name=API_KEY` constraint so the scope is unambiguous.
+- **Two different refs aliased onto the same destination variable name** (the rare overwrite case — `ss://stripe/prod/X` and `ss://stripe/prod/Y` both pushed under `vercel:production` as `name=API_KEY`): same `(template_id, source, env, name, environment)` group key — but derivation still emits **two patterns**, one with `ref_glob: "ss://stripe/prod/X"` and one with `ref_glob: "ss://stripe/prod/Y"`. Each is exact-ref. No `ss://stripe/prod/*` glob is emitted from the derivation path. (Rationale: emitting `ss://stripe/prod/*` would silently authorize future ref `Z` under the same prefix to be pushed to `API_KEY`. The user's consent was "these two specific refs pushed to this variable" — not "any ref under this prefix.")
 - **Same ref pushed to two distinct GitHub repos:** PlanEntry pushes `ss://stripe/prod/STRIPE_KEY` (name=STRIPE_KEY) to `repo=patryk/a` AND `repo=patryk/b` → **two patterns**, each exact-ref, each with `required_params.repo` set to the respective repo and `required_params.name = "STRIPE_KEY"`.
 
-**Net effect:** derivation now yields **one pattern per (ref, destination-shape) pair** in the typical case. The `ref_glob` form (with trailing `*`) emerges only in the aliasing case above. Consent is consequently per-push, not per-scope-class — exactly what the user sees on the approval card.
+**Net effect:** derivation yields **one pattern per (ref, destination-shape) tuple**. Always exact ref, never a glob. The user's consent line on the approval card shows each ref + its destination params verbatim — no compression, no implicit "anything under this prefix."
+
+### No glob collapsing in derivation
+
+This burst makes the derivation path **always emit exact-ref `ref_glob` values** (the literal `ss://source/env/NAME` string, no trailing `*`). The `SessionPattern.ref_glob` schema field continues to support `prefix*` form for manual session creation (the `internal session create` CLI / `POST /v1/approvals/session` route) — that surface lets operators explicitly choose broader globs and is unchanged from Plan 4a. Only the derivation path is constrained, because the user consents on the approval card to *exactly* the operations shown, not to a derived superset.
+
+This decision deliberately accepts more `SessionGrant` objects per batch (one per ref-destination) in exchange for never-broader-than-consented sessions. With one-grant-per-pattern already accepted (§2 "Consequences of one-grant-per-pattern"), the additional grants are a count increase, not an architectural change. If a future product mode wants compression ("approve any ref under `ss://stripe/prod/*` for the next N minutes") it must be an **explicit user-elected mode** with its own approval-card affordance — not a silent grouping optimization. That mode is out of scope for this burst.
 
 **Pre-grouping filter:** before grouping, walk every `PlanEntry.destination` and check whether its `template_id` is a key in `DESTINATION_DEFINING_PARAMS`. Destinations whose template is NOT a key are **dropped from the derivation input** (fail-closed per the rule above). Track the dropped destinations so the UI footer can surface the "excluded" notice. Only registered destinations flow into the grouping step.
 
 **Per-group output (rules) — applied only to destinations that survived the pre-grouping filter:**
 - `actions: ["template-run"]`
 - `template_ids: [<template_id>]`
-- `ref_glob: "ss://<source>/<env>/*"` (if group has ≥2 entries with the same `(source, env)`) OR the single exact ref (if group has 1 entry)
+- `ref_glob`: **always the exact ref** (the literal `ss://source/env/NAME` string, no trailing `*`). When a group spans ≥2 distinct refs, derivation emits one pattern per ref rather than collapsing — see "No glob collapsing in derivation" above.
 - `required_params`: populated from the registered destination-defining-params for this `template_id`:
   - If `DESTINATION_DEFINING_PARAMS[template_id]` is a **non-empty** list of param keys: emit `required_params: { <key>: <value-from-PlanEntry.destination.template_params>, ... }` for every listed key. This is the strict-equal scope the user is consenting to.
   - If `DESTINATION_DEFINING_PARAMS[template_id]` is an **explicitly registered empty list** `[]` (the future case of a template whose maintainer deliberately reviewed it and confirmed no destination-defining params exist): emit `required_params: {}` (or omit the field). The matcher matches by ref + template_id only, as Plan 4a. The empty list is an **explicit registration of "no constraints needed"**, distinct from the unregistered case which is fail-closed.
@@ -485,14 +495,14 @@ Concrete examples (`name` is destination-defining for every shipped template, so
 
 Any batch with at least one *registered* template-run destination produces at least one pattern — including single-entry ones (see "Single-entry patterns are allowed" below).
 
-### Ref glob narrowness rule
+### Derivation narrowness invariants
 
-- **Group by `(template_id, source, env, destination-defining-params)`.** Refs sharing all four become one pattern with `ss://<source>/<env>/*`; refs differing in any become separate patterns.
-- **Never emit a pattern broader than `ss://<source>/<env>/*`.** A would-be pattern like `ss://*/prod/*` or `ss://stripe/*/*` is split into multiple `ss://<source>/<env>/*` patterns.
-- **Single-ref groups use the exact ref**, not a glob.
-- **`required_params` is never widened across a group** — the grouping ensures every entry in a group has the same destination-defining-param values.
+- **Group by `(template_id, source, env, destination-defining-params)`** for deduplication only — a group with N refs collapses to N exact-ref patterns (one per ref), not to one glob pattern. The grouping prevents emitting redundant identical patterns when the same ref appears in multiple PlanEntry.destinations (shouldn't happen with the current planner, but the dedup is defense in depth).
+- **Every derived pattern's `ref_glob` is an exact ref** (no trailing `*`). See "No glob collapsing in derivation" above for the rationale. A `prefix*` glob is never emitted from this code path.
+- **`required_params` is never widened across a group** — the grouping ensures every entry in a group has identical destination-defining-param values, so the per-pattern `required_params` is unambiguous.
+- **Manual sessions are unconstrained by this rule.** Operators using `internal session create` or `POST /v1/approvals/session` directly can supply `ref_glob: "ss://prefix*"` and the central validator accepts it. The narrowness applies only to provision-derived sessions.
 
-For a mixed batch (e.g., Stripe→Vercel and Supabase→Vercel and Stripe→GitHub Actions), the derivation produces 3 distinct patterns. **Each pattern becomes its own independent `SessionGrant`** — the current `SessionGrant` data shape (`src/daemon/approvals/session.ts:77`) stores exactly one `SessionPattern`, and introducing a "session bundle id" is new product surface that isn't justified by this burst's magic-polish scope.
+For a mixed batch (e.g., Stripe→Vercel and Supabase→Vercel and Stripe→GitHub Actions), the derivation produces N distinct exact-ref patterns where N = sum of (ref × destination-shape) tuples. **Each pattern becomes its own independent `SessionGrant`** — the current `SessionGrant` data shape (`src/daemon/approvals/session.ts:77`) stores exactly one `SessionPattern`, and introducing a "session bundle id" is new product surface that isn't justified by this burst's magic-polish scope.
 
 Consequences of one-grant-per-pattern:
 - The single user [Approve] click mints N grants in one server-side transaction (looped `createForOwner` calls); the loop must be all-or-nothing — if any `createForOwner` throws, the previously-minted grants in this batch are rolled back (deleted) so the user's consent isn't half-applied.
@@ -592,10 +602,12 @@ The agent reads this to know whether subsequent ops in the same shape will be si
 - `approval-ui-session-affordance.test.ts`: drift-guard text patterns on the new HTML/JS in `ui.html` (checkbox + dropdown + POST body shape).
 - `infer-session-pattern.test.ts`: pure-function test of pattern derivation from `BatchState.plan`. Coverage:
   - single-group, multi-group, mixed-provider, all-capture, single-existing cases
-  - single-entry `(template_id, source, env, destination-defining-params)` groups produce one exact-ref pattern (not suppressed)
-  - **multi-environment**: a single ref pushed to `vercel:production` AND `vercel:preview` (same env-var `name`) produces TWO patterns, each with the corresponding `required_params.environment`; both share the same `required_params.name`
-  - **multi-repo**: same ref pushed to two distinct GitHub Actions repos (e.g., `repo=patryk/a` and `repo=patryk/b`, same secret `name`) produces TWO patterns, each with the corresponding `required_params.repo` value (the template takes one combined `owner/repo` string)
-  - **same scope, different env-var names**: two refs pushed to `vercel:production` under different env-var names (e.g., `STRIPE_KEY` and `OPENAI_KEY`) produce TWO patterns — `name` is destination-defining, so each variable is consented to individually. No single broader pattern covers both.
+  - **every emitted pattern's `ref_glob` is an exact ref** (no trailing `*`). This is the core narrowness invariant — asserted on every test case in the file.
+  - single-entry groups produce one exact-ref pattern (not suppressed)
+  - **multi-environment**: a single ref pushed to `vercel:production` AND `vercel:preview` (same env-var `name`) produces TWO exact-ref patterns, each with the corresponding `required_params.environment`; both share the same `required_params.name`
+  - **multi-repo**: same ref pushed to two distinct GitHub Actions repos (e.g., `repo=patryk/a` and `repo=patryk/b`, same secret `name`) produces TWO exact-ref patterns, each with the corresponding `required_params.repo` value (the template takes one combined `owner/repo` string)
+  - **same scope, different env-var names**: two refs pushed to `vercel:production` under different env-var names (e.g., `STRIPE_KEY` and `OPENAI_KEY`) produce TWO exact-ref patterns
+  - **aliased refs onto same destination name**: two refs `ss://stripe/prod/X` and `ss://stripe/prod/Y` both pushed under `name=API_KEY` to `vercel:production` produce TWO exact-ref patterns (one per ref) — derivation does NOT collapse them into a single `ss://stripe/prod/*` pattern. This is the regression guard that closes the consent-widening footgun.
   - **template without registered destination-defining-params**: derivation **excludes** that destination from the patterns (fail-closed). If at least one destination remains registered, the affordance still renders with a footer notice about the excluded destinations. If ALL destinations are unregistered, derivation returns empty patterns and the affordance does not render. (This is the derivation path. The `SessionStore.create` / `createForOwner` paths still accept empty `required_params` patterns for manual / CLI use — only derivation fails closed.)
 - `session-matcher-required-params.test.ts`: pure-function test of the extended `templateRunMatches`. Coverage:
   - `required_params` empty/absent → today's behavior (ref + template_id only)
