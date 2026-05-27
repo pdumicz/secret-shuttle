@@ -254,3 +254,98 @@ test("spawnAndStream: child that ignores stdin and exits early still completes (
   });
   assert.equal(writer.exit, 0);
 });
+
+// Memory hygiene (parity with templates/run B3 — commit b9421d1): the
+// stdinBytes Buffer typically holds a resolved-from-vault secret, so we
+// must zero it after the child reads it (or after the pipe tears down).
+// Scrubbing BEFORE the write callback risks clobbering not-yet-flushed
+// bytes, so the .end(buf, cb) callback is the PRIMARY trigger. error/close
+// listeners are fallbacks for abnormal termination.
+
+test("spawnAndStream stdin scrub: stdinBytes Buffer is zeroed AFTER the write callback fires (normal path)", async () => {
+  const writer = makeTestWriter();
+  const secretText = "needle-spawner-7c2e-do-not-leak";
+  const payload = Buffer.from(secretText, "utf8");
+  // Sanity: payload starts as the secret bytes.
+  assert.equal(payload.toString("utf8"), secretText);
+
+  // Child reads stdin and exits 0 — exercises the happy path (normal close).
+  // Using `cat` (or node script) round-trips the bytes so we can also confirm
+  // the child saw them BEFORE we scrubbed.
+  await spawnAndStream({
+    cmd: process.execPath,
+    args: [
+      "-e",
+      "process.stdin.on('data',(d)=>process.stdout.write(d)).on('end',()=>process.exit(0))",
+    ],
+    env: { ...process.env },
+    cwd: process.cwd(),
+    outputWriter: writer,
+    stdinBytes: payload,
+  });
+
+  assert.equal(writer.exit, 0);
+  // The child echoed our bytes to stdout — proof the bytes flushed BEFORE
+  // the scrub fired (otherwise the child would have seen zeros).
+  assert.equal(Buffer.concat(writer.stdout).toString("utf8"), secretText);
+  // Now the local Buffer must be all zeros — the .end(buf, cb) callback
+  // fired before the promise resolved.
+  assert.equal(payload.length, Buffer.byteLength(secretText, "utf8"));
+  for (let i = 0; i < payload.length; i++) {
+    assert.equal(payload[i], 0, `byte ${i} should be zero but is ${payload[i]}`);
+  }
+  // Sanity: the original plaintext must not be recoverable from the buffer.
+  assert.equal(payload.includes(Buffer.from(secretText, "utf8")), false);
+});
+
+test("spawnAndStream stdin scrub: stdinBytes is scrubbed on EPIPE (child closes stdin early)", async () => {
+  const writer = makeTestWriter();
+  const secretText = "needle-spawner-epipe-9a3b-do-not-leak";
+  const payload = Buffer.from(secretText, "utf8");
+
+  // `true` exits 0 immediately without reading stdin. The daemon's write
+  // produces EPIPE, which is swallowed by the on('error') handler — and our
+  // EPIPE branch must scrub the Buffer immediately rather than waiting for
+  // an end-callback that may never fire.
+  await spawnAndStream({
+    cmd: "true",
+    args: [],
+    env: process.env,
+    cwd: process.cwd(),
+    outputWriter: writer,
+    stdinBytes: payload,
+  });
+
+  assert.equal(writer.exit, 0);
+  // Whether the scrub fires from the EPIPE branch, the 'close' fallback, or
+  // the end-callback, the contract is: by the time the promise resolves, the
+  // Buffer is zeroed.
+  for (let i = 0; i < payload.length; i++) {
+    assert.equal(
+      payload[i],
+      0,
+      `byte ${i} should be zero on EPIPE path but is ${payload[i]}`,
+    );
+  }
+  assert.equal(payload.includes(Buffer.from(secretText, "utf8")), false);
+});
+
+test("spawnAndStream stdin scrub: empty stdinBytes Buffer still completes without throwing", async () => {
+  // Edge case: a zero-length Buffer. fill(0) is a no-op on len=0; the boolean
+  // guard still sets scrubbed=true so multi-fire is safe. Verifies the scrub
+  // path doesn't choke on empty payloads.
+  const writer = makeTestWriter();
+  const payload = Buffer.alloc(0);
+  await spawnAndStream({
+    cmd: "cat",
+    args: [],
+    env: process.env,
+    cwd: process.cwd(),
+    outputWriter: writer,
+    stdinBytes: payload,
+  });
+  assert.equal(writer.exit, 0);
+  // Length is still 0; fill(0) on len=0 is a no-op; no assertion needed on
+  // content beyond "didn't throw".
+  assert.equal(payload.length, 0);
+});

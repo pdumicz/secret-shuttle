@@ -105,13 +105,38 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
     c.stdout?.on("data", (chunk: Buffer) => input.outputWriter.writeStdout(chunk));
     c.stderr?.on("data", (chunk: Buffer) => input.outputWriter.writeStderr(chunk));
 
-    // If stdin bytes were supplied, write+end the stream. EPIPE is
-    // swallowed: a child that ignores stdin (or exits before reading)
-    // produces this signal, but we don't want to crash the spawn for
-    // it — the child still runs to completion.
+    // If stdin bytes were supplied, write+end the stream and scrub the
+    // Buffer once those bytes have flushed. EPIPE is swallowed: a child
+    // that ignores stdin (or exits before reading) produces this signal,
+    // but we don't want to crash the spawn for it — the child still runs
+    // to completion.
+    //
+    // Memory hygiene (parity with templates/run B3): the stdinBytes Buffer
+    // typically holds a resolved-from-vault secret. We scrub it (fill 0) so
+    // the plaintext doesn't linger on the heap until GC. The PRIMARY scrub
+    // is the .end(buf, cb) callback — Node may retain the Buffer reference
+    // until the write completes, so scrubbing BEFORE the callback could
+    // clobber not-yet-flushed bytes. error/close fallbacks handle abnormal
+    // termination (child crashes pre-write, broken pipe). The scrub helper
+    // is idempotent so triple-fire (error + close + cb) is safe.
     if (input.stdinBytes !== undefined && c.stdin !== null) {
+      const stdinBuf = input.stdinBytes;
+      let scrubbed = false;
+      const scrub = (): void => {
+        if (scrubbed) return;
+        scrubbed = true;
+        stdinBuf.fill(0);
+      };
+
       c.stdin.on("error", (err: NodeJS.ErrnoException) => {
-        if (err.code === "EPIPE") return;
+        if (err.code === "EPIPE") {
+          // EPIPE: child closed stdin early. The bytes are either already
+          // flushed to the kernel pipe or weren't going to be read — scrub
+          // immediately rather than waiting for an end-callback that may
+          // never fire after the pipe tore down.
+          scrub();
+          return;
+        }
         // Non-EPIPE errors should still bubble through writeError but
         // not crash the daemon. Log via outputWriter so the route can
         // surface as a structured stream event.
@@ -119,9 +144,18 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
           code: "stdin_write_failed",
           message: err.message,
         });
+        // Bytes may have partially flushed; we can't selectively zero only
+        // the unread tail, so scrub defensively.
+        scrub();
       });
-      c.stdin.write(input.stdinBytes);
-      c.stdin.end();
+      // Belt-and-suspenders: even if neither the error nor the end-callback
+      // fires (which shouldn't happen in practice), the 'close' event will.
+      c.stdin.once("close", scrub);
+
+      // end(buf, cb): write the bytes then close the stream; the callback
+      // fires AFTER the write completes so the scrub doesn't clobber
+      // not-yet-flushed bytes (this is the primary, normal-path trigger).
+      c.stdin.end(stdinBuf, () => { scrub(); });
     }
 
     c.on("error", (err: Error) => {
