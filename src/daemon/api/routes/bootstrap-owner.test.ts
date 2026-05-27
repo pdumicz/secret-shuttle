@@ -251,6 +251,41 @@ test("POST /v1/bootstrap/abandon: truly-missing batch_id also returns bootstrap_
   });
 });
 
+test("POST /v1/bootstrap/abandon: root can abandon any agent's batch (root-bypass parity with /continue)", async () => {
+  // Symmetric with the existing /continue root-bypass test. Without this
+  // assertion the root-abandon code path (services.ts: !callerIsRoot &&
+  // state.owner_agent_id !== callerAgentId) would have zero regression
+  // coverage; a future refactor that accidentally tightens the guard to
+  // require BOTH root AND owner-match would silently break operator recovery.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const batchId = "bootstrap-owner-abandon-root";
+    await withAuthContext({ agent_id: "claude-aaa", isRoot: false }, async () => {
+      await ctx.services.bootstrapStore.save({
+        batch_id: batchId,
+        approval_id: "",
+        plan_file_path: "",
+        plan: samplePlan("ABANDON_ROOT_KEY"),
+        step_results: {},
+        created_at: Date.now(),
+        status: "pending",
+        owner_agent_id: "claude-aaa",
+      });
+    });
+
+    // Root bearer is the bare ctx.token (no agent_id.hmac suffix); the daemon
+    // bearer parser routes it through the "no dots" → root path. This is the
+    // SAME mechanism the operator uses on the CLI via the socket-file token.
+    const r = await callWithBearer(ctx, ctx.token, "POST", "/v1/bootstrap/abandon", {
+      batch_id: batchId,
+    });
+    assert.equal(r.status, 200, `root abandon should succeed, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const after = await ctx.services.bootstrapStore.get(batchId);
+    assert.equal(after, null, "batch must be deleted after root abandon");
+  });
+});
+
 test("GET /v1/bootstrap/list: non-root sees only own batches; root sees all", async () => {
   // Seed two batches owned by different agents, then list as A, B, and root.
   await withDaemon(async (ctx) => {
