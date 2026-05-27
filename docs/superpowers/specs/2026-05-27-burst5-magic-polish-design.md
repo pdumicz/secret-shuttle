@@ -194,7 +194,7 @@ Flags:
   --ref <ss://...>       Existing ref (required when --from=existing)
   --to <dest[,dest...]>  Destinations (vercel:env, github-actions:owner/repo, ...)
   --approval-id <id>     Approval id (repeatable for multi-approval batches)
-  --dry-run              Print plan only (default in --infer; allowed in other modes)
+  --dry-run              Print planned yml to stdout, no file write, no batch (--infer only)
   --force                Overwrite existing yml (--infer only)
   --json                 Machine-readable output (default for non-tty)
 
@@ -253,14 +253,18 @@ The hub's only role for this feature is unchanged: it queues navigations and fra
   Matching shape: identical destination templates on the same
   (source, env) ref prefix as this batch.
   You can revoke at any time via:
-    secret-shuttle internal session revoke --id <id>
+    secret-shuttle internal session revoke <session-id>
 ─────────────────────────────────────────────
    [ Approve ]   [ Deny ]
 ```
 
 The checkbox is default-unchecked. The dropdown defaults to 15 min when the user checks the box. The block does not render at all if the derived pattern would be empty (see "Pattern derivation" below).
 
-When the user clicks [Approve] with the checkbox checked, the POST to `/ui/approvals/:id/approve` includes `{ session: { ttl_minutes: <selection> } }` in its body. The route reads this and, after recording the approval grant, calls the new daemon method `createSessionFromApproval(approvalGrant, pattern, ttlMs)` — see "Owner stamping" below.
+When the user clicks [Approve] with the checkbox checked, the POST to `/ui/approvals/:id/approve` includes `{ session: { ttl_minutes: <selection> } }` in its body. The route reads this and, after recording the approval grant, mints session grants — see "Owner stamping" below.
+
+**Body parsing in the raw route (corrects v1 spec gap):** `DaemonServer.addRouteRaw` (`src/daemon/server.ts:69`) does not parse JSON bodies — its handler receives an opaque body argument. The `/ui/approvals/:id/approve|deny` route currently does not need to read a body. After this burst, the approve POST DOES need to read a small JSON body. The route reads the body via the existing `readBoundedJson(req, 1024)` helper currently colocated in `src/daemon/hub/hub-server.ts:141`; that helper is **moved to `src/daemon/helpers/bounded-json.ts`** in this burst (no behavior change — just a relocation so both hub and approval UI routes import it).
+
+Body shape: `{ session?: { ttl_minutes: 5|15|30|60 } }`. Missing `session` key → no session minted (today's behavior preserved). Malformed body → `bad_request`. Oversize body → `request_too_large` (existing code).
 
 ### Pattern derivation — from `BatchState.plan`, not from bindings (corrects v1 spec)
 
@@ -295,7 +299,17 @@ The reviewer flagged that one `SessionPattern.ref_glob` can become too broad for
 - **Never emit a pattern broader than `ss://<source>/<env>/*`.** A would-be pattern like `ss://*/prod/*` or `ss://stripe/*/*` is split into multiple `ss://<source>/<env>/*` patterns.
 - **Single-ref groups use the exact ref**, not a glob.
 
-For a mixed batch (e.g., Stripe→Vercel and Supabase→Vercel and Stripe→GitHub Actions), the derivation produces 3 distinct patterns, all attached to the same `SessionGrant.id`. The hub UI footer shows them as three lines (one per pattern) so the user sees exactly what they're consenting to.
+For a mixed batch (e.g., Stripe→Vercel and Supabase→Vercel and Stripe→GitHub Actions), the derivation produces 3 distinct patterns. **Each pattern becomes its own independent `SessionGrant`** — the current `SessionGrant` data shape (`src/daemon/approvals/session.ts:77`) stores exactly one `SessionPattern`, and introducing a "session bundle id" is new product surface that isn't justified by this burst's magic-polish scope.
+
+Consequences of one-grant-per-pattern:
+- The single user [Approve] click mints N grants in one server-side transaction (looped `createForOwner` calls); the loop must be all-or-nothing — if any `createForOwner` throws, the previously-minted grants in this batch are rolled back (deleted) so the user's consent isn't half-applied.
+- The hub UI footer displays the N patterns as N lines (one per derived pattern). The user reads "what they're consenting to" as the list — the UI does NOT need to convey grant ids since the user revokes by pattern-shape or by listing/revoking individually.
+- `secret-shuttle status` shows all N as separate `active_sessions[]` entries (their `pattern_summary` makes it obvious they came from the same batch — same `approved_at` timestamp).
+- Revocation: a user wanting to revoke "everything from that batch" runs `internal session list` and revokes each; group-revoke is deferred to a future burst if real usage shows the need.
+
+### Single-entry patterns are allowed (corrects v1 spec ambiguity)
+
+A `(template_id, source, env)` group containing one plan entry yields an **exact-ref** pattern (no `*`). This is allowed — and useful: it lets the agent push the same ref again within the consent window (e.g., to a second destination environment that was deferred, or to re-push after a value update). The "empty-pattern guard" suppresses the affordance only when derivation produces **zero** patterns (e.g., the batch is a single capture step with no template-run destinations). Single-entry batches with at least one template-run destination DO get a session offer.
 
 ### Owner stamping — UI route → store, explicit propagation (corrects v1 spec)
 
@@ -383,12 +397,13 @@ The agent reads this to know whether subsequent ops in the same shape will be si
 ### Tests
 
 - `approval-ui-session-affordance.test.ts`: drift-guard text patterns on the new HTML/JS in `ui.html` (checkbox + dropdown + POST body shape).
-- `infer-session-pattern.test.ts`: pure-function test of pattern derivation from `BatchState.plan`, exercising single-group/multi-group/mixed-provider/all-capture/single-existing cases.
+- `infer-session-pattern.test.ts`: pure-function test of pattern derivation from `BatchState.plan`, exercising single-group / multi-group / mixed-provider / all-capture / single-existing cases. Single-entry `(template_id, source, env)` groups must produce one exact-ref pattern (not be suppressed).
 - `session-store-create-for-owner.test.ts`: `createForOwner` stamps the supplied owner; ALS context is not consulted.
-- `approval-ui-creates-session.test.ts`: POST `/ui/approvals/:id/approve` with `session: { ttl_minutes: 15 }` creates a session owned by the approval grant's owner_agent_id.
-- `require-approvals-auto-match.test.ts`: matching active session silently satisfies a matching operation; expired/revoked/exhausted candidates are skipped; max_uses race retries once then falls through.
+- `approval-ui-creates-sessions.test.ts`: POST `/ui/approvals/:id/approve` with `session: { ttl_minutes: 15 }` creates **N independent SessionGrants** (one per derived pattern) all owned by the approval grant's `owner_agent_id`. If any grant creation throws, all previously-minted grants from this batch are rolled back; the approval grant itself still records (the rollback is session-creation-only).
+- `approval-ui-bounded-json.test.ts`: the approve route parses its body via the relocated `readBoundedJson` helper; oversize body → `request_too_large`; malformed JSON → `bad_request`; missing `session` key → no session minted, approval succeeds normally.
+- `require-approvals-auto-match.test.ts`: matching active session silently satisfies a matching operation; expired / revoked / exhausted candidates are skipped; max_uses race retries once then falls through.
 - `session-ttl-cap-bump.test.ts`: TTL of exactly 60 min accepted; 60 min + 1 ms rejected with `session_ttl_exceeds_cap`; the explicit code replaces the prior `bad_request` for this case.
-- `status-active-sessions.test.ts`: `status --json` includes the new field, owner-scoped; empty array when no sessions.
+- `status-active-sessions.test.ts`: `status --json` includes the new field, owner-scoped; empty array when no sessions; for a mixed-batch approval with N derived patterns, the field shows N entries.
 
 ---
 
@@ -586,19 +601,47 @@ Recovery: secret-shuttle provision --continue --batch b_abc
 
 The `audit` route tries `BootstrapStore` first when given `--batch`; on miss it falls back to audit-log reconstruction with a `details.reconstructed_from: "audit"` flag in the response (so the caller knows the view may be partial — destination push results are not always durably recorded today).
 
-**Required durable audit field (one new field):**
+**Required durable audit fields (corrects v1 spec — destination reconstruction was overclaimed):**
 
 `DaemonAuditEvent` (in `src/daemon/audit.ts`) gains:
 ```ts
-batch_id?: string;       // Set on every bootstrap_plan / bootstrap_step row
-                         // (and on any future provision-batch-related row).
-source_kind?: string;    // Set on bootstrap_step rows ("capture" | "random_32_bytes" | "random_64_bytes" | "existing").
-                         // Enables `--since` summaries to display source_kind per ref without consulting BatchState.
+batch_id?: string;
+// Set on every bootstrap_plan and bootstrap_step row, AND on every inner
+// template_run row written under bootstrapAuthority (the executor calls
+// `runTemplateCore` with a context object that already carries batch_id;
+// this burst surfaces it to the audit row).
+// On audit consumption, batch_id is the join key between coarse-grained
+// (bootstrap_step) and fine-grained (template_run) rows.
+
+source_kind?: string;
+// Set on bootstrap_step rows ("capture" | "random_32_bytes" | "random_64_bytes" | "existing").
+// Sourced from BatchState.plan[i].source.kind at audit-write time.
+
+destination_shorthands?: string[];
+// Set on bootstrap_step rows. The human-readable destination list as it
+// appeared in the yml ("vercel:production", "github-actions:patryk/repo").
+// Sourced from BatchState.plan[i].destinations[*].shorthand at audit-write
+// time — the shorthand is already persisted in ResolvedDestination.shorthand
+// (src/daemon/bootstrap/store.ts:11), so no new reconstruction needed.
+// Per-destination ok/error_code remains inside the operational BatchState;
+// the audit row carries only the destination LIST as durable context.
+
+destinations_ok_count?: number;
+destinations_failed_count?: number;
+// Set on bootstrap_step rows. Per-destination outcome counts, computed
+// from the StepResult.destinations_pushed list (already tracked by the
+// executor — see src/daemon/bootstrap/executor.ts:225). Enables the
+// summary to display "✓ 2/2 destinations" without consulting BatchState.
 ```
 
-These are additive optional fields. Existing audit rows without them remain valid; the summary just shows "—" for missing source_kind. The fields populate from `BatchState.plan[i].source.kind` and `BatchState.batch_id` at audit-write time in `src/daemon/bootstrap/executor.ts`.
+All four fields are additive optional. Existing audit rows without them remain valid; the summary surfaces "—" or "(unknown)" where missing.
 
-Destination shorthand (e.g., `vercel:production`) is reconstructed at summary time from existing fields: `template_id` + `domain` + `destination_environment`. No new field needed for destinations.
+**Why both `bootstrap_step.destinations_shorthands` AND `template_run.batch_id`:**
+- `bootstrap_step` rows give a self-contained per-secret summary line (ref, source_kind, destinations attempted, push outcome counts). This is what `audit --since` lists.
+- Inner `template_run` rows carrying `batch_id` enable a drilled-down view (`audit --batch <id>` reconstructed-from-audit fallback) — without it, a pruned batch shows no per-destination detail, only the bootstrap_step summary. With it, the drill-down can show "template_run vercel-env-add → vercel.com → production: ok" per push.
+- Operationally cheap: `bootstrapAuthority` already carries the batch_id; one extra field per audit call.
+
+This is the explicit answer to the reviewer's "either propagate batch_id to inner template_run rows OR add destinations[] to bootstrap_step" — we do both, because each supports a different summary mode.
 
 `approved_at` for the batch summary is derived from the `approval_granted` audit row matching the batch's `approval_id`. Both `actor_agent_id` and `session_id` (already durable per Burst 4) flow through unchanged.
 
@@ -656,7 +699,9 @@ Implementation: change in `src/daemon/bootstrap/executor.ts` where the final res
 - `audit.test.ts`: text + JSON format snapshots; window parsing (`5m`, `1h`, `1d`); cross-owner non-disclosure.
 - `audit-route.test.ts`: daemon `POST /v1/audit/summary` route exists; owner-scoped; `--all` requires root.
 - `audit-batch-live-vs-reconstructed.test.ts`: `--batch <id>` reads `BootstrapStore` first; on miss, falls back to audit-log reconstruction with `details.reconstructed_from: "audit"` set; cleanly missing both → `audit_batch_not_found`.
-- `audit-fields-batch-id-source-kind.test.ts`: `bootstrap_step` audit rows written by the executor carry `batch_id` and `source_kind` fields. Older rows without them parse cleanly and surface as "—" in summary output.
+- `audit-fields-bootstrap-step.test.ts`: `bootstrap_step` audit rows written by the executor carry `batch_id`, `source_kind`, `destination_shorthands[]`, `destinations_ok_count`, `destinations_failed_count`. Per-destination ok/error stays in operational `BatchState`, NOT in the audit row.
+- `audit-fields-template-run-batch-id.test.ts`: inner `template_run` rows written under `bootstrapAuthority` carry `batch_id` matching the parent `bootstrap_step` row. Standalone `template_run` calls (no bootstrap context) leave `batch_id` undefined.
+- `audit-fields-backwards-compat.test.ts`: synthetic older-format rows without the new fields parse cleanly; summary output surfaces "—" or "(unknown)" for missing values; row count and grouping are unaffected.
 - `provision-resume-hint.test.ts`: a `failed_partial` batch response carries `next_action: "secret-shuttle provision --continue --batch <id>"`; an abandoned batch does not; an expired-approval batch omits `next_action` and sets `details.requires_new_approval: true`.
 - `cli-help-discoverability.test.ts`: `--help` no-args output includes the AGENT QUICKSTART line; `help` command output mentions SKILL.md.
 - `readme-header.test.ts`: README starts with the agent callout block linking to SKILL.md.
