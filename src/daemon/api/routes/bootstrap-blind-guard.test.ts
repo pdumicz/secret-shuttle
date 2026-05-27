@@ -532,3 +532,224 @@ secrets:
     }
   });
 });
+
+// ── Concurrent /continue race: synchronous reservation preserves loser's approval ──
+
+test("POST /v1/bootstrap/continue: concurrent capture plans from two batches → loser fails with bootstrap_browser_busy BEFORE approval consume; only ONE Chrome spawn", async () => {
+  // CRITICAL race-condition guard for the cross-batch double-spawn:
+  //
+  // Before the synchronous reserveBootstrapBrowser, the pre-approval guard
+  // only inspected services.browserSession. If two batches started while
+  // browserSession === null, both passed the precheck, both consumed
+  // approvals in requireApprovals, then both raced into
+  // ensureBootstrapBrowser — whose null-check is awaited (not synchronous).
+  // With a slow Chrome-spawn factory, both calls saw null, both spawned,
+  // last writer won — leaking one Chrome process and stranding the loser
+  // with a consumed approval (single-use, gone for nothing).
+  //
+  // The fix: reserveBootstrapBrowser runs SYNCHRONOUSLY at /continue entry,
+  // BEFORE requireApprovals. The second batch's reservation call throws
+  // BEFORE its approval is consumed — the grant stays "granted" and the
+  // user can retry it after batch A completes.
+  //
+  // This test fires two /continue calls in parallel with a deliberately slow
+  // browser factory and asserts:
+  //   1. Exactly ONE batch's approval was consumed (winner).
+  //   2. The other batch's approval is still "granted" (loser preserved).
+  //   3. The factory was called exactly ONCE (no duplicate Chrome).
+  //   4. The losing /continue returned bootstrap_browser_busy.
+  //
+  // Re-implement withDaemon inline so we can control the factory timing
+  // via a deferred-resolution Promise.
+
+  const home = await mkdtemp(path.join(os.tmpdir(), "ss-bootstrap-race-"));
+  const prev = process.env.SECRET_SHUTTLE_HOME;
+  const prevSecure = process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
+  const prevNoOpen = process.env.SECRET_SHUTTLE_NO_OPEN_URL;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
+  process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
+  const server = new DaemonServer({ token: "t" });
+
+  // Deferred-resolution factory: the first call to createBrowserSession
+  // blocks on `factoryReleaseSignal` until the test signals release. While
+  // it's blocked, the second /continue is hitting reserveBootstrapBrowser.
+  // The synchronous reservation throws on the second call, so the second
+  // /continue NEVER reaches requireApprovals.
+  let factoryCallCount = 0;
+  let resolveFactoryRelease: (() => void) = (): void => {
+    // Replaced below before any await — this default exists only to satisfy
+    // TS's definite-assignment narrowing (Promise executor runs synchronously
+    // but TS can't see that across the assignment).
+  };
+  const factoryReleaseSignal = new Promise<void>((r) => { resolveFactoryRelease = r; });
+
+  const services = new DaemonServices({
+    createBrowserSessionImpl: async (opts) => {
+      factoryCallCount += 1;
+      // First (and only) factory call: pause until the test signals release.
+      // This keeps the first /continue inside ensureBootstrapBrowser long
+      // enough that the second /continue runs to completion (and is rejected
+      // by the synchronous reservation).
+      await factoryReleaseSignal;
+      return makeStubSession(opts.owner);
+    },
+  });
+  let port = 0;
+  registerRoutes(server, services, () => port);
+  ({ port } = await server.listen(0));
+
+  try {
+    const ctx = { port, token: "t", services };
+    await unlockVault(ctx);
+
+    // Phase 1: create TWO capture batches.
+    const yml = (n: string): string => `
+version: 1
+secrets:
+  ${n}:
+    source: { kind: capture, url: "https://dashboard.stripe.com/apikeys" }
+    destinations: ["vercel:production"]
+`;
+    const planA = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml("STRIPE_A") });
+    assert.equal(planA.status, 400, `expected 400 approval_required for batch A, got ${planA.status}`);
+    const detailsA = planA.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string };
+    const batchIdA = detailsA.batch_id;
+    const approvalIdA = detailsA.approvals[0]!.approval_id;
+
+    const planB = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml("STRIPE_B") });
+    assert.equal(planB.status, 400, `expected 400 approval_required for batch B, got ${planB.status}`);
+    const detailsB = planB.body.details as { approvals: Array<{ approval_id: string }>; batch_id: string };
+    const batchIdB = detailsB.batch_id;
+    const approvalIdB = detailsB.approvals[0]!.approval_id;
+
+    // Phase 2: approve BOTH approvals.
+    ctx.services.approvals.approve(approvalIdA);
+    ctx.services.approvals.approve(approvalIdB);
+    assert.equal(ctx.services.approvals.get(approvalIdA)!.status, "granted");
+    assert.equal(ctx.services.approvals.get(approvalIdB)!.status, "granted");
+
+    // Phase 3: fire both /continue calls in parallel.
+    //
+    // One of them will:
+    //   a. SYNCHRONOUSLY reserve → enter requireApprovals → consume approval →
+    //      acquire execution lock → call ensureBootstrapBrowser → block on
+    //      our slow factory.
+    //
+    // The other one will:
+    //   b. SYNCHRONOUSLY attempt to reserve → throw bootstrap_browser_busy
+    //      immediately, BEFORE requireApprovals.
+    //
+    // Both promises will eventually settle. We release the factory only
+    // AFTER both /continue requests have returned a response — by that time,
+    // the loser has already failed with bootstrap_browser_busy and its
+    // approval is preserved.
+    //
+    // Note: because both /continue calls go over HTTP and have to be parsed
+    // by the same daemon, there's an implicit ordering — one parses first,
+    // gets the reservation, and the other parses second. The route handler's
+    // synchronous reserveBootstrapBrowser is the actual ordering point.
+
+    const inflightA = call(ctx, "POST", "/v1/bootstrap/continue", { batch_id: batchIdA, approval_ids: [approvalIdA] });
+    const inflightB = call(ctx, "POST", "/v1/bootstrap/continue", { batch_id: batchIdB, approval_ids: [approvalIdB] });
+
+    // Wait a beat so the second request gets dispatched and its reservation
+    // attempt throws. Then we release the factory so the winner can complete.
+    // We can't use a precise sync barrier here without instrumentation, so
+    // poll until ONE of the inflight calls has settled OR a brief delay
+    // elapses (the loser should fail almost instantly).
+    //
+    // Strategy: race the inflight responses against a small grace timer.
+    // When either has settled (typically the loser, which short-circuits),
+    // release the factory so the winner finishes too.
+    const firstSettler = await Promise.race([
+      inflightA.then(() => "a" as const),
+      inflightB.then(() => "b" as const),
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 1000)),
+    ]);
+    // Whichever settled first, release the factory so the winner can complete.
+    // (If "timeout", we may have hit a deadlock; release anyway so things move.)
+    void firstSettler;
+    resolveFactoryRelease();
+
+    const [respA, respB] = await Promise.all([inflightA, inflightB]);
+
+    // Phase 4: assert race outcomes.
+    const errA = (respA.body as { error?: { code: string } }).error;
+    const errB = (respB.body as { error?: { code: string } }).error;
+
+    // Identify winner and loser by response. The loser MUST have failed with
+    // bootstrap_browser_busy.
+    const aIsLoser = errA?.code === "bootstrap_browser_busy";
+    const bIsLoser = errB?.code === "bootstrap_browser_busy";
+    assert.ok(
+      aIsLoser !== bIsLoser,
+      `exactly ONE of the two /continue calls must lose with bootstrap_browser_busy. ` +
+      `A: status=${respA.status} err=${JSON.stringify(errA)}. ` +
+      `B: status=${respB.status} err=${JSON.stringify(errB)}.`,
+    );
+
+    const loserBatchId = aIsLoser ? batchIdA : batchIdB;
+    const winnerBatchId = aIsLoser ? batchIdB : batchIdA;
+    const loserApprovalId = aIsLoser ? approvalIdA : approvalIdB;
+    const winnerApprovalId = aIsLoser ? approvalIdB : approvalIdA;
+
+    // INVARIANT 1: factory called exactly ONCE (no duplicate spawn).
+    assert.equal(
+      factoryCallCount,
+      1,
+      `factory must be called exactly ONCE — only the winner spawns Chrome. Got: ${factoryCallCount}`,
+    );
+
+    // INVARIANT 2: loser's approval is PRESERVED — still "granted", not "used".
+    // This is the load-bearing assertion. Without the synchronous reservation,
+    // the loser would have consumed its approval inside requireApprovals
+    // before failing on ensureBootstrapBrowser.
+    const loserGrant = ctx.services.approvals.get(loserApprovalId);
+    assert.ok(loserGrant !== undefined, "loser's approval must still exist");
+    assert.equal(
+      loserGrant!.status,
+      "granted",
+      `INVARIANT VIOLATION: loser's approval status must be "granted" (unconsumed) after losing the race. ` +
+      `Got: ${loserGrant!.status}. This means the synchronous reservation did NOT close the race window — ` +
+      `the loser consumed its approval before failing.`,
+    );
+
+    // INVARIANT 3: loser's batch is still "pending" (no executor side effects).
+    const loserState = await ctx.services.bootstrapStore.get(loserBatchId);
+    assert.ok(loserState !== null, "loser's batch must still exist");
+    assert.equal(
+      loserState!.status,
+      "pending",
+      `loser's batch must remain "pending" after losing the race, got: ${loserState!.status}`,
+    );
+
+    // INVARIANT 4: winner's approval IS consumed (status "used"). The winner
+    // ran requireApprovals to completion. The executor itself may have
+    // failed downstream (stub session can't actually drive CDP), but the
+    // approval-consume DID happen.
+    const winnerGrant = ctx.services.approvals.get(winnerApprovalId);
+    assert.ok(winnerGrant !== undefined, "winner's approval must still exist");
+    assert.equal(
+      winnerGrant!.status,
+      "used",
+      `winner's approval must be "used" after requireApprovals consumed it, got: ${winnerGrant!.status}`,
+    );
+
+    // Sanity: at least one of the two batches' work paths reached the
+    // browser-orchestration block, so the winner identification is correct.
+    void winnerBatchId; // marker — winner asserted via factoryCallCount + approval status
+  } finally {
+    // If the factory was never released, release it now so any in-flight
+    // promises don't dangle.
+    resolveFactoryRelease();
+    await server.close();
+    if (prev === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+    else process.env.SECRET_SHUTTLE_HOME = prev;
+    if (prevSecure === undefined) delete process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE;
+    else process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = prevSecure;
+    if (prevNoOpen === undefined) delete process.env.SECRET_SHUTTLE_NO_OPEN_URL;
+    else process.env.SECRET_SHUTTLE_NO_OPEN_URL = prevNoOpen;
+    await rm(home, { recursive: true, force: true });
+  }
+});

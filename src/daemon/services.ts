@@ -235,6 +235,24 @@ export class DaemonServices {
    */
   private readonly createBrowserSessionImpl: typeof createBrowserSessionReal;
 
+  /**
+   * Synchronous reservation tracker for the bootstrap-owned daemon browser.
+   * Set by reserveBootstrapBrowser(batchId) BEFORE any async work begins. Two
+   * concurrent capture /continue calls would otherwise both pass the
+   * pre-approval guard (which only inspects browserSession), both consume
+   * their approvals, and both then race into ensureBootstrapBrowser. This
+   * reservation closes that race window — synchronous claim BEFORE
+   * requireApprovals.
+   *
+   * States:
+   *  - null: no batch holds the resource
+   *  - { batchId }: held by this batch (either spawning or spawned)
+   *
+   * Cleared by releaseBootstrapBrowser(batchId) — typically in the /continue
+   * outer finally, after stopBootstrapBrowser (or skipping if user-owned).
+   */
+  private bootstrapBrowserReservation: { batchId: string } | null = null;
+
   constructor(opts: DaemonServicesOptions = {}) {
     // Production: real openUrl (which honors SECRET_SHUTTLE_NO_OPEN_URL=1
     // as a no-op for tests). The hubOpenUrlImpl hook lets tests prove
@@ -245,6 +263,63 @@ export class DaemonServices {
       opts.hubBroker ??
       new HubBroker({ openUrlImpl: opts.hubOpenUrlImpl ?? openUrl });
     this.createBrowserSessionImpl = opts.createBrowserSessionImpl ?? createBrowserSessionReal;
+  }
+
+  /**
+   * Synchronously reserve the bootstrap browser slot for this batch. Throws
+   * bootstrap_browser_busy if another batch already holds (reserved or owned)
+   * the slot. Idempotent for the SAME batchId (a retry can reclaim).
+   *
+   * Call BEFORE requireApprovals in /continue so the approval is preserved
+   * across cross-batch collisions. Pair with releaseBootstrapBrowser in the
+   * outer finally.
+   *
+   * This closes the cross-batch double-spawn race: ensureBootstrapBrowser's
+   * null-check is awaited (not synchronous), so two batches starting from
+   * a null services.browserSession would both pass the slot-only precheck,
+   * both consume approvals, then race into ensureBootstrapBrowser with the
+   * last writer winning — leaking one Chrome process and orphaning the
+   * loser's approval. The synchronous reservation here happens BEFORE any
+   * await, so a losing batch fails BEFORE its approval is consumed.
+   */
+  reserveBootstrapBrowser(batchId: string): void {
+    // If the slot is held by an active (already-spawned) bootstrap session for
+    // a different batch, that's the existing-session collision — same error.
+    if (
+      this.browserSession?.owner.kind === "bootstrap" &&
+      this.browserSession.owner.batchId !== batchId
+    ) {
+      throw new ShuttleError(
+        "bootstrap_browser_busy",
+        `Another bootstrap batch (${this.browserSession.owner.batchId}) is already driving the daemon-owned browser. Retry after that batch completes.`,
+      );
+    }
+    // If the reservation is held by another batch (spawning in flight), same error.
+    if (
+      this.bootstrapBrowserReservation !== null &&
+      this.bootstrapBrowserReservation.batchId !== batchId
+    ) {
+      throw new ShuttleError(
+        "bootstrap_browser_busy",
+        `Another bootstrap batch (${this.bootstrapBrowserReservation.batchId}) is reserving the daemon-owned browser. Retry after that batch completes.`,
+      );
+    }
+    // Reserve / re-reserve for this batch.
+    this.bootstrapBrowserReservation = { batchId };
+  }
+
+  /**
+   * Synchronously release the reservation. Idempotent. Tolerates batchId
+   * mismatch (silent no-op — the outer finally always tries to release,
+   * even on paths where no reservation was actually made).
+   */
+  releaseBootstrapBrowser(batchId: string): void {
+    if (
+      this.bootstrapBrowserReservation !== null &&
+      this.bootstrapBrowserReservation.batchId === batchId
+    ) {
+      this.bootstrapBrowserReservation = null;
+    }
   }
 
   /**
@@ -265,8 +340,26 @@ export class DaemonServices {
    * - If no session exists, spawn one with `owner = { kind: "bootstrap", batchId }`.
    *   The owner tag is what `stopBootstrapBrowser` checks to decide whether it
    *   may kill the session — see `stopBootstrapBrowser` below.
+   *
+   * Defense-in-depth: also honors `bootstrapBrowserReservation` — if a
+   * different batch holds the reservation, throw immediately. /continue is
+   * expected to have called `reserveBootstrapBrowser(batchId)` already, so
+   * this check is the fallback for callers that forget.
    */
   async ensureBootstrapBrowser(batchId: string): Promise<BrowserSession> {
+    // Defense-in-depth: respect a reservation held by a different batch.
+    // /continue should have reserved already, but if some other path calls
+    // ensureBootstrapBrowser without reserving first, refuse to spawn into
+    // a slot another batch is mid-claim on.
+    if (
+      this.bootstrapBrowserReservation !== null &&
+      this.bootstrapBrowserReservation.batchId !== batchId
+    ) {
+      throw new ShuttleError(
+        "bootstrap_browser_busy",
+        `Another bootstrap batch (${this.bootstrapBrowserReservation.batchId}) holds the browser reservation. Retry after that batch completes.`,
+      );
+    }
     if (this.browserSession !== null) {
       // User-owned: reuse unchanged.
       if (this.browserSession.owner.kind === "user") {

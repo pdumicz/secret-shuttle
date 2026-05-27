@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DaemonServices } from "../services.js";
+import { ShuttleError } from "../../shared/errors.js";
 import type {
   BrowserSession,
   BrowserSessionChild,
@@ -18,6 +19,13 @@ import type {
 import type { CdpClient } from "../chrome/cdp-client.js";
 import type { ProxyServer } from "../proxy/cdp-proxy.js";
 import type { BrowserOps } from "../chrome/internal-ops.js";
+
+// Defense-in-depth: ensure no real browser launches when the file is run via
+// `npx tsx --test <file>` (npm-test wrapper sets this globally but file-targeted
+// runs bypass it). Multiple tests below construct `new DaemonServices()` without
+// hubOpenUrlImpl injection — emitBootstrapCaptureStep's spawn-on-detach would
+// otherwise launch a real browser tab on those code paths.
+process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
 
 interface StubChild extends BrowserSessionChild {
   killCalls: NodeJS.Signals[];
@@ -316,4 +324,144 @@ test("stopBootstrapBrowser: SIGKILL fallback fires if SIGTERM never exits in tim
     t.reset();
   }
   assert.equal(services.browserSession, null);
+});
+
+// ---------------------------------------------------------------------------
+// reserveBootstrapBrowser / releaseBootstrapBrowser
+// ---------------------------------------------------------------------------
+//
+// These synchronous primitives close the cross-batch double-spawn race the
+// old slot-only precheck missed. /continue calls reserveBootstrapBrowser
+// SYNCHRONOUSLY before requireApprovals so a losing batch fails BEFORE its
+// approval is consumed.
+
+test("reserveBootstrapBrowser: throws bootstrap_browser_busy when a different batch holds the reservation", () => {
+  const services = new DaemonServices();
+  services.reserveBootstrapBrowser("batch-A");
+  assert.throws(
+    () => services.reserveBootstrapBrowser("batch-B"),
+    (e: unknown) => {
+      assert.ok(e instanceof ShuttleError);
+      assert.equal(e.code, "bootstrap_browser_busy");
+      // Holder name must appear in the message so operators / retry policies
+      // can identify which batch they're waiting on.
+      assert.match(e.message, /batch-A/);
+      return true;
+    },
+  );
+});
+
+test("reserveBootstrapBrowser: same batchId is idempotent (re-reserve is a no-op)", () => {
+  const services = new DaemonServices();
+  services.reserveBootstrapBrowser("batch-A");
+  // Re-reserving for the same batchId must NOT throw — retry-after-crash
+  // and within-batch resume both need this.
+  services.reserveBootstrapBrowser("batch-A");
+  services.reserveBootstrapBrowser("batch-A");
+  // Sanity check — still rejects a different batch.
+  assert.throws(
+    () => services.reserveBootstrapBrowser("batch-B"),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_browser_busy",
+  );
+});
+
+test("releaseBootstrapBrowser: clears reservation; mismatched batchId is a no-op", () => {
+  const services = new DaemonServices();
+  services.reserveBootstrapBrowser("batch-A");
+  // Mismatched release must NOT clear A's reservation — defends against a
+  // stale finally from an aborted batch killing the live batch's claim.
+  services.releaseBootstrapBrowser("batch-B");
+  assert.throws(
+    () => services.reserveBootstrapBrowser("batch-C"),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_browser_busy",
+  );
+  // Now release properly — the slot is free.
+  services.releaseBootstrapBrowser("batch-A");
+  services.reserveBootstrapBrowser("batch-C"); // must not throw
+});
+
+test("releaseBootstrapBrowser: idempotent (no-op when no reservation exists)", () => {
+  const services = new DaemonServices();
+  // Outer-finally release on a path where no reservation was made (e.g. the
+  // C10 blind_mode_already_active throw) must not blow up.
+  services.releaseBootstrapBrowser("batch-A");
+  services.releaseBootstrapBrowser("batch-A");
+});
+
+test("reserveBootstrapBrowser: throws when an existing bootstrap session is from a different batch", () => {
+  // The pre-spawn collision path: services.browserSession already holds a
+  // bootstrap session for batch-A. reserveBootstrapBrowser for batch-B must
+  // refuse — same semantics as the legacy slot-only precheck.
+  const services = new DaemonServices();
+  services.browserSession = makeStubSession({ owner: { kind: "bootstrap", batchId: "batch-A" } });
+  assert.throws(
+    () => services.reserveBootstrapBrowser("batch-B"),
+    (e: unknown) => {
+      assert.ok(e instanceof ShuttleError);
+      assert.equal(e.code, "bootstrap_browser_busy");
+      assert.match(e.message, /batch-A/);
+      return true;
+    },
+  );
+});
+
+test("reserveBootstrapBrowser: tolerates a pre-existing user-owned session (no throw)", () => {
+  // User-owned sessions are never re-owned by bootstrap — ensureBootstrapBrowser
+  // reuses them in place. The reservation must not fight that: a bootstrap
+  // batch should still be able to claim the slot for accounting purposes
+  // even when a user session is in residence (so cross-batch reservation
+  // collisions still work).
+  const services = new DaemonServices();
+  services.browserSession = makeStubSession({ owner: { kind: "user" } });
+  services.reserveBootstrapBrowser("batch-A"); // must not throw
+  // And a second batch is still rejected via the reservation.
+  assert.throws(
+    () => services.reserveBootstrapBrowser("batch-B"),
+    (e: unknown) => e instanceof ShuttleError && e.code === "bootstrap_browser_busy",
+  );
+});
+
+test("ensureBootstrapBrowser: respects reservation held by a different batch (defense-in-depth)", async () => {
+  // Direct ensureBootstrapBrowser callers that forget to reserve first must
+  // still be blocked. /continue is expected to reserve, but the throw inside
+  // ensureBootstrapBrowser is the fallback safety net.
+  let factoryCalls = 0;
+  const services = new DaemonServices({
+    createBrowserSessionImpl: async (): Promise<BrowserSession> => {
+      factoryCalls += 1;
+      throw new Error("factory must not be called when a different batch holds the reservation");
+    },
+  });
+  services.reserveBootstrapBrowser("batch-A");
+  await assert.rejects(
+    () => services.ensureBootstrapBrowser("batch-B"),
+    (e: Error & { code?: string }) => {
+      assert.equal(e.code, "bootstrap_browser_busy");
+      assert.match(e.message, /batch-A/);
+      return true;
+    },
+  );
+  assert.equal(factoryCalls, 0, "factory must not be invoked when reservation blocks");
+  // services.browserSession must still be clean — no half-spawned session left behind.
+  assert.equal(services.browserSession, null);
+});
+
+test("ensureBootstrapBrowser: own batch's reservation does NOT block its own spawn", async () => {
+  // The expected /continue flow: reserve(batchId) → ensure(batchId) → ... .
+  // The reservation must not block the same batch from progressing.
+  const spawned = makeStubSession({ owner: { kind: "bootstrap", batchId: "batch-A" } });
+  let factoryCalls = 0;
+  const services = new DaemonServices({
+    createBrowserSessionImpl: async (opts): Promise<BrowserSession> => {
+      factoryCalls += 1;
+      return { ...spawned, owner: opts.owner };
+    },
+  });
+  services.reserveBootstrapBrowser("batch-A");
+
+  const got = await services.ensureBootstrapBrowser("batch-A");
+
+  assert.equal(factoryCalls, 1);
+  assert.equal(services.browserSession, got);
+  assert.deepEqual(got.owner, { kind: "bootstrap", batchId: "batch-A" });
 });

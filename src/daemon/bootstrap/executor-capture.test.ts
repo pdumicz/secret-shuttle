@@ -38,6 +38,13 @@ import type {
 import type { ProxyServer } from "../proxy/cdp-proxy.js";
 import type { BrowserOps } from "../chrome/internal-ops.js";
 
+// Defense-in-depth: ensure no real browser launches when the file is run via
+// `npx tsx --test <file>` (npm-test wrapper sets this globally but file-targeted
+// runs bypass it). `setupFixture` below constructs `new DaemonServices()` without
+// hubOpenUrlImpl injection — emitBootstrapCaptureStep's spawn-on-detach would
+// otherwise launch a real browser tab when no subscriber is attached.
+process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
+
 // ── Scripted CDP transport ──────────────────────────────────────────────────
 //
 // Captures every method invoked on the transport (sentMethods) and lets each

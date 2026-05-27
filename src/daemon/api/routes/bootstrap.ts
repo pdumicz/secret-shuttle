@@ -240,70 +240,7 @@ export function registerBootstrapRoutes(
           "Blind mode is currently active from a prior operation. Approve `blind end` before bootstrapping.",
         );
       }
-
-      // Pre-approval browser-busy guard (sister to the C10 blind guard). If
-      // another bootstrap batch already owns the daemon-spawned Chrome,
-      // ensureBootstrapBrowser below WOULD throw bootstrap_browser_busy —
-      // but that throw happens AFTER requireApprovals has already consumed
-      // this batch's single-use approval. Without this pre-check the user
-      // would be forced to mint a fresh approval every time they retry
-      // after waiting for batch A to finish. Mirror the C10 ordering: same
-      // capture-conditional gate, same "fire before requireApprovals so the
-      // approval stays granted" UX invariant.
-      //   - null session              → fine (we will spawn below)
-      //   - user-owned session        → fine (reused unchanged)
-      //   - bootstrap-owned same batch → fine (idempotent reuse on resume)
-      //   - bootstrap-owned diff batch → REJECT here
-      const session = services.browserSession;
-      if (
-        session !== null &&
-        session.owner.kind === "bootstrap" &&
-        session.owner.batchId !== batchId
-      ) {
-        throw new ShuttleError(
-          "bootstrap_browser_busy",
-          `Another bootstrap batch (${session.owner.batchId}) is already driving the daemon-owned browser. Retry after that batch completes.`,
-        );
-      }
     }
-
-    // The bootstrap approval is single-use, but the executor is idempotent
-    // (skips completed steps, reuses prior ref, retries only failed destinations).
-    // We only consume the approval on the FIRST /continue call (state.status === "pending").
-    // For retries (in_progress / failed_partial), the approval was already consumed
-    // in the prior call — the batch_id + the locked-daemon precondition are the
-    // authorization for the retry.
-    if (state.status === "pending") {
-      // Rebuild the same binding shape that /plan minted, so requireApprovals'
-      // equality check passes when consuming the pre-minted approval.
-      const planSummary = buildPlanSummary(state.plan);
-      const binding: ApprovalBinding = {
-        action: "bootstrap",
-        ref: null,
-        environment: "production",
-        destination_domain: null,
-        target_id: null,
-        field_fingerprint: null,
-        template_id: null,
-        template_params: {
-          batch_id: batchId,
-          plan_summary: JSON.stringify(planSummary),
-        },
-        allowed_domains: Array.from(new Set(state.plan.flatMap((e) => e.destinations.map((d) => d.domain)))),
-      };
-
-      await requireApprovals({
-        store: services.approvals,
-        bindings: [binding],
-        daemonPort: daemonPortRef(),
-        sessionStore: services.sessionStore,
-        openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
-        ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
-      });
-    }
-    // else: state.status is "in_progress" or "failed_partial" — the approval was
-    // already consumed in a prior /continue call. Skip re-consumption; proceed to
-    // executor (idempotent: reuses prior ref, retries only failed destinations).
 
     // C12: capture plans need a browser session for the duration of the run.
     // hasCapture decides whether the outer try/finally must orchestrate the
@@ -311,61 +248,140 @@ export function registerBootstrapRoutes(
     // entirely — they don't touch Chrome at all.
     const hasCapture = planRequiresCapture(state.plan);
 
-    // Acquire the in-memory execution lock before entering the executor.
-    // If another /continue (or /plan inline) is already inside executeBatch for
-    // this batch, the second caller gets bootstrap_batch_busy immediately.
-    // The lock is in-memory only — daemon restart clears it, so a crash-recovery
-    // /continue (in_progress on disk, no lock held) will always proceed.
-    if (!services.bootstrapStore.tryAcquireExecutionLock(batchId)) {
-      throw new ShuttleError(
-        "bootstrap_batch_busy",
-        `Batch ${batchId} is already executing; wait for the current run to finish, then retry.`,
-      );
+    // SYNCHRONOUS bootstrap-browser reservation BEFORE requireApprovals.
+    //
+    // Closes a cross-batch double-spawn race that the previous slot-only
+    // precheck couldn't: two batches starting from a null services.browserSession
+    // would both pass that precheck (no session present), both consume their
+    // approvals in requireApprovals, then both race into ensureBootstrapBrowser
+    // whose null-check is awaited (not synchronous). With a slow Chrome-spawn
+    // factory, both calls see null, both spawn, last writer wins — leaking
+    // one Chrome process and orphaning the losing batch's already-consumed
+    // approval (single-use, gone for nothing).
+    //
+    // reserveBootstrapBrowser runs SYNCHRONOUSLY, so the second caller hits
+    // it BEFORE its approval is consumed: the loser fails with
+    // bootstrap_browser_busy and its grant is preserved for the user's retry
+    // after batch A finishes. Pair with releaseBootstrapBrowser in the
+    // outermost finally so it runs after stopBootstrapBrowser releases the
+    // session, even on throw paths (requireApprovals failure, lock-acquire
+    // failure, executor exception).
+    //
+    // The reservation also rejects when an existing bootstrap session is
+    // owned by a different batch — same semantics as the old precheck, just
+    // unified through one primitive.
+    if (hasCapture) {
+      services.reserveBootstrapBrowser(batchId);
     }
-    try {
-      // Capture-conditional: ensure a browser session is up before we hand off
-      // to the executor. No-op when a user-owned session already exists (the
-      // user's `browser start` is preserved); otherwise spawn a Chrome with
-      // owner:{kind:"bootstrap",batchId} so the finally can identify + tear it
-      // down. MUST run AFTER lock acquisition so concurrent /continue callers
-      // can't spawn duplicate Chromes for the same batch.
-      if (hasCapture) {
-        await services.ensureBootstrapBrowser(batchId);
-      }
 
-      // Execute the plan.
-      const deps: ExecutorDeps = {
-        generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
-        revealCapture: revealCaptureCore as ExecutorDeps["revealCapture"],
-        runTemplate: runTemplateCore as ExecutorDeps["runTemplate"],
-        services,
-        daemonPortRef,
-      };
-      const result = await executeBatch(services.bootstrapStore, batchId, deps);
-      return { ok: true, ...result };
-    } finally {
-      // Capture-conditional teardown: ALWAYS runs before lock release. If a
-      // bootstrap-owned Chrome was actually killed AND blind is still active
-      // (the executor took the cleanup-failed branch and left blind on so a
-      // residual on-page value couldn't be observed), auto-end blind: the
-      // rendering process is dead, there is nothing left to observe.
-      // stopBootstrapBrowser is a no-op for user-owned sessions, so user
-      // `browser start` survives this finally untouched.
-      if (hasCapture) {
-        const { stopped } = await services.stopBootstrapBrowser(batchId);
-        if (stopped && services.blind.current() !== null) {
-          services.blind.end();
-          await writeDaemonAudit({
-            action: "blind_auto_resume_after_browser_stop",
-            ok: true,
-            actor_agent_id: state.owner_agent_id,
-          });
-        }
+    try {
+      // The bootstrap approval is single-use, but the executor is idempotent
+      // (skips completed steps, reuses prior ref, retries only failed destinations).
+      // We only consume the approval on the FIRST /continue call (state.status === "pending").
+      // For retries (in_progress / failed_partial), the approval was already consumed
+      // in the prior call — the batch_id + the locked-daemon precondition are the
+      // authorization for the retry.
+      if (state.status === "pending") {
+        // Rebuild the same binding shape that /plan minted, so requireApprovals'
+        // equality check passes when consuming the pre-minted approval.
+        const planSummary = buildPlanSummary(state.plan);
+        const binding: ApprovalBinding = {
+          action: "bootstrap",
+          ref: null,
+          environment: "production",
+          destination_domain: null,
+          target_id: null,
+          field_fingerprint: null,
+          template_id: null,
+          template_params: {
+            batch_id: batchId,
+            plan_summary: JSON.stringify(planSummary),
+          },
+          allowed_domains: Array.from(new Set(state.plan.flatMap((e) => e.destinations.map((d) => d.domain)))),
+        };
+
+        await requireApprovals({
+          store: services.approvals,
+          bindings: [binding],
+          daemonPort: daemonPortRef(),
+          sessionStore: services.sessionStore,
+          openUrlImpl: makeHubOpenUrlImpl(services, daemonPortRef),
+          ...(approvalIds !== undefined ? { approvalIdsFromClient: approvalIds } : {}),
+        });
       }
-      // Lock release LAST — after browser cleanup. A retry after release must
-      // see a clean services.browserSession === null (or the user's session,
-      // untouched), not a half-torn-down bootstrap session.
-      services.bootstrapStore.releaseExecutionLock(batchId);
+      // else: state.status is "in_progress" or "failed_partial" — the approval was
+      // already consumed in a prior /continue call. Skip re-consumption; proceed to
+      // executor (idempotent: reuses prior ref, retries only failed destinations).
+
+      // Acquire the in-memory execution lock before entering the executor.
+      // If another /continue (or /plan inline) is already inside executeBatch for
+      // this batch, the second caller gets bootstrap_batch_busy immediately.
+      // The lock is in-memory only — daemon restart clears it, so a crash-recovery
+      // /continue (in_progress on disk, no lock held) will always proceed.
+      if (!services.bootstrapStore.tryAcquireExecutionLock(batchId)) {
+        throw new ShuttleError(
+          "bootstrap_batch_busy",
+          `Batch ${batchId} is already executing; wait for the current run to finish, then retry.`,
+        );
+      }
+      try {
+        // Capture-conditional: ensure a browser session is up before we hand off
+        // to the executor. No-op when a user-owned session already exists (the
+        // user's `browser start` is preserved); otherwise spawn a Chrome with
+        // owner:{kind:"bootstrap",batchId} so the finally can identify + tear it
+        // down. MUST run AFTER lock acquisition so concurrent /continue callers
+        // can't spawn duplicate Chromes for the same batch. The synchronous
+        // reservation above already guards against cross-batch collisions —
+        // ensureBootstrapBrowser itself also honors the reservation as
+        // defense-in-depth.
+        if (hasCapture) {
+          await services.ensureBootstrapBrowser(batchId);
+        }
+
+        // Execute the plan.
+        const deps: ExecutorDeps = {
+          generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
+          revealCapture: revealCaptureCore as ExecutorDeps["revealCapture"],
+          runTemplate: runTemplateCore as ExecutorDeps["runTemplate"],
+          services,
+          daemonPortRef,
+        };
+        const result = await executeBatch(services.bootstrapStore, batchId, deps);
+        return { ok: true, ...result };
+      } finally {
+        // Capture-conditional teardown: ALWAYS runs before lock release. If a
+        // bootstrap-owned Chrome was actually killed AND blind is still active
+        // (the executor took the cleanup-failed branch and left blind on so a
+        // residual on-page value couldn't be observed), auto-end blind: the
+        // rendering process is dead, there is nothing left to observe.
+        // stopBootstrapBrowser is a no-op for user-owned sessions, so user
+        // `browser start` survives this finally untouched.
+        if (hasCapture) {
+          const { stopped } = await services.stopBootstrapBrowser(batchId);
+          if (stopped && services.blind.current() !== null) {
+            services.blind.end();
+            await writeDaemonAudit({
+              action: "blind_auto_resume_after_browser_stop",
+              ok: true,
+              actor_agent_id: state.owner_agent_id,
+            });
+          }
+        }
+        // Lock release LAST — after browser cleanup. A retry after release must
+        // see a clean services.browserSession === null (or the user's session,
+        // untouched), not a half-torn-down bootstrap session.
+        services.bootstrapStore.releaseExecutionLock(batchId);
+      }
+    } finally {
+      // Release the bootstrap-browser reservation LAST — outer-most finally.
+      // Covers both the happy path and any throw inside the try (including
+      // requireApprovals failure pre-lock-acquire, lock-acquire failure, and
+      // any executor exception). releaseBootstrapBrowser is idempotent and
+      // batchId-guarded, so calling on the precheck-throw path (where no
+      // reservation was made, e.g. blind_mode_already_active) is a no-op.
+      if (hasCapture) {
+        services.releaseBootstrapBrowser(batchId);
+      }
     }
   });
 
