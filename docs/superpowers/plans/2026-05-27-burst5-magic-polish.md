@@ -499,9 +499,13 @@ test("multiple entries, mixed: collects all issues", () => {
     ok({ secret: "Y", destinations: [] }),
   ]);
   assert.equal(r.ok, false);
-  assert.equal(r.issues.length, 2);
-  assert.equal(r.issues[0].secret, "X");
-  assert.equal(r.issues[1].secret, "Y");
+  // Destructure with explicit guards so the test typechecks under
+  // noUncheckedIndexedAccess (length assertions don't narrow index access).
+  const [issueA, issueB, ...rest] = r.issues;
+  assert.equal(rest.length, 0);
+  assert.ok(issueA !== undefined && issueB !== undefined, "expected two issues");
+  assert.equal(issueA.secret, "X");
+  assert.equal(issueB.secret, "Y");
 });
 ```
 
@@ -1092,7 +1096,16 @@ function resolveMode(opts: ProvisionOpts): Mode {
     // Default: --yml ./secret-shuttle.yml if file exists
     return "yml-default-or-no-mode" as Mode; // resolved in dispatch
   }
-  return active[0].replace(/^--/, "") as Mode;
+  // Narrow active[0] under noUncheckedIndexedAccess. The branches above
+  // handle length === 0 (return) and length > 1 (throw), so length === 1
+  // is the only path here — but TS doesn't track the array-length invariant.
+  // `active` is string[] after the .map(s => s.flag) above.
+  const [selector] = active;
+  if (selector === undefined) {
+    // Logically unreachable; keeps the typechecker quiet without `!`.
+    throw new ShuttleError("provision_no_mode", "Unreachable: active selector missing.");
+  }
+  return selector.replace(/^--/, "") as Mode;
 }
 
 async function dispatch(mode: Mode | "yml-default-or-no-mode", opts: ProvisionOpts): Promise<void> {
@@ -1825,101 +1838,85 @@ function paramsOrFail(id: string): readonly string[] {
   return v;
 }
 
-test("vercel-env-add has [name, environment]", () => {
+// Pin the expected per-template declarations. These tests catch a
+// human-readable mistake in a template file (e.g., `sessionDefiningParams:
+// ["name"]` when the template clearly takes `environment` too). They're
+// also the regression guard against silent rule-table edits.
+test("vercel-env-add declares [name, environment]", () => {
   assert.deepEqual([...paramsOrFail("vercel-env-add")], ["name", "environment"]);
 });
 
-test("github-actions-secret-set has [name, repo]", () => {
+test("github-actions-secret-set declares [name, repo]", () => {
   assert.deepEqual([...paramsOrFail("github-actions-secret-set")], ["name", "repo"]);
 });
 
-test("cloudflare-secret-put has [name, env]", () => {
+test("cloudflare-secret-put declares [name, env]", () => {
   assert.deepEqual([...paramsOrFail("cloudflare-secret-put")], ["name", "env"]);
 });
 
-test("supabase-edge-secret-set has [name, project_ref]", () => {
+test("supabase-edge-secret-set declares [name, project_ref]", () => {
   assert.deepEqual([...paramsOrFail("supabase-edge-secret-set")], ["name", "project_ref"]);
 });
 
 // ─── Spec config-drift CI gate (spec §2 ~line 627) ───────────────────────────
-// Two implementations are documented in the spec; pick ONE for this burst.
-// Both are equally acceptable; the second is shorter and easier to maintain.
-
-// ── Option A: parse-and-observe (matches spec verbatim) ──────────────────────
-// Implement `collectAllParamRefs(template)` which returns the set of every
-// template_param key the template references across all four consumption
-// sites (`args`, `additionalArgs(params)`, `destinationEnvironment(params)`,
-// `validateParams(params)`). Then assert DESTINATION_DEFINING_PARAMS[t] ⊆ that
-// set. Implementation sketch:
-//
-//   function collectAllParamRefs(template: TemplateDefinition): Set<string> {
-//     const refs = new Set<string>();
-//     // (1) args[]: scan {{...}} placeholders
-//     for (const arg of template.args) {
-//       for (const m of arg.matchAll(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g)) {
-//         refs.add(m[1] as string);
-//       }
-//     }
-//     // (2)/(3)/(4) Drive each function with a recording Proxy whose getter
-//     // adds the property name to `refs` and returns "":
-//     const recorder = new Proxy({} as Record<string, string>, {
-//       get(_t, prop, _r) {
-//         if (typeof prop === "string") refs.add(prop);
-//         return "";
-//       },
-//     });
-//     try { template.additionalArgs?.(recorder); } catch { /* ignore — we only want refs */ }
-//     try { template.destinationEnvironment?.(recorder); } catch { /* same */ }
-//     try { template.validateParams?.(recorder); } catch { /* same */ }
-//     return refs;
-//   }
-//
-// test("DESTINATION_DEFINING_PARAMS[t] ⊆ collectAllParamRefs(t) for every shipped template", () => {
-//   for (const t of new TemplateRegistry().list()) {
-//     const defining = destinationDefiningParamsFor(t.id);
-//     if (defining === null) continue; // covered by the "every template registered" test
-//     const refs = collectAllParamRefs(t);
-//     for (const k of defining) {
-//       assert.ok(refs.has(k), `template ${t.id}: destination-defining param '${k}' is not referenced anywhere in args/additionalArgs/destinationEnvironment/validateParams`);
-//     }
-//   }
-// });
-
-// ── Option B: per-template self-declaration (spec's acceptable alternative) ──
-// Add `sessionDefiningParams?: readonly string[]` to TemplateDefinition
-// (registry.ts:7). Each built-in template self-declares its own array
-// (e.g., `vercel-env-add.ts` adds `sessionDefiningParams: ["name", "environment"] as const`).
-// The CI gate then becomes a one-liner equality check:
-//
-// test("DESTINATION_DEFINING_PARAMS matches per-template sessionDefiningParams declarations", () => {
-//   for (const t of new TemplateRegistry().list()) {
-//     const central = destinationDefiningParamsFor(t.id);
-//     if (t.sessionDefiningParams === undefined) {
-//       assert.equal(central, null, `template ${t.id} has central entry but no per-template sessionDefiningParams`);
-//       continue;
-//     }
-//     assert.deepEqual([...(central ?? [])], [...t.sessionDefiningParams], `template ${t.id}: central vs per-template mismatch`);
-//   }
-// });
-
-// **Choose Option B** for this burst (smaller, no Proxy magic, single source
-// of truth migration-ready for the §8 risk #6 long-term path). The hard-coded
-// per-template tests above stay as belt-and-suspenders — they keep failing
-// loudly if anyone edits the central map without updating the corresponding
-// template file.
-//
-// If a future maintainer disagrees and prefers Option A, swap the Option B
-// test out for the Option A test — both satisfy the spec.
+// Implementation: `sessionDefiningParams` is declared per-template (in each
+// builtin file), and DESTINATION_DEFINING_PARAMS is DERIVED from that — so
+// they cannot drift. The acceptable alternative (Option A — parse args +
+// observe additionalArgs/destinationEnvironment/validateParams via a
+// recording Proxy) is documented in spec §2 but not picked for this burst:
+// the derived-map approach eliminates the dual-source problem entirely
+// rather than checking that two sources stay in sync.
 
 test("destinationDefiningParamsFor returns null for unregistered template", () => {
   assert.equal(destinationDefiningParamsFor("railway-variable-set"), null);
 });
 
-test("validateDestinationDefiningParamsCoverage logs warnings for unregistered shipped templates", () => {
+test("destinationDefiningParamsFor reads sessionDefiningParams from each built-in template", () => {
+  // Single source of truth: each template file declares its own
+  // sessionDefiningParams. If a template definition drops the field,
+  // destinationDefiningParamsFor(id) returns null and the warning fires.
+  const r = new TemplateRegistry();
+  for (const t of r.list()) {
+    if (t.sessionDefiningParams === undefined) continue;
+    assert.deepEqual(
+      [...(destinationDefiningParamsFor(t.id) ?? [])],
+      [...t.sessionDefiningParams],
+      `template ${t.id}: accessor must reflect the template's sessionDefiningParams declaration`,
+    );
+  }
+});
+
+test("validator emits zero warnings when every shipped template declares sessionDefiningParams", () => {
   const warnings: string[] = [];
   validateDestinationDefiningParamsCoverage(new TemplateRegistry(), { warn: (m) => warnings.push(m) });
-  // With the four shipped templates fully covered, expect 0 warnings.
   assert.equal(warnings.length, 0, `unexpected warnings: ${warnings.join(", ")}`);
+});
+
+test("validator emits a warning when a registered template lacks sessionDefiningParams", () => {
+  // Real warning-path test: register a stub template WITHOUT
+  // sessionDefiningParams and assert the validator surfaces the gap.
+  // (This is the test the previous round was mistakenly labeled — it
+  // exercised the all-covered path, not the missing-config path.)
+  const r = new TemplateRegistry();
+  r.register({
+    id: "test-no-defining-params",
+    description: "test stub",
+    binary: "/bin/echo",
+    args: [],
+    secret_delivery: "stdin",
+    required_params: [],
+    requires_approval_when_production: false,
+    // sessionDefiningParams: undefined — deliberately omitted
+  });
+  try {
+    const warnings: string[] = [];
+    validateDestinationDefiningParamsCoverage(r, { warn: (m) => warnings.push(m) });
+    assert.equal(warnings.length, 1, "expected exactly one warning for the stub");
+    assert.match(warnings[0] ?? "", /test-no-defining-params/);
+    assert.match(warnings[0] ?? "", /sessionDefiningParams/);
+  } finally {
+    r.unregister("test-no-defining-params");
+  }
 });
 ```
 
@@ -1935,40 +1932,52 @@ Create `src/daemon/templates/destination-defining-params.ts`:
 /**
  * Per-template "destination-defining params" config used by the
  * session-derivation path in Burst 5 (§2 "Pattern derivation"). Each
- * entry lists the template_params keys whose values determine WHERE
- * the secret is pushed — `name` is universally destination-defining
- * (the env-var / secret name set at the provider).
+ * template's destination-defining params are declared in the template's
+ * own definition file via `sessionDefiningParams: readonly string[]`
+ * (added to TemplateDefinition in this task — see registry.ts).
  *
- * NEW templates added in future bursts must register here. The
- * `validateDestinationDefiningParamsCoverage` function (called from
- * the daemon startup wiring once the template registry is built)
- * logs a warning if a shipped template has no entry; the CI test
- * fails when a shipped template lands without its entry.
+ * `DESTINATION_DEFINING_PARAMS` below is DERIVED from those per-template
+ * declarations at module load time — there is no second source of truth
+ * to keep in sync. If a template ships without `sessionDefiningParams`,
+ * provision-derived sessions exclude it (fail-closed) AND the daemon
+ * startup validator logs a warning.
+ *
+ * `name` is universally destination-defining (the env-var / secret name
+ * set at the provider).
  *
  * See spec §2 "Template-param constraint primitive".
  */
-import type { TemplateRegistry } from "./registry.js";
+import { TemplateRegistry, type TemplateDefinition } from "./registry.js";
 
-export const DESTINATION_DEFINING_PARAMS: Record<string, readonly string[]> = {
-  "vercel-env-add":            ["name", "environment"],
-  "github-actions-secret-set": ["name", "repo"],
-  "cloudflare-secret-put":     ["name", "env"],
-  "supabase-edge-secret-set":  ["name", "project_ref"],
-};
+// Module-load-time derivation. The TemplateRegistry constructor populates
+// itself with the four built-ins; we read each template's
+// sessionDefiningParams once and freeze the resulting map. This map is
+// the cached lookup surface for `destinationDefiningParamsFor()` — but
+// it is NOT the source of truth (each template file is). Templates
+// registered dynamically at runtime (via TemplateRegistry.register, used
+// only by tests) are NOT reflected here; tests that need to validate
+// such templates pass an explicit registry instance to
+// `validateDestinationDefiningParamsCoverage`.
+const _bootstrapRegistry = new TemplateRegistry();
+export const DESTINATION_DEFINING_PARAMS: Readonly<Record<string, readonly string[]>> = Object.freeze(
+  Object.fromEntries(
+    _bootstrapRegistry.list()
+      .filter((t): t is TemplateDefinition & { sessionDefiningParams: readonly string[] } =>
+        t.sessionDefiningParams !== undefined,
+      )
+      .map((t) => [t.id, t.sessionDefiningParams] as const),
+  ),
+);
 
 /**
  * Returns the destination-defining param keys for a template_id, OR
- * null if the template is not registered. Session derivation uses
- * `null` to mean "exclude this destination from the derivation
- * (fail-closed)."
+ * null if the template is not registered (or has no
+ * sessionDefiningParams declaration). Session derivation treats null
+ * as "exclude this destination from the derivation (fail-closed)."
  */
 export function destinationDefiningParamsFor(template_id: string): readonly string[] | null {
-  // Under tsconfig `noUncheckedIndexedAccess` (line 9), index access on
-  // Record<string, T> returns `T | undefined`, not `T`. The `in`-check
-  // narrows runtime correctness but does NOT narrow the type, so a direct
-  // `return DESTINATION_DEFINING_PARAMS[template_id]` would yield
-  // `readonly string[] | undefined`, which is not the declared return type
-  // `readonly string[] | null`. Coalesce to null explicitly.
+  // Under noUncheckedIndexedAccess, index access yields `T | undefined`.
+  // Explicit coalesce keeps the declared return type accurate.
   const keys = DESTINATION_DEFINING_PARAMS[template_id];
   return keys ?? null;
 }
@@ -1983,22 +1992,27 @@ const defaultLogger: Logger = {
 
 /**
  * Validate that every shipped template (every entry in the supplied
- * `TemplateRegistry`) has a registered entry in DESTINATION_DEFINING_PARAMS.
+ * `TemplateRegistry`) declares its own `sessionDefiningParams` field.
  * Called once at daemon startup with the module-scoped registry from
  * src/daemon/api/routes/templates.ts (no `services.templates` field exists).
- * Emits a warning line for each missing entry — provision-derived
- * sessions for that template will be excluded (fail-closed).
+ * Emits a warning line for each template missing the declaration —
+ * provision-derived sessions for that template will be excluded
+ * (fail-closed).
+ *
+ * The validator takes a registry instance (rather than reading the
+ * module-scoped one) so tests can register stub templates and exercise
+ * the warning path. See destination-defining-params.test.ts.
  */
 export function validateDestinationDefiningParamsCoverage(
   registry: TemplateRegistry,
   logger: Logger = defaultLogger,
 ): void {
   for (const t of registry.list()) {
-    if (!(t.id in DESTINATION_DEFINING_PARAMS)) {
+    if (t.sessionDefiningParams === undefined) {
       logger.warn(
-        `Template '${t.id}' has no entry in DESTINATION_DEFINING_PARAMS. ` +
+        `Template '${t.id}' has no sessionDefiningParams declaration. ` +
         `Provision-derived sessions will exclude this template (fail-closed). ` +
-        `Add an entry in src/daemon/templates/destination-defining-params.ts.`,
+        `Add 'sessionDefiningParams: [...] as const' to the template definition.`,
       );
     }
   }
@@ -2677,10 +2691,18 @@ function entry(overrides: Partial<PlanEntry> = {}): PlanEntry {
   };
 }
 
+// Helper: destructure-and-guard so test code typechecks under
+// noUncheckedIndexedAccess without `!`-asserts on every index access.
+function first<T>(arr: readonly T[], label: string): T {
+  const [x] = arr;
+  assert.ok(x !== undefined, `expected ${label}[0] to exist`);
+  return x;
+}
+
 test("single PlanEntry → one exact-ref pattern", () => {
   const r = inferSessionPatternFromPlan([entry()]);
   assert.equal(r.patterns.length, 1);
-  const p = r.patterns[0];
+  const p = first(r.patterns, "patterns");
   assert.equal(p.ref_glob, "ss://stripe/prod/STRIPE_KEY");
   assert.deepEqual(p.required_params, { name: "STRIPE_KEY", environment: "production" });
   assert.deepEqual(p.actions, ["template-run"]);
@@ -2723,9 +2745,12 @@ test("template not in DESTINATION_DEFINING_PARAMS → destination excluded", () 
   });
   const r = inferSessionPatternFromPlan([e]);
   assert.equal(r.patterns.length, 1);
-  assert.equal(r.patterns[0].template_ids![0], "vercel-env-add");
+  const p = first(r.patterns, "patterns");
+  const templateIds = p.template_ids;
+  assert.ok(templateIds !== undefined && templateIds.length > 0);
+  assert.equal(first(templateIds, "patterns[0].template_ids"), "vercel-env-add");
   assert.equal(r.excluded.length, 1);
-  assert.equal(r.excluded[0].template_id, "railway-variable-set");
+  assert.equal(first(r.excluded, "excluded").template_id, "railway-variable-set");
 });
 
 test("all destinations unregistered → empty patterns array, excluded list non-empty", () => {
@@ -2765,7 +2790,7 @@ test("registered template with MISSING defining param → excluded with reason m
   const r = inferSessionPatternFromPlan([e]);
   assert.equal(r.patterns.length, 0);
   assert.equal(r.excluded.length, 1);
-  const x = r.excluded[0]!;
+  const x = first(r.excluded, "excluded");
   assert.equal(x.reason, "missing_defining_params");
   if (x.reason === "missing_defining_params") {
     assert.deepEqual(x.missing_keys, ["environment"]);
