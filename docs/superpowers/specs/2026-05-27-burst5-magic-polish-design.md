@@ -512,7 +512,14 @@ Consequences of one-grant-per-pattern:
 
 ### Single-entry patterns are allowed (corrects v1 spec ambiguity)
 
-A `(template_id, source, env)` group containing one plan entry yields an **exact-ref** pattern (no `*`). This is allowed — and useful: it lets the agent push the same ref again within the consent window (e.g., to a second destination environment that was deferred, or to re-push after a value update). The "empty-pattern guard" suppresses the affordance only when derivation produces **zero** patterns (e.g., the batch is a single capture step with no template-run destinations). Single-entry batches with at least one template-run destination DO get a session offer.
+A `(template_id, source, env, destination-defining-params)` group containing one plan entry yields an **exact-ref** pattern (no `*`). This is allowed — and useful: it lets the agent re-execute the same `(ref, destination)` push again within the consent window. Realistic cases:
+- **Retrying after a transient failure** (network blip, provider 5xx, rate limit) without re-prompting the user.
+- **Re-pushing after a value update** in the vault — same ref, same destination, new bytes.
+- **Idempotent re-run** during a multi-step flow where the agent re-validates progress and re-pushes the same secret to confirm state.
+
+What this pattern does NOT cover (because `required_params` is strict): a push to a different `environment` (e.g., `preview` when the session was approved for `production`), a different `repo`, a different env-var `name`, or a different `project_ref`. Those are different destinations and require fresh approval, even within the consent window.
+
+The "empty-pattern guard" suppresses the affordance only when derivation produces **zero** patterns (e.g., the batch is a single capture step with no template-run destinations, OR every destination's template is unregistered in `DESTINATION_DEFINING_PARAMS`). Single-entry batches with at least one *registered* template-run destination DO get a session offer.
 
 ### Owner stamping — UI route → store, explicit propagation (corrects v1 spec)
 
