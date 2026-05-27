@@ -254,11 +254,12 @@ The hub's only role for this feature is unchanged: it queues navigations and fra
 
   This would let the same secret(s) be pushed again to the
   exact destinations below, within the time window:
-    • vercel-env-add        ss://stripe/prod/*         environment=production
-    • github-actions-...    ss://stripe/prod/*         repo=patryk/secret-shuttle
-    • supabase-edge-...     ss://supabase/prod/X       project_ref=abc123
+    • vercel-env-add        ss://stripe/prod/STRIPE_KEY            name=STRIPE_KEY, environment=production
+    • github-actions-...    ss://stripe/prod/STRIPE_KEY            name=STRIPE_KEY, repo=patryk/secret-shuttle
+    • supabase-edge-...     ss://supabase/prod/SUPA_SVC_KEY        name=SUPA_SVC_KEY, project_ref=abc123
 
-  Different environments, repos, or projects are NOT covered.
+  Different env-var names, environments, repos, or projects are
+  NOT covered.
   Revoke any time:  secret-shuttle internal session revoke <session-id>
 ─────────────────────────────────────────────
    [ Approve ]   [ Deny ]
@@ -341,13 +342,24 @@ No other field changes. No new discriminated-union shape. No schema refactor. Th
 // Session derivation copies the values of these params from each
 // PlanEntry into the SessionPattern.required_params so the resulting
 // session can ONLY match operations with the same destination shape.
+//
+// `name` is destination-defining for ALL shipped templates: it is the
+// variable / secret name being set at the provider (vercel env var
+// name, github actions secret name, etc.). A session approved for
+// pushing STRIPE_KEY to vercel:production must NOT auto-authorize
+// pushing OPENAI_KEY to the same scope — that is a different
+// destination variable.
 export const DESTINATION_DEFINING_PARAMS: Record<string, readonly string[]> = {
-  "vercel-env-add":             ["environment"],
-  "github-actions-secret-set":  ["repo"],            // template uses one combined "owner/repo" string param
-  "cloudflare-secret-put":      ["env"],
-  "supabase-edge-secret-set":   ["project_ref"],
+  "vercel-env-add":             ["name", "environment"],
+  "github-actions-secret-set":  ["name", "repo"],         // repo is one combined "owner/repo" string param
+  "cloudflare-secret-put":      ["name", "env"],
+  "supabase-edge-secret-set":   ["name", "project_ref"],
 };
 ```
+
+**Implication of `name` being destination-defining**: most realistic batches push one ref to one (provider, env, variable-name) triple — each `PlanEntry`'s `name` is the env-var name from `.env.example`, typically unique per entry. So the derivation usually produces **one pattern per (ref, destination)** rather than one pattern per (source, env, template). That's exactly the granularity the user is consenting to: "the same secret pushed to the same place again" — not "anything in this provider scope."
+
+For batches that genuinely push the same ref to multiple env-var names (rare, but possible — same source value under two different names in the destination), each name gets its own pattern. Each pattern is exact-ref + exact-params; `ref_glob: "ss://<source>/<env>/*"` form is only emitted when ≥2 ref-distinct entries share all destination-defining params (effectively never, given `name` is in the key — but the code handles it cleanly if a future template adds a many-to-many shape).
 
 **Two distinct fallback contexts — derivation fails closed, manual paths unchanged:**
 
@@ -367,36 +379,37 @@ The daemon also emits a startup-time warning log line listing registered templat
 
 Three places already exist where session patterns are parsed in / rendered out. They are all whitelist-shaped — adding a field requires explicit work at each site, otherwise the field silently drops on the wire even though the matcher would honor it. The burst threads `required_params` through every site:
 
-1. **POST `/v1/approvals/session` body parser** (`src/daemon/api/routes/approvals-session.ts:103`, function `parseSessionPatternFromBody`):
-   - Add `required_params` to the whitelist.
-   - **Runtime validation** (the parser owns input shape — `SessionPattern.assertSessionPatternValid` in `session.ts:145` may also enforce):
-     - If `required_params` is absent → leave undefined.
-     - If present, must be a non-array object (`typeof === "object" && !Array.isArray && !== null`) — else `bad_request`.
-     - Every value must be a string (no number, boolean, null, nested object) — else `bad_request` with the offending key.
-     - Every key must match `/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/` (the param-name regex template params already validate against) — else `bad_request`.
-     - No size cap explicitly required; the surrounding 1 MB body cap covers it.
-   - The CLI's `secret-shuttle internal session create` flag-parse code that builds the body adds an analogous `--required-param k=v` repeatable flag for manual session creation use (defense-in-depth — the CLI never bypasses the daemon's validation; both layers validate).
+1. **Central validator `assertSessionPatternValid`** (`src/daemon/approvals/session.ts:145`) — the **mandatory** site for security-field validation. Today every other security-relevant pattern field (actions, ref_glob, destination_domains, template_ids, allowed_actions, ttl_ms, max_uses) is enforced here as a store-level invariant: `SessionStore.create` / `createForOwner` call this validator on every grant minted. `required_params` follows the same pattern — validation lives here, not in the route parser, so every code path that creates a session (HTTP route, approval-UI derivation, future direct API callers, tests that construct patterns directly) hits the same checks:
+   - If `required_params` is absent → leave undefined. Valid (means "no param constraints"; matches pre-burst behavior).
+   - If present, must be a non-array, non-null object (`typeof === "object" && !Array.isArray(x) && x !== null`) — else `bad_request` ("required_params must be an object.").
+   - Every value must be a string (no number, boolean, null, nested object) — else `bad_request` with the offending key in `message`.
+   - Every key must match `/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/` (the param-name regex template params already validate against) — else `bad_request` with the offending key.
+   - `required_params` is permitted on patterns whose `actions` does not include `template-run` (the matcher ignores it for other actions) — but a startup-time test asserts derivation never emits such patterns (defense in depth).
 
-2. **`session-ui-server.ts:44` `safePattern` whitelist** (the JSON template fragment substituted into the session approval HTML at `/ui/session?id=`):
+2. **POST `/v1/approvals/session` body parser** (`src/daemon/api/routes/approvals-session.ts:103`, function `parseSessionPatternFromBody`):
+   - Add `required_params` to the whitelist so the field survives the parse step (without whitelisting, the route would silently drop it before `assertSessionPatternValid` ever sees it).
+   - No additional shape validation in the parser — the centralized invariant in `assertSessionPatternValid` is the single source of truth. The route relies on the call to `SessionStore.create` (which runs the validator) to enforce.
+   - The CLI's `secret-shuttle internal session create` flag-parse code adds an analogous `--required-param k=v` repeatable flag for manual session creation. CLI-side: only basic `k=v` lex parsing (split on first `=`). Validation happens daemon-side via the central validator.
+
+3. **`session-ui-server.ts:44` `safePattern` whitelist** (the JSON template fragment substituted into the session approval HTML at `/ui/session?id=`):
    - Add `required_params: grant.required_params` to the whitelisted object.
    - The HTML page (`src/daemon/approvals/session-ui.html`) renders the pattern shape as JSON for the operator to read before they click [Approve]. Without this thread, an operator manually creating a session pattern with `required_params` would see "destination_domains: …, template_ids: …, max_uses: …" but NOT see the param constraint they just supplied — surprising and unsafe.
    - The session approval HTML template also gains a human-readable rendering of `required_params` (e.g., a "Required params:" row showing `environment=production`) so operators don't have to JSON-parse to understand the scope.
 
-3. **GET `/v1/approvals/sessions` list response** (`approvals-session.ts:57`): the list returns session-grant JSON. Add `required_params` to the response shape so:
-   - `secret-shuttle internal session list` shows the constraint per session.
+4. **GET `/v1/approvals/sessions` list response** (`approvals-session.ts:57`): the list returns session-grant JSON. Add `required_params` to the response shape so:
+   - `secret-shuttle internal session list` (which emits JSON only — `--json` is a no-op forward-compat flag per `src/cli/commands/internal-session.ts:52`) exposes the constraint per session.
    - `status --json`'s `active_sessions[].pattern_summary` derives correctly (it consumes the same data the list endpoint exposes).
    - Auto-match candidate inspection during debugging (developers reading the log + JSON list) can see exactly what each session matches.
 
-4. **`SessionGrant` persisted shape** (in-memory + any future on-disk persistence): `SessionGrant extends SessionPattern` (`session.ts:77`) — so once `required_params` is on `SessionPattern`, the grant inherits it for free. No additional storage migration needed.
+5. **`SessionGrant` persisted shape** (in-memory + any future on-disk persistence): `SessionGrant extends SessionPattern` (`session.ts:77`) — so once `required_params` is on `SessionPattern`, the grant inherits it for free. No additional storage migration needed.
 
-5. **`secret-shuttle internal session list` CLI text format**: when `required_params` is non-empty, the text rendering includes a "params: key=value, …" line. Aligns with the JSON list.
-
-**Tests added for threading:**
-- `approvals-session-route-required-params.test.ts`: POST `/v1/approvals/session` with `required_params` parses cleanly; invalid shapes (array, non-string value, malformed key) → `bad_request`; pattern with `required_params` matches a binding only when params strict-equal.
+**Tests added for threading (mandatory + per-surface):**
+- `session-pattern-required-params-validator.test.ts`: `assertSessionPatternValid` (the **mandatory** central validator) accepts well-formed `required_params`, rejects: array, null, non-string values, malformed keys, nested objects. Every other code path that creates a session inherits these rules without re-validating.
+- `approvals-session-route-required-params.test.ts`: POST `/v1/approvals/session` with `required_params` parses cleanly via the whitelist and reaches `SessionStore.create` (which calls the validator); invalid shapes surface as `bad_request` (originated from the validator, not the parser); pattern with `required_params` matches a binding only when params strict-equal.
 - `session-ui-server-required-params.test.ts`: GET `/ui/session?id=` returns HTML with the rendered `required_params` lines; the embedded JSON pattern includes the field; no field-drop.
-- `session-list-required-params.test.ts`: GET `/v1/approvals/sessions` returns `required_params` per session; missing field on legacy grants renders as empty/absent without breaking parsers.
-- `cli-internal-session-create-required-params.test.ts`: `internal session create --required-param environment=production` builds a body that includes `required_params: { environment: "production" }`; multiple flags merge; malformed `k=v` → CLI usage error.
-- `cli-internal-session-list-required-params.test.ts`: list output text format includes "params: environment=production" when set; omits the line when unset.
+- `session-list-required-params.test.ts`: GET `/v1/approvals/sessions` returns `required_params` per session in the JSON; missing field on legacy grants renders as absent without breaking parsers.
+- `cli-internal-session-create-required-params.test.ts`: `internal session create --required-param environment=production` builds a body that includes `required_params: { environment: "production" }`; multiple flags merge into one object; malformed `k=v` → CLI usage error before any daemon call.
+- `cli-internal-session-list-required-params.test.ts`: `internal session list` JSON output includes `required_params` per session entry (the CLI is JSON-only — no text-mode assertions).
 
 **Matcher extension** (`src/daemon/approvals/session-matchers.ts`):
 
@@ -556,7 +569,7 @@ Reasoning for the raise:
   "active_sessions": [
     {
       "id": "sess_abc",
-      "pattern_summary": "template-run on ss://stripe/prod/* via vercel-env-add (environment=production)",
+      "pattern_summary": "template-run on ss://stripe/prod/STRIPE_KEY via vercel-env-add (name=STRIPE_KEY, environment=production)",
       "expires_at": "2026-05-27T14:32:00Z",
       "minutes_remaining": 12
     }
@@ -572,8 +585,9 @@ The agent reads this to know whether subsequent ops in the same shape will be si
 - `infer-session-pattern.test.ts`: pure-function test of pattern derivation from `BatchState.plan`. Coverage:
   - single-group, multi-group, mixed-provider, all-capture, single-existing cases
   - single-entry `(template_id, source, env, destination-defining-params)` groups produce one exact-ref pattern (not suppressed)
-  - **multi-environment**: a single ref pushed to `vercel:production` AND `vercel:preview` produces TWO patterns, each with the corresponding `required_params.environment`
-  - **multi-repo**: same ref pushed to two distinct GitHub Actions repos (e.g., `repo=patryk/a` and `repo=patryk/b`) produces TWO patterns, each with the corresponding `required_params.repo` value (the template takes one combined `owner/repo` string)
+  - **multi-environment**: a single ref pushed to `vercel:production` AND `vercel:preview` (same env-var `name`) produces TWO patterns, each with the corresponding `required_params.environment`; both share the same `required_params.name`
+  - **multi-repo**: same ref pushed to two distinct GitHub Actions repos (e.g., `repo=patryk/a` and `repo=patryk/b`, same secret `name`) produces TWO patterns, each with the corresponding `required_params.repo` value (the template takes one combined `owner/repo` string)
+  - **same scope, different env-var names**: two refs pushed to `vercel:production` under different env-var names (e.g., `STRIPE_KEY` and `OPENAI_KEY`) produce TWO patterns — `name` is destination-defining, so each variable is consented to individually. No single broader pattern covers both.
   - **template without registered destination-defining-params**: derivation **excludes** that destination from the patterns (fail-closed). If at least one destination remains registered, the affordance still renders with a footer notice about the excluded destinations. If ALL destinations are unregistered, derivation returns empty patterns and the affordance does not render. (This is the derivation path. The `SessionStore.create` / `createForOwner` paths still accept empty `required_params` patterns for manual / CLI use — only derivation fails closed.)
 - `session-matcher-required-params.test.ts`: pure-function test of the extended `templateRunMatches`. Coverage:
   - `required_params` empty/absent → today's behavior (ref + template_id only)
