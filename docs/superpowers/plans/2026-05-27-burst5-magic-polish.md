@@ -116,7 +116,7 @@ When a step's code snippet appears to disagree with these facts, the facts win �
 - `src/daemon/approvals/ui-server.ts` — on POST `/ui/approvals/:id/approve`, read body via `readBoundedJson(req, 1024, { allowEmpty: true })`; when `body.session` is present, derive patterns from the batch's `BatchState.plan`, call `sessionStore.createForOwner` once per pattern, all-or-nothing rollback.
 - `src/daemon/approvals/ui.html` — add the session-affordance footer block (default-unchecked checkbox + TTL dropdown + rendered pattern list).
 - `src/daemon/approvals/ui-html-drift.test.ts` — extend with affordance assertions.
-- `src/daemon/approvals/require-approvals.ts` — when no `approval_id` AND no `session_id` is supplied, perform auto-match lookup; pick most-recently-approved candidate; race-retry once on max_uses exhaustion.
+- `src/daemon/approvals/require-approvals.ts` — when no `approval_id` AND no `session_id` is supplied, perform auto-match lookup; pick most-recently-approved candidate. Phase 1 tracks `plannedAutoSessionUsesById` so two bindings can't claim the same `max_uses: 1` session. Between Phase 1 and Phase 2, `resolveSessionRaces` walks every `kind: "session"` entry and demotes any that would fail commit (pattern mismatch, max_uses race, TTL elapsed, or — for auto-matched only — concurrent revocation) to `kind: "mint"` so the existing mint loop produces a fresh approval. No retry-and-rethrow.
 - `src/daemon/api/routes/health.ts` — add `active_sessions[]` field; owner-scoped. **(CLI hits `/v1/health`, not `/v1/status` — see `src/cli/commands/status.ts:53`.)**
 - `src/cli/commands/status.ts` — surface `active_sessions` in text mode.
 
@@ -3469,16 +3469,16 @@ Today the `session` kind has **no `sessionId` field** — Phase 2 uses the singu
 
 Refactor steps:
 
-1. Change the `Plan` type:
+1. Change the `Plan` type — adds `sessionId` AND `auto` to the session branch (the `auto` flag lets `resolveSessionRaces` preserve hard-failure semantics for explicit-sessionId entries while quietly demoting auto-matched ones):
 ```ts
 type Plan =
   | { kind: "synth"; binding: ApprovalBinding }
-  | { kind: "session"; binding: ApprovalBinding; sessionId: string }   // NEW: sessionId required on this branch
+  | { kind: "session"; binding: ApprovalBinding; sessionId: string; auto: boolean }
   | { kind: "consume"; binding: ApprovalBinding; id: string }
   | { kind: "mint"; binding: ApprovalBinding };
 ```
 
-2. **Existing explicit-sessionId path** (Phase 1): when `opts.sessionId` is supplied and the binding matches, the plan entry now stamps that id: `plan.push({ kind: "session", binding, sessionId: opts.sessionId })`. Grep for the existing `kind: "session"` push site in `require-approvals.ts` and pass the id.
+2. **Existing explicit-sessionId path** (Phase 1): when `opts.sessionId` is supplied and the binding matches, the plan entry now stamps the id AND `auto: false`: `plan.push({ kind: "session", binding, sessionId: opts.sessionId, auto: false })`. Grep for the existing `kind: "session"` push site in `require-approvals.ts` and update.
 
 3. **Phase 2 commit sites** at `require-approvals.ts:329` and `require-approvals.ts:344` currently dereference `opts.sessionId!`. Change both to read from the plan entry:
 ```ts
@@ -3539,7 +3539,7 @@ function planFromAutoMatchedSession(
         candidate.id,
         (plannedSessionUsesById.get(candidate.id) ?? 0) + 1,
       );
-      return { kind: "session", binding, sessionId: candidate.id };
+      return { kind: "session", binding, sessionId: candidate.id, auto: true };
     }
   }
   return null;
@@ -3572,13 +3572,44 @@ function planFromAutoMatchedSession(
 
 Add `const plannedAutoSessionUsesById = new Map<string, number>();` just above the Phase-1 binding loop (alongside the existing `plannedSessionUses = 0` counter at line 112).
 
-6. **Race resolution — pinned algorithm (executable, no choose-your-own-implementation):**
+6. **Race resolution — pinned algorithm, correctly placed and aware of throw semantics:**
 
-**Pin:** detect every potentially-raced `kind: "session"` plan entry BEFORE any irreversible commit, and demote each one to `kind: "mint"` in-place. The existing Phase 2 mint-and-wait loop then handles those bindings via the normal fresh-approval flow. No retry-and-rethrow at commit time. No structured signal to outer callers. Both auto-matched and explicit-sessionId entries are subject to the same demotion (matches the spec's "explicit `--session` for a non-matching session falls back to per-op approval").
+**Pin:** detect every potentially-raced `kind: "session"` plan entry BEFORE `mintPlans = plans.filter(...)` runs (`require-approvals.ts:234`). The existing mint-and-wait loop then handles demoted entries via the normal fresh-approval flow. No retry-and-rethrow at commit time. No structured signal to outer callers.
 
-Add `resolveSessionRaces(plans, sessionStore, store)` between Phase 1 (build `plans`) and Phase 2 (commit). It runs after the `plannedAutoSessionUsesById` map is fully populated; at that point, every `kind: "session"` entry has been planned but no side effect has fired. The function mutates `plans` in place:
+**Plan-entry shape carries auto/explicit so the resolver can preserve hard-failure semantics for explicit sessions.** Extend `Plan`:
+```ts
+type Plan =
+  | { kind: "synth"; binding: ApprovalBinding }
+  | { kind: "session"; binding: ApprovalBinding; sessionId: string; auto: boolean }
+  | { kind: "consume"; binding: ApprovalBinding; id: string }
+  | { kind: "mint"; binding: ApprovalBinding };
+```
+Phase 1's existing explicit-sessionId push site stamps `auto: false`. The new auto-match push site stamps `auto: true`.
+
+**`canMatchSession` throws on race conditions.** Per `store.ts:305-343`, the function returns `false` ONLY on pattern mismatch; it THROWS for `session_max_uses_exceeded`, `session_expired`, `session_unauthorized` (status: denied / not-pending), and `session_not_found` (also covers revoked, which sets status). The resolver must wrap the call and translate specific error codes into demotion outcomes:
 
 ```ts
+import type { ShuttleError } from "../../shared/errors.js";
+
+// Error codes that indicate a runtime race / state-drift the session
+// resolver should demote to a fresh mint. session_max_uses_exceeded is the
+// specific race we're solving; session_expired is the TTL-elapsed twin.
+const RACE_DEMOTE_CODES: ReadonlySet<string> = new Set([
+  "session_max_uses_exceeded",
+  "session_expired",
+]);
+
+// Error codes that indicate the user pointed at a bad session
+// (explicitly via --session, or via auto-match against an aging store).
+// For auto entries we ALSO demote on these — auto-match picked blindly
+// so any failure should fall back to fresh approval. For explicit
+// entries we preserve the throw — the user named that session, they
+// need to see the error.
+const EXPLICIT_HARD_FAIL_CODES: ReadonlySet<string> = new Set([
+  "session_not_found",
+  "session_unauthorized",
+]);
+
 function resolveSessionRaces(
   plans: Plan[],
   sessionStore: SessionStore,
@@ -3588,44 +3619,58 @@ function resolveSessionRaces(
     const p = plans[i];
     if (p === undefined || p.kind !== "session") continue;
 
-    // Two failure modes demote a session entry to mint:
-    //   (a) canMatchSession returns false (pattern stopped matching —
-    //       could be revoked/expired/edited concurrently)
-    //   (b) the session's effective remaining uses ≤ 0 because some
-    //       other call consumed the slot we were planning to take.
-    //
-    // We deliberately do NOT attempt to re-auto-match here. Auto-match
-    // happened in Phase 1; re-running it would race against the same
-    // sessions we already filtered. Demote and let Phase 2 mint.
-    const stillMatches = store.canMatchSession(p.sessionId, p.binding, sessionStore);
-    const sess = sessionStore.list().find((s) => s.id === p.sessionId);
-    const exhausted =
-      sess === undefined ||
-      (sess.max_uses !== undefined && sess.uses >= sess.max_uses);
+    let stillMatches: boolean;
+    try {
+      stillMatches = store.canMatchSession(p.sessionId, p.binding, sessionStore);
+    } catch (err) {
+      const code = (err as ShuttleError)?.code;
+      if (code !== undefined && RACE_DEMOTE_CODES.has(code)) {
+        // Race (uses exhausted, TTL elapsed) — demote for BOTH auto and explicit.
+        plans[i] = { kind: "mint", binding: p.binding };
+        continue;
+      }
+      if (p.auto && code !== undefined && EXPLICIT_HARD_FAIL_CODES.has(code)) {
+        // Auto-matched candidate became revoked / denied between Phase 1 and
+        // now. The user didn't name this specific session; quietly demote.
+        plans[i] = { kind: "mint", binding: p.binding };
+        continue;
+      }
+      // Explicit user-named session with a hard-failure state: rethrow so
+      // the user sees the original error code.
+      throw err;
+    }
 
-    if (!stillMatches || exhausted) {
+    if (!stillMatches) {
+      // Pattern mismatch — per spec, both auto and explicit demote.
       plans[i] = { kind: "mint", binding: p.binding };
     }
   }
 }
 ```
 
-Call site: right before the existing Phase 2 step-2 `canMatchSession` re-check loop (around `require-approvals.ts:325`):
+**Insertion point** — in `require-approvals.ts`, between the existing leftover-ID handling block (ends around line 230, just before `// Phase 2: commit.`) and the `const mintPlans = plans.filter(...)` line at 234:
+
 ```ts
-// BURST 5 §2 race resolution — runs BEFORE Phase 2 commits anything.
-// After this call, every plans[i].kind === "session" entry is guaranteed
-// to commit successfully; demoted entries become kind:"mint" and flow
-// through the existing fresh-approval path.
-if (opts.sessionStore !== undefined) {
-  resolveSessionRaces(plans, opts.sessionStore, opts.store);
-}
+  // ... existing leftover-ID handling (lines ~210-230) ...
+
+  // BURST 5 §2: race resolution. Runs AFTER planning is complete and
+  // BEFORE mintPlans is computed, so demoted entries flow into the mint
+  // loop the same as originally-planned mints. After this call, every
+  // remaining plans[i].kind === "session" entry is committable.
+  if (opts.sessionStore !== undefined) {
+    resolveSessionRaces(plans, opts.sessionStore, opts.store);
+  }
+
+  // Phase 2: commit.
+  const mintPlans = plans.filter((p): p is Extract<Plan, { kind: "mint" }> => p.kind === "mint");
+  // ... existing Phase 2 unchanged ...
 ```
 
-**Phase 2 simplification:** the existing step-2 `canMatchSession` re-verify (line 329) becomes belt-and-suspenders — `resolveSessionRaces` already handled the demotion. Keep the existing check as a defensive guard; if it now fails, that's a bug in `resolveSessionRaces` (e.g., a race during the same event-loop tick), and the existing throw is the right defense.
+**Phase 2 simplification:** the existing step-2 `canMatchSession` re-verify (around line 329) becomes belt-and-suspenders — `resolveSessionRaces` already handled the demotion. Keep it as a defensive guard.
 
-**The `mintFromSession` call at line 344** runs unchanged. No try/catch wrapper. No retry. No fallback. If it ever throws here, that's an invariant violation — `resolveSessionRaces` was supposed to catch it.
+**The `mintFromSession` call at line 344** runs unchanged. No try/catch wrapper. No retry. If it throws here, that's an invariant violation in `resolveSessionRaces`.
 
-**Mint loop for demoted entries:** Phase 2's existing `kind: "mint"` loop processes the demoted entries alongside the original mints. Same mint-and-wait semantics, same hub popup. No new code path.
+**Mint loop for demoted entries:** Phase 2's no-wait branch (line 237) and waiting-flow loop (line 280) both iterate `mintPlans`. Since `mintPlans` is computed AFTER `resolveSessionRaces` runs, demoted entries are included — same mint-and-wait semantics, same hub popup, no new code path.
 
 **Tests** must exercise both auto-matched and explicit-sessionId race demotion:
 - "auto-matched session whose uses exhausted between Phase 1 and Phase 2 is demoted to mint" — Phase 1 plans against a session with max_uses=1; another caller consumes the slot; assert the binding ends up with a fresh approval prompt, not a thrown error.
@@ -3641,7 +3686,7 @@ Expected: PASS.
 
 ```bash
 git add src/daemon/approvals/require-approvals.ts src/daemon/approvals/require-approvals-auto-match.test.ts
-git commit -m "feat(require-approvals): auto-match owned active sessions (most-recent-approved first, race-retry once)"
+git commit -m "feat(require-approvals): auto-match owned active sessions + resolveSessionRaces demotion to kind:\"mint\" before Phase 2"
 ```
 
 ---

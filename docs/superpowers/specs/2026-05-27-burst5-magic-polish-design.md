@@ -567,10 +567,12 @@ This means the agent calling `template run vercel-env-add --ref ss://stripe/prod
 **Auto-match candidate filtering** — applied before pattern matching:
 - Exclude sessions where `status != "granted"` (skip pending, denied, expired, revoked).
 - Exclude sessions where `expires_at < now` (defensive — `SessionStore.get/list` already flip these to `expired`).
-- Exclude sessions where `max_uses != null && uses_remaining <= 0`.
+- Exclude sessions where `max_uses` is set and `uses + plannedAutoSessionUsesById.get(s.id) ?? 0 >= max_uses` — accounts for other bindings in the SAME requireApprovals call already planning to consume the session.
 - Of the remainder, sort by `approved_at` DESC (tiebreaker `created_at` DESC), match patterns in order, return the first match.
 
-**Race on `max_uses`:** if `canMatchSession` returns success but `mintFromSession` fails because `max_uses` was raced to zero by a sibling call, the daemon retries the auto-match lookup ONCE (which will skip the now-exhausted candidate). If still no match → fall through to per-op approval. Documented in test.
+**Race on `max_uses` (and other Phase-1 ↔ Phase-2 state drift):** between Phase 1 (planning) and Phase 2 (commit), a sibling caller may consume the slot we were planning to take (or revoke / let-expire the session). A new function `resolveSessionRaces(plans, sessionStore, store)` runs AFTER Phase 1 and BEFORE the `mintPlans = plans.filter(...)` step. It walks every `kind: "session"` plan entry, calls `canMatchSession`, and on either a `false` return (pattern mismatch) OR a thrown `session_max_uses_exceeded` / `session_expired` error, mutates the plan entry to `kind: "mint"` in place. The existing mint loop in Phase 2 then handles the demoted entries via the normal fresh-approval path.
+
+For explicit `--session <id>` entries with a hard-failure session state (revoked, denied, or not-found), the function rethrows so the user sees a clear error — they explicitly named that session. For auto-matched entries with the same state, the function quietly demotes (the user didn't ask for that specific session). The plan-entry shape carries an `auto: boolean` field to make this distinction unambiguous.
 
 **Explicit `--session <id>` (separate from auto-match):** continues to behave as today (Plan 4a). When supplied, the daemon uses that specific session and does not consult auto-match. Explicit `--session <id>` for a session that exists but does not match still falls back to per-op approval (no behavioral change). Auto-match is ONLY consulted when `--session` is absent.
 
@@ -631,7 +633,7 @@ The agent reads this to know whether subsequent ops in the same shape will be si
 - `session-store-create-for-owner.test.ts`: `createForOwner` stamps the supplied owner; ALS context is not consulted.
 - `approval-ui-creates-sessions.test.ts`: POST `/ui/approvals/:id/approve` with `session: { ttl_minutes: 15 }` creates **N independent SessionGrants** (one per derived pattern) all owned by the approval grant's `owner_agent_id`. If any grant creation throws, all previously-minted grants from this batch are rolled back; the approval grant itself still records (the rollback is session-creation-only).
 - `approval-ui-bounded-json.test.ts`: the approve route parses its body via the relocated `readBoundedJson` helper; oversize body → `request_too_large`; malformed JSON → `bad_request`; missing `session` key → no session minted, approval succeeds normally.
-- `require-approvals-auto-match.test.ts`: matching active session silently satisfies a matching operation; expired / revoked / exhausted candidates are skipped; max_uses race retries once then falls through.
+- `require-approvals-auto-match.test.ts`: matching active session silently satisfies a matching operation; expired / revoked / exhausted candidates are skipped at Phase-1 candidate filtering; max_uses race between Phase 1 and Phase 2 demotes that entry to `kind: "mint"` via `resolveSessionRaces` (the existing mint loop produces a fresh approval — no retry-and-rethrow, no structured fallback signal).
 - `session-ttl-cap-bump.test.ts`: TTL of exactly 60 min accepted; 60 min + 1 ms rejected with `session_ttl_exceeds_cap`; the explicit code replaces the prior `bad_request` for this case.
 - `status-active-sessions.test.ts`: `status --json` includes the new field, owner-scoped; empty array when no sessions; for a mixed-batch approval with N derived patterns, the field shows N entries.
 
