@@ -444,6 +444,9 @@ git commit -m "feat(provision): inference rule table for --infer (8 rules + unkn
 **Files:**
 - Create: `src/cli/provision/infer-gate.ts`
 - Create: `src/cli/provision/infer-gate.test.ts`
+- Modify: `src/cli/bootstrap/yml.ts` — extract the strict capture-URL validator into a reusable helper so both `parseSource` and `isInferYmlExecutable` use the same rules. Without this the gate would be weaker than the executor (spec §1: "the gate keeps the strict parser strict — only fully-runnable yml flows into the batch executor").
+
+The URL validator extraction: pull the existing checks from `parseSource` (https only, no embedded credentials, host is not an IP literal, host is not localhost / `*.localhost`) into a pure function `validateCaptureUrl(url: string): { ok: true } | { ok: false; reason: string }`. `parseSource` keeps its existing throw-with-`bootstrap_capture_url_invalid` shape; `isInferYmlExecutable` consumes the `reason` string into an `InferGateIssue`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -535,14 +538,20 @@ Create `src/cli/provision/infer-gate.ts`:
 ```ts
 /**
  * Pure function: determines whether a generated `--infer` plan is
- * fully executable (every entry has a non-unknown source, valid url
- * for capture, real ref for existing, non-empty destinations, no
- * literal OWNER/REPO placeholders).
+ * fully executable (every entry has a non-unknown source, a capture
+ * URL that passes the same strict checks as the executor, a real
+ * existing ref, non-empty destinations, no literal OWNER/REPO
+ * placeholder).
+ *
+ * Each entry surfaces AT MOST ONE issue (the first one found). Fix
+ * it and re-run the gate to surface the next; this keeps the issue
+ * list short and the human-readable output focused.
  *
  * Non-executable plans result in `needs_edit: true` from the
  * `provision --infer` command — the file is written but no batch is
  * minted. See spec §1 "Executability gate".
  */
+import { validateCaptureUrl } from "../bootstrap/yml.js";
 
 export interface InferredPlanEntry {
   secret: string;
@@ -566,6 +575,10 @@ export interface InferGateResult {
   issues: InferGateIssue[];
 }
 
+// Substring match (not whole-segment) — spec calls for "literal placeholder
+// substring `OWNER/REPO`". An accidental dest like `github-actions:my-OWNER/REPO-test`
+// would also be flagged, which is the right call: it's clearly a not-yet-edited
+// generated value.
 const PLACEHOLDER_DEST = "OWNER/REPO";
 
 export function isInferYmlExecutable(entries: InferredPlanEntry[]): InferGateResult {
@@ -581,8 +594,13 @@ export function isInferYmlExecutable(entries: InferredPlanEntry[]): InferGateRes
         issues.push({ secret: e.secret, issue: "capture source missing required url" });
         continue;
       }
-      if (!e.source.url.startsWith("https://")) {
-        issues.push({ secret: e.secret, issue: `capture url must be https (got ${e.source.url})` });
+      // Use the shared validator extracted from src/cli/bootstrap/yml.ts so
+      // the gate and the executor agree on what a valid capture URL looks
+      // like. Without this the gate could mark `executable: true` and the
+      // executor would later throw bootstrap_capture_url_invalid.
+      const urlCheck = validateCaptureUrl(e.source.url);
+      if (!urlCheck.ok) {
+        issues.push({ secret: e.secret, issue: `capture url invalid: ${urlCheck.reason}` });
         continue;
       }
     }
@@ -594,8 +612,18 @@ export function isInferYmlExecutable(entries: InferredPlanEntry[]): InferGateRes
         });
         continue;
       }
+      // placeholder=false but ref is undefined or malformed → executor will
+      // reject at parseSource time. Catch it here so the gate's "executable"
+      // promise actually holds.
+      if (typeof e.source.ref !== "string" || !e.source.ref.startsWith("ss://")) {
+        issues.push({
+          secret: e.secret,
+          issue: "existing source missing required ref (ss://source/env/NAME)",
+        });
+        continue;
+      }
     }
-    if (!Array.isArray(e.destinations) || e.destinations.length === 0) {
+    if (e.destinations.length === 0) {
       issues.push({ secret: e.secret, issue: "destinations is empty — add at least one" });
       continue;
     }
