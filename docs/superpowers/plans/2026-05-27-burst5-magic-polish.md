@@ -1433,7 +1433,9 @@ rm src/cli/commands/doctor.ts src/cli/commands/doctor.test.ts
 
 Run: `npm run build`
 
-If the build complains about other files that still import from those deleted modules (it likely won't, but the `init` command may still call `agentInstallTarget` or similar — fix any such imports). Expected: clean build OR specific lines to fix; fix them and rebuild until green.
+**Known plan gap caught during execution:** `src/cli/commands/status.ts` imports `formatDoctorText` (the pure text-mode renderer) AND `type DoctorReport` from `./doctor.js`. The pre-flight grep on `*Command` symbols misses these. Fix: promote both `DoctorReport` interface and `formatDoctorText()` from `doctor.ts` into `status.ts` (which is the spiritual successor and sole remaining consumer), then delete `doctor.ts`. After the move, neither symbol crosses a file boundary.
+
+Other potential surprises to grep for: `agentInstallTarget` (init.ts may share helpers with agent.ts — verify before deleting any source). Expected: clean build OR specific lines to fix; fix them and rebuild until green.
 
 - [ ] **Step 5: Run tests**
 
