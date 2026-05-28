@@ -4516,11 +4516,12 @@ git commit -m "feat(audit): new --since/--batch summary verb + /v1/audit/summary
 
 ---
 
-### Task 4.7: Discoverability — README header + `--help` no-args agent quickstart
+### Task 4.7: Discoverability — README header + `--help` no-args agent quickstart + reference-docs cleanup
 
 **Files:**
-- Modify: `README.md`
-- Modify: `src/cli/index.ts` (description / help text)
+- Modify: `README.md` — add agent-callout header AND rewrite the Quickstart code block (currently uses removed `generate` / `list` / `inspect` verbs at lines ~60-80).
+- Modify: `src/cli/index.ts` (description / help text).
+- Modify: `docs/cli-reference.md` — currently has a full `secret-shuttle generate` section (~line 19) plus other removed-verb references. Either rewrite each removed-verb section to point at `secret-shuttle secrets set` / `secrets list` / `secrets get-ref` / `status` (the §1 replacements), OR replace those sections with a single "Removed in v0.3.0" notice pointing at the new verb.
 - Create: `src/cli/commands/cli-help-discoverability.test.ts`
 
 - [ ] **Step 1: Add the README callout**
@@ -4575,7 +4576,9 @@ git commit -m "feat(cli, docs): agent-quickstart callout in README and --help no
 ### Task 3.1: Restructure SKILL.md to layered format
 
 **Files:**
-- Modify: `skills/secret-shuttle/SKILL.md`
+- Modify: `skills/secret-shuttle/SKILL.md` — primary target, the layered restructure per spec §3.
+- Modify: `SKILL.md` (project root) — same restructure / contents as the `skills/` copy. The two files ship together via `package.json:21-22`. Treat as a single source-of-truth doc duplicated at two paths; keep them in sync (use `cp` after the rewrite, or symlink — pick one; the project currently ships both as separate files).
+- Modify: `agents/AGENTS.md.example` — currently references removed commands (`secret-shuttle generate`, `inject`, `compare`, `capture` as top-level verbs at lines 23-26). After §1 those are under `internal *`. Either rewrite to use `provision` / `internal capture` etc., or excerpt the relevant rows from the restructured `skills/secret-shuttle/SKILL.md`.
 
 - [ ] **Step 1: Read current SKILL.md to understand what exists**
 
