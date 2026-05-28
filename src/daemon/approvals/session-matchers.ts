@@ -40,6 +40,14 @@ function templateRunMatches(binding: ApprovalBinding, pattern: SessionPattern): 
   if (pattern.template_ids === undefined || pattern.template_ids.length === 0) return false;
   if (binding.template_id === null) return false;
   if (!pattern.template_ids.includes(binding.template_id)) return false;
+  // NEW: required_params strict-equal (Burst 5 §2 param-constraint primitive).
+  // No-op when required_params is empty/absent — preserves Plan 4a behavior.
+  if (pattern.required_params && Object.keys(pattern.required_params).length > 0) {
+    const params = binding.template_params ?? {};
+    for (const [key, expected] of Object.entries(pattern.required_params)) {
+      if (params[key] !== expected) return false;
+    }
+  }
   return true;
 }
 
