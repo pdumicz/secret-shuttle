@@ -72,6 +72,7 @@ export function registerApprovalsSessionRoutes(
           ...(g.allowed_actions !== undefined ? { allowed_actions: g.allowed_actions } : {}),
           ttl_ms: g.ttl_ms,
           ...(g.max_uses !== undefined ? { max_uses: g.max_uses } : {}),
+          ...(g.required_params !== undefined ? { required_params: g.required_params } : {}),
           created_at: g.created_at,
           approved_at: g.approved_at,
           expires_at: g.expires_at,
@@ -153,6 +154,18 @@ function parseSessionPatternFromBody(o: Record<string, unknown>): SessionPattern
   if (p.max_uses !== undefined && (typeof p.max_uses !== "number" || !Number.isInteger(p.max_uses))) {
     throw new ShuttleError("bad_request", "pattern.max_uses must be an integer.");
   }
+  if (p.required_params !== undefined) {
+    if (
+      p.required_params === null ||
+      typeof p.required_params !== "object" ||
+      Array.isArray(p.required_params)
+    ) {
+      throw new ShuttleError("bad_request", "pattern.required_params must be an object.");
+    }
+    // Forward the raw object onto the SessionPattern; assertSessionPatternValid
+    // (downstream by SessionStore.create / createForOwner) does the strict
+    // key-regex + string-value validation per Task 2a.2.
+  }
   return {
     actions: p.actions as SessionAction[], // assertSessionPatternValid will validate the SessionAction enum
     ref_glob: p.ref_glob,
@@ -164,5 +177,8 @@ function parseSessionPatternFromBody(o: Record<string, unknown>): SessionPattern
     ...(p.allowed_actions !== undefined ? { allowed_actions: p.allowed_actions as string[] } : {}),
     ttl_ms: p.ttl_ms,
     ...(p.max_uses !== undefined ? { max_uses: p.max_uses as number } : {}),
+    ...(p.required_params !== undefined
+      ? { required_params: p.required_params as Record<string, string> }
+      : {}),
   };
 }
