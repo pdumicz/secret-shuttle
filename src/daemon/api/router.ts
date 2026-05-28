@@ -14,7 +14,8 @@ import { registerRevealCapture } from "./routes/reveal-capture.js";
 import { registerApprovals } from "./routes/approvals.js";
 import { registerApprovalsSessionRoutes } from "./routes/approvals-session.js";
 import { registerBrowser } from "./routes/browser.js";
-import { registerTemplates } from "./routes/templates.js";
+import { registerTemplates, registry as templateRegistry } from "./routes/templates.js";
+import { validateDestinationDefiningParamsCoverage } from "../templates/destination-defining-params.js";
 import { registerUnlockSession } from "./routes/unlock-session.js";
 import { registerHealth } from "./routes/health.js";
 import { registerRunResolveRoute } from "./routes/run-resolve.js";
@@ -50,6 +51,11 @@ export function registerRoutes(
   registerApprovalsSessionRoutes(server, services, daemonPortRef);
   registerBrowser(server, services);
   registerTemplates(server, services, daemonPortRef);
+  // Burst 5 §2 (Task 2a.6): emit a startup warning for any shipped
+  // template that lacks `sessionDefiningParams`. Provision-derived
+  // sessions exclude such templates (fail-closed); the warning makes
+  // the misconfiguration visible.
+  validateDestinationDefiningParamsCoverage(templateRegistry);
   registerRunResolveRoute(server, services, daemonPortRef);
   registerInjectRenderRoute(server, services, daemonPortRef);
   registerSecretsImportRoute(server, services, daemonPortRef);
