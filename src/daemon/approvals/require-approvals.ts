@@ -25,7 +25,22 @@ export interface RequireApprovalsOptions {
 
 type Plan =
   | { kind: "synth"; binding: ApprovalBinding }
-  | { kind: "session"; binding: ApprovalBinding; sessionId: string; auto: boolean }
+  | {
+      kind: "session";
+      binding: ApprovalBinding;
+      sessionId: string;
+      /**
+       * true when this plan entry came from the daemon-side auto-match path
+       * (Phase 1 step 2b — `planFromAutoMatchedSession`). false when the
+       * caller explicitly supplied `--session <id>` and Phase 1's step-2
+       * peek matched. The resolver (`resolveSessionRaces`) uses this flag
+       * to decide whether a hard-failure session-pointer code (revoked /
+       * unauthorized) demotes silently to a fresh mint (auto: true) or
+       * rethrows so the user who named the session sees the original error
+       * (auto: false).
+       */
+      auto: boolean;
+    }
   | { kind: "consume"; binding: ApprovalBinding; id: string }
   | { kind: "mint"; binding: ApprovalBinding };
 
@@ -375,6 +390,68 @@ export async function requireApprovals(
     //   4. Commit consumes atomically via consumeBatch. Cannot fail (step 1
     //      already validated against the same sync timestamp).
 
+    // Burst 5 §2b Task 2b.6 race-fix (P1 from code review): re-run the
+    // resolver INSIDE the try block to catch races that opened during
+    // Case C's `waitForGranted` awaits. The earlier resolver call (just
+    // before Phase 2) covers the Phase 1 → planning boundary, but Case C
+    // yields the event loop on every mint-and-wait — a concurrent
+    // requireApprovals call can consume an auto-matched session in that
+    // window. Without this second pass, the affected entry would surface
+    // as an opaque `session_max_uses_exceeded` from Step 3's
+    // `mintFromSession`, violating the auto-match contract ("silent
+    // demotion to fresh approval"). By re-running here, any newly-raced
+    // session entry is demoted to kind:"mint"; we then surface those as
+    // `approval_required` (matching Case B's --no-wait shape) and let
+    // the outer catch invalidate the Case C waiting-flow mints.
+    //
+    // Edge case — Case C had no mints: `waitingFlowMintedIds` is empty,
+    // no awaits happened, and the second resolver call is a redundant
+    // (but safe) no-op over the same set of session entries. The
+    // demotion branch below is only reachable when Case C actually
+    // yielded the event loop.
+    if (opts.sessionStore !== undefined) {
+      const sessionEntriesBefore = plans.filter((p) => p.kind === "session").length;
+      resolveSessionRaces(plans, opts.sessionStore, opts.store);
+      const sessionEntriesAfter = plans.filter((p) => p.kind === "session").length;
+      if (sessionEntriesAfter < sessionEntriesBefore) {
+        // At least one auto-matched session demoted to a fresh mint after
+        // Case C's await. By this point ALL original mints have been
+        // converted to kind:"consume" (line 357 in Case C), so any
+        // kind:"mint" entries in plans are exclusively the freshly-demoted
+        // ones. Mint pending approvals for them and throw
+        // approval_required so the caller can re-prompt the user — same
+        // shape as Case B (--no-wait). The outer catch (line ~441 below)
+        // invalidates `waitingFlowMintedIds` so Case C's already-granted
+        // mints don't leak as reusable authorizations.
+        const freshMints = plans.filter(
+          (p): p is Extract<Plan, { kind: "mint" }> => p.kind === "mint",
+        );
+        const pending: Array<{ approval_id: string; expires_at: number; action: string }> = [];
+        for (const p of freshMints) {
+          const g = opts.store.create(p.binding);
+          const url = `http://127.0.0.1:${opts.daemonPort}/ui/approve?id=${g.id}&token=${g.ui_token}`;
+          open(url);
+          pending.push({ approval_id: g.id, expires_at: g.expires_at, action: p.binding.action });
+        }
+        // Defensive: demotion count > 0 should imply freshMints.length > 0,
+        // but build a safe error if that invariant is ever broken.
+        const first = pending[0];
+        if (first === undefined) {
+          throw new ShuttleError(
+            "unexpected_error",
+            "session demotion observed but no fresh mints produced",
+          );
+        }
+        const legacyPayload = JSON.stringify({
+          approval_id: first.approval_id,
+          expires_at: first.expires_at,
+        });
+        throw new ShuttleError("approval_required", legacyPayload, {
+          details: { approvals: pending },
+        });
+      }
+    }
+
     // Gather consume items (includes supplied-ID consumes AND waited mints
     // from Case C — both have plan.kind === "consume" by this point).
     const consumeItems: Array<{ id: string; binding: ApprovalBinding }> = [];
@@ -618,8 +695,10 @@ function resolveSessionRaces(
     // Sibling-aware capacity check. canMatchSession verified
     // `session.uses < session.max_uses` against live state; this additional
     // check folds in the kept-this-pass sibling entries to close the
-    // multi-entry race.
-    const session = sessionStore.list().find((s) => s.id === p.sessionId);
+    // multi-entry race. Uses sessionStore.get(id) (O(1)) rather than
+    // list().find() (O(n)) — both flip expired-past-TTL grants, but get()
+    // skips materializing the entire list.
+    const session = sessionStore.get(p.sessionId);
     if (session !== undefined && session.max_uses !== undefined) {
       const alreadyKept = keptUsesById.get(p.sessionId) ?? 0;
       if (session.uses + alreadyKept + 1 > session.max_uses) {
