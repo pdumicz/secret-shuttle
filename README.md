@@ -63,8 +63,8 @@ The daemon owns every secret moment. The agent sees refs and status, never raw v
 
 ```bash
 secret-shuttle provision --secret INTERNAL_CRON_SECRET \
-  --env production \
-  --kind random_32_bytes \
+  --from random_32_bytes \
+  --environment production \
   --to vercel:production
 # (production secret — approve in the window the daemon opens)
 
@@ -100,7 +100,7 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 - Vault-keyed HMAC fingerprints; production `compare` is approval-gated + rate-limited
 - Fail-closed domain policy (empty allow-list = injectable nowhere); approvals show the scope
 - Approval-integrity invariant: scope params with leading/trailing whitespace are rejected, so the destination the human approves always matches the argv that actually executes
-- `secret-shuttle doctor` health-check (daemon, vault, browser, policy, local files, agentic-flows availability)
+- `secret-shuttle status` health-check (daemon, vault, browser, policy, local files, agentic-flows availability)
 - Daemon bearer token is scrubbed from the daemon and all child process envs
 - Approval UI with one-shot, context-bound grants for production actions
 - Daemon-owned Chrome over `--remote-debugging-pipe`
