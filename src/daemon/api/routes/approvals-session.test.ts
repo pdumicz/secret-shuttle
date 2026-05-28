@@ -153,7 +153,7 @@ test("POST /v1/approvals/session: secrets-delete in actions → bad_request", as
   });
 });
 
-test("POST /v1/approvals/session: ttl > 15min → bad_request", async () => {
+test("POST /v1/approvals/session: ttl > 60min → session_ttl_exceeds_cap", async () => {
   await withDaemon(async (ctx) => {
     await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
     const r = await call(ctx, "POST", "/v1/approvals/session", {
@@ -162,12 +162,12 @@ test("POST /v1/approvals/session: ttl > 15min → bad_request", async () => {
         ref_glob: "",
         destination_domains: [],
         template_ids: ["any"], // required for template-run; the ttl check is what we're testing
-        ttl_ms: 16 * 60 * 1000,
+        ttl_ms: 61 * 60 * 1000,
       },
       wait_for_approval: false,
     });
     assert.equal(r.status, 400);
-    assert.equal((r.body as { error: { code: string } }).error.code, "bad_request");
+    assert.equal((r.body as { error: { code: string } }).error.code, "session_ttl_exceeds_cap");
   });
 });
 

@@ -24,7 +24,7 @@ export function internalSessionCommand(): Command {
     .option("--destination-domain <domain>", "Allowed destination domain (repeatable)", collectRepeated, [])
     .option("--template-id <id>", "Restrict to specific template_id (repeatable)", collectRepeated, [])
     .option("--allowed-action <action>", "For secrets-set patterns: REQUIRED ⊇ for binding.allowed_actions. Repeatable. Valid: capture_from_page | inject_into_field | compare_fingerprint | use_as_stdin | inject_submit.", collectRepeated, [])
-    .option("--ttl <ms>", "TTL in ms after approval; max 900000 (15min); default 300000 (5min)", (v) => Number.parseInt(v, 10), 5 * 60 * 1000)
+    .option("--ttl <ms>", "TTL in ms after approval; max 3600000 (60min); default 300000 (5min)", (v) => Number.parseInt(v, 10), 5 * 60 * 1000)
     .option("--max-uses <n>", "Usage cap (1-1000)", (v) => Number.parseInt(v, 10))
     .option("--no-wait", "Return session_id immediately with status:pending")
     .option("--json", "Forward-compat no-op", false)
