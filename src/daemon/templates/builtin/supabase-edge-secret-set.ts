@@ -20,6 +20,7 @@ export const supabaseEdgeSecretSet: TemplateDefinition = {
   args: ["secrets", "set"],
   secret_delivery: "tmp_env_file_0600",
   required_params: ["name"],
+  sessionDefiningParams: ["name", "project_ref"] as const,
   requires_approval_when_production: true,
   value_arg_template: "--env-file={{__env_file_path__}}",
   additionalArgs: (params) => {

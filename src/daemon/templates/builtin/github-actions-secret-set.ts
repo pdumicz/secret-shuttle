@@ -25,6 +25,7 @@ export const githubActionsSecretSet: TemplateDefinition = {
   args: ["secret", "set", "{{name}}", "--repo={{repo}}"],
   secret_delivery: "stdin",
   required_params: ["name", "repo"],
+  sessionDefiningParams: ["name", "repo"] as const,
   requires_approval_when_production: true,
   destinationEnvironment: (p) => p["repo"] ?? "",
   validateParams: (params) => {
