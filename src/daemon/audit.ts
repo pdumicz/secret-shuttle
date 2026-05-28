@@ -90,6 +90,25 @@ export interface DaemonAuditEvent {
    * marks the transition.
    */
   root_token_fp_prev?: string;
+  /**
+   * Set on bootstrap_plan and bootstrap_step rows AND on template_run
+   * rows written under bootstrapAuthority. Enables audit consumers
+   * to group fine-grained template_run rows under the parent
+   * bootstrap_step row via shared batch_id. See Burst 5 §4.
+   */
+  batch_id?: string;
+
+  /** Set on bootstrap_step rows. The PlanEntry.source.kind. */
+  source_kind?: string;
+
+  /** Set on bootstrap_step rows. The human-readable destination shorthands (e.g., "vercel:production"). */
+  destination_shorthands?: string[];
+
+  /** Set on bootstrap_step rows. */
+  destinations_ok_count?: number;
+
+  /** Set on bootstrap_step rows. */
+  destinations_failed_count?: number;
 }
 
 /**
