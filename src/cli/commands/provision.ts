@@ -143,6 +143,13 @@ async function dispatch(mode: Mode | "yml-default-or-no-mode", opts: ProvisionOp
 // Implementations:
 
 async function runInferMode(opts: ProvisionOpts): Promise<void> {
+  // CTO-review round-2 P1.2: validate --environment BEFORE building any
+  // next_action string that interpolates the value. The infer mode emits
+  // recovery strings that include `--environment <env>`, so an unvalidated
+  // env would let a malicious value like `staging; ls` survive into the
+  // wire next_action.
+  validateProvisionScalars(opts);
+
   const result = await runInfer({ cwd: process.cwd() });
 
   if (opts.dryRun) {
@@ -155,10 +162,13 @@ async function runInferMode(opts: ProvisionOpts): Promise<void> {
   if (exists && !opts.force) {
     // The recovery command needs --environment to be preserved when the
     // user originally passed --environment <env> alongside --infer.
-    // infer_yml_exists.nextAction is null in the registry (the static
-    // function has no access to runtime opts), so we re-throw with a
-    // per-instance nextAction here where `opts.environment` is in scope.
-    // Same pattern as the bootstrap-route P1 fix.
+    // The pre-interpolation validateProvisionScalars() call above
+    // guarantees the env value is safe to interpolate into the literal
+    // next_action string. infer_yml_exists.nextAction is null in the
+    // registry (the static function has no access to runtime opts), so
+    // we re-throw with a per-instance nextAction here where
+    // `opts.environment` is in scope. Same pattern as the bootstrap-route
+    // P1 fix.
     const envSuffix = opts.environment !== undefined ? ` --environment ${opts.environment}` : "";
     throw new ShuttleError(
       "infer_yml_exists",
@@ -175,7 +185,9 @@ async function runInferMode(opts: ProvisionOpts): Promise<void> {
     // Preserve --environment in the recovery hint so a subsequent
     // `provision --yml` runs against the same environment the user
     // originally requested. Without this, --environment silently
-    // resets to the daemon's default (production).
+    // resets to the daemon's default (production). The early
+    // validateProvisionScalars() call above guarantees the env value
+    // is safe to interpolate into the literal next_action string.
     const envSuffix = opts.environment !== undefined ? ` --environment ${opts.environment}` : "";
     outputJson(ok({
       needs_edit: true,
@@ -191,6 +203,14 @@ async function runInferMode(opts: ProvisionOpts): Promise<void> {
 }
 
 async function runYmlMode(ymlPath: string, opts: ProvisionOpts): Promise<void> {
+  // CTO-review round-2 P1.2: validate --environment before forwarding to
+  // the daemon. Although the daemon body doesn't directly interpolate
+  // env into shell, the bootstrap-route approval_required path includes
+  // environment in `details.batch_id` / `template_params.batch_id` and
+  // any downstream hint construction that splices env into a literal
+  // command must be able to trust the value. Reject at the CLI surface.
+  validateProvisionScalars(opts);
+
   // Hands off to the existing bootstrap plan route (server-side route name
   // kept per spec; internal-only). Route body shape per
   // src/daemon/api/routes/bootstrap.ts:32 is `{ plan_yml, force?, environment? }`.
@@ -211,7 +231,10 @@ async function runSecretMode(opts: ProvisionOpts): Promise<void> {
   // injection if --secret/--url/--ref contained YAML metacharacters or
   // newlines; stringify() handles escaping correctly. Validate scalars
   // first (cheap defense-in-depth even with the structured builder).
-  validateSecretScalars(opts);
+  // The validator also enforces --environment safety (round-2 P1.2): the
+  // env value is forwarded to the daemon body and could be interpolated
+  // downstream, so we reject shell metacharacters at the CLI surface.
+  validateProvisionScalars(opts);
   const sourceObj = buildSecretSourceObject(opts);
   const dests = opts.to.split(",").map((d) => d.trim()).filter(Boolean);
   if (dests.length === 0) {
@@ -234,16 +257,42 @@ async function runSecretMode(opts: ProvisionOpts): Promise<void> {
   outputJson(ok(r as Record<string, unknown>));
 }
 
-// Cheap input validation BEFORE serialization — never let attacker-controlled
-// newlines / colons / YAML directives reach the yaml writer untouched.
-function validateSecretScalars(opts: ProvisionOpts): void {
-  // env-var NAME: must match yml parser's stricter constraint
-  // (src/cli/bootstrap/yml.ts:23) — UPPERCASE start, then [A-Z0-9_]. The
-  // previous /^[A-Za-z_][A-Za-z0-9_]*$/ was looser than the yml parser,
-  // letting `--secret myKey ...` pass the CLI gate then fail with
-  // bootstrap_plan_invalid at the daemon. Aligning here surfaces the
-  // failure at the CLI surface with a focused message.
-  if (!/^[A-Z][A-Z0-9_]*$/.test(opts.secret!)) {
+// Cheap input validation BEFORE serialization / interpolation — never let
+// attacker-controlled newlines / colons / YAML directives reach the yaml
+// writer untouched, and never let shell metacharacters reach a literal
+// next_action recovery string.
+//
+// CTO-review round-2 P1.2 rename: previously validateSecretScalars (scoped
+// to --secret / --url / --ref). Now also validates --environment whenever
+// set, in any provision mode that forwards it to the daemon or interpolates
+// it into a next_action string. Call sites: runInferMode, runYmlMode,
+// runSecretMode. The --secret / --url / --ref checks only fire when the
+// corresponding flag is set — the function is safe to call from modes that
+// don't accept those flags.
+function validateProvisionScalars(opts: ProvisionOpts): void {
+  // --environment: strict allowlist of safe shell tokens. Pattern matches
+  // alphanumerics, underscore, and hyphen — no whitespace, no shell
+  // metacharacters (; & | $ ` \ ' " etc.), no path separators. This is
+  // the actual P1.2 fix: `--environment 'staging; ls'` previously
+  // survived interpolation into next_action strings in runInferMode and
+  // (through the daemon round-trip) anywhere else env is spliced into a
+  // literal command. The validator runs in every provision mode that
+  // forwards opts.environment, so the wire next_action is shell-safe by
+  // construction.
+  if (opts.environment !== undefined && !/^[a-zA-Z0-9_-]+$/.test(opts.environment)) {
+    throw new ShuttleError(
+      "bad_request",
+      `--environment must match /^[a-zA-Z0-9_-]+$/ (alphanumeric, underscore, hyphen; no spaces or shell metacharacters); got '${opts.environment}'.`,
+    );
+  }
+
+  // env-var NAME (only when --secret is in play): must match yml parser's
+  // stricter constraint (src/cli/bootstrap/yml.ts:23) — UPPERCASE start,
+  // then [A-Z0-9_]. The previous /^[A-Za-z_][A-Za-z0-9_]*$/ was looser
+  // than the yml parser, letting `--secret myKey ...` pass the CLI gate
+  // then fail with bootstrap_plan_invalid at the daemon. Aligning here
+  // surfaces the failure at the CLI surface with a focused message.
+  if (opts.secret !== undefined && !/^[A-Z][A-Z0-9_]*$/.test(opts.secret)) {
     throw new ShuttleError("bad_request", `--secret name must match /^[A-Z][A-Z0-9_]*$/ (UPPERCASE letters, digits, underscore; must start with a letter); got '${opts.secret}'.`);
   }
   if (opts.url !== undefined) {

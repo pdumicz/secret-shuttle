@@ -186,15 +186,20 @@ secrets:
   });
 });
 
-test("POST /v1/bootstrap/plan: approval_required response carries provision --continue next_action (not the generic registry hint)", async () => {
-  // §1 CTO-review P1: the registry-level hint for approval_required
-  // (src/shared/error-codes.ts) suggests `--approval-id <id>` for the
-  // generic run / inject / template flows. For batch-style provision flows
-  // (--yml, --secret, --infer), that's the WRONG recovery command — the
-  // user needs to call `provision --continue --batch <id> --approval-id
-  // <id>`. The bootstrap plan route catches approval_required from
-  // requireApprovals and re-throws with a per-instance next_action that
-  // names the correct recovery. This test pins that override.
+test("POST /v1/bootstrap/plan: approval_required response sets next_action=null and surfaces continue command in details", async () => {
+  // §1 CTO-review round-2 P1.1: the nextAction contract
+  // (src/shared/error-codes.ts:17) reserves next_action for AUTOMATIC
+  // recovery; approval_required is the canonical human-intervention error
+  // (the human must click Approve in the hub first). An agent that ran
+  // `provision --continue --batch X --approval-id Y` immediately while the
+  // approval is still pending would hit approval_not_granted at
+  // require-approvals.ts:188.
+  //
+  // Fix: next_action === null (or absent). The post-approval continue
+  // command shape moves to details.continue_command_after_approval where
+  // agents can read it after the human approves. The existing
+  // details.approvals[] shape (the registry hint's source of truth for
+  // --approval-id repeatable IDs) stays untouched.
   await withDaemon(async (ctx) => {
     await unlockVault(ctx);
 
@@ -210,22 +215,32 @@ secrets:
     const body = r.body as {
       error: { code: string };
       next_action: string | null;
-      details: { approvals: Array<{ approval_id: string }>; batch_id: string };
+      details: {
+        approvals: Array<{ approval_id: string }>;
+        batch_id: string;
+        continue_command_after_approval: string | null;
+      };
     };
     assert.equal(body.error.code, "approval_required");
 
-    // next_action MUST point at `provision --continue` with the actual
-    // batch_id and the first approval_id from the minted batch.
+    // next_action MUST be null — approval_required requires human action.
+    assert.equal(
+      body.next_action,
+      null,
+      `next_action must be null for approval_required (human must approve first); got: ${body.next_action}`,
+    );
+
+    // The continue command shape lives in details.continue_command_after_approval.
     const batchId = body.details.batch_id;
     const firstApprovalId = body.details.approvals[0]?.approval_id;
     assert.ok(typeof batchId === "string" && batchId.startsWith("bootstrap-"), `expected bootstrap- batch_id, got: ${batchId}`);
     assert.ok(typeof firstApprovalId === "string" && firstApprovalId.length > 0, `expected first approval_id, got: ${firstApprovalId}`);
 
-    const expected = `secret-shuttle provision --continue --batch ${batchId} --approval-id ${firstApprovalId}`;
+    const expectedContinue = `secret-shuttle provision --continue --batch ${batchId} --approval-id ${firstApprovalId}`;
     assert.equal(
-      body.next_action,
-      expected,
-      `wire-level next_action must point at provision --continue with the minted batch+approval ids; got: ${body.next_action}`,
+      body.details.continue_command_after_approval,
+      expectedContinue,
+      `details.continue_command_after_approval must name the post-approval recovery command; got: ${body.details.continue_command_after_approval}`,
     );
   });
 });

@@ -193,25 +193,38 @@ export function registerBootstrapRoutes(
         await writeDaemonAudit({ action: "bootstrap_plan", ok: true, approval_id: approvalId });
 
         // Re-throw with batch_id added to details so the caller knows which
-        // batch to pass to /continue, AND override the registry's generic
-        // `--approval-id <id>` recovery hint with the bootstrap-specific
-        // `provision --continue --batch <id> --approval-id <id>` next_action.
+        // batch to pass to /continue, AND surface the bootstrap-specific
+        // continue-command shape in details.continue_command_after_approval.
         //
-        // Why this override matters: the registry-level hint at
-        // src/shared/error-codes.ts:238-244 is correct for run / inject /
-        // inject-submit / reveal-capture / template run, where the original
-        // command + --approval-id retries the same command. For batch-style
+        // CTO-review round-2 P1.1: next_action MUST be null for
+        // approval_required. The nextAction contract (src/shared/error-codes.ts:17)
+        // reserves that field for AUTOMATIC recovery — running it immediately
+        // while the approval is still pending fails with approval_not_granted
+        // at require-approvals.ts:188 (supplied IDs in pending state are
+        // rejected). approval_required is the canonical human-intervention
+        // error: the human must click Approve in the hub before any recovery
+        // command can succeed.
+        //
+        // Why we still surface the continue command: the registry-level hint
+        // at src/shared/error-codes.ts:238-244 only knows about the generic
+        // `--approval-id <id>` retry shape, which is correct for run / inject /
+        // inject-submit / reveal-capture / template run (where the original
+        // command + --approval-id retries the same command). For batch-style
         // bootstrap flows (--yml / --secret / --infer), the recovery is NOT
         // to re-run --yml with --approval-id; it's to call --continue against
-        // the already-minted batch. Without this per-instance override the
-        // agent surface would see the generic registry hint and pick the
-        // wrong recovery command, leaving the minted batch stranded.
-        const nextAction = approvalId !== ""
+        // the already-minted batch. Agents read the recovery shape from
+        // details.continue_command_after_approval and run it AFTER the human
+        // approves.
+        const continueCommandAfterApproval = approvalId !== ""
           ? `secret-shuttle provision --continue --batch ${batchId} --approval-id ${approvalId}`
           : null;
         throw new ShuttleError("approval_required", e.message, {
-          nextAction,
-          details: { ...details, batch_id: batchId },
+          nextAction: null,
+          details: {
+            ...details,
+            batch_id: batchId,
+            continue_command_after_approval: continueCommandAfterApproval,
+          },
         });
       }
       throw e;

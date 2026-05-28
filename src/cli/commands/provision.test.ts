@@ -257,3 +257,101 @@ test("provision --infer with pre-existing yml (no --environment): infer_yml_exis
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("provision --infer --environment 'staging; ls' is rejected with bad_request (shell injection guard)", async () => {
+  // §1 CTO-review round-2 P1.2: the previous code interpolated
+  // opts.environment directly into next_action strings without
+  // validation. `--environment 'staging; ls'` would survive into the
+  // wire JSON, and an agent running next_action through a shell would
+  // execute the injected command. The fix validates --environment
+  // against /^[a-zA-Z0-9_-]+$/ in validateProvisionScalars, called
+  // from every provision mode that forwards env.
+  const cmd = provisionCommand();
+  let caught: { code: string | null; message: string | null } = { code: null, message: null };
+  try {
+    await cmd.parseAsync([
+      "node",
+      "provision",
+      "--infer",
+      "--environment",
+      "staging; ls",
+    ]);
+  } catch (err: any) {
+    caught = { code: err?.code ?? null, message: err?.message ?? null };
+  }
+  assert.equal(
+    caught.code,
+    "bad_request",
+    `expected bad_request for env with shell metacharacters; got code=${caught.code} message=${caught.message}`,
+  );
+  assert.ok(
+    caught.message !== null && caught.message.includes("--environment"),
+    `expected message to name the --environment flag; got: ${caught.message}`,
+  );
+  assert.ok(
+    caught.message !== null && caught.message.includes("staging; ls"),
+    `expected message to include the rejected value; got: ${caught.message}`,
+  );
+});
+
+test("provision --secret --environment '$(rm -rf)' is rejected with bad_request (shell injection guard)", async () => {
+  // Same P1.2 fix as the --infer test above, but exercised through the
+  // --secret mode codepath. The validator runs in every provision mode
+  // that accepts --environment.
+  const cmd = provisionCommand();
+  let caught: { code: string | null; message: string | null } = { code: null, message: null };
+  try {
+    await cmd.parseAsync([
+      "node",
+      "provision",
+      "--secret",
+      "API_KEY",
+      "--from",
+      "random_32_bytes",
+      "--to",
+      "vercel:production",
+      "--environment",
+      "$(rm -rf /)",
+    ]);
+  } catch (err: any) {
+    caught = { code: err?.code ?? null, message: err?.message ?? null };
+  }
+  assert.equal(
+    caught.code,
+    "bad_request",
+    `expected bad_request for env with command substitution; got code=${caught.code} message=${caught.message}`,
+  );
+});
+
+test("provision --infer --environment 'staging-eu_1' (valid token) does not reject at the validator", async () => {
+  // Positive case for the P1.2 validator: alphanumeric + underscore +
+  // hyphen are allowed. We expect the CLI to pass argv through to the
+  // infer pipeline (which typically writes a yml and exits 0 in this
+  // directory shape). The only assertion is that bad_request is NOT
+  // thrown by the validator.
+  const dir = await mkdtemp(join(tmpdir(), "ss-provision-env-valid-"));
+  try {
+    await writeFile(join(dir, ".env.example"), "MY_CUSTOM_FLAG=\n");
+
+    let exitCode = 0;
+    let stderr = "";
+    try {
+      await execp("node", [CLI, "provision", "--infer", "--environment", "staging-eu_1"], { cwd: dir });
+    } catch (e: any) {
+      exitCode = e.code ?? 1;
+      stderr = e.stderr ?? "";
+    }
+    // The CLI may exit 0 (needs_edit path) or non-zero for downstream
+    // reasons (e.g., daemon unreachable in CI). What MUST NOT happen
+    // is a CLI-side bad_request rejection for the env value itself.
+    if (exitCode !== 0) {
+      // Confirm no validator-side bad_request fired for the env.
+      assert.ok(
+        !stderr.includes("--environment must match"),
+        `valid token 'staging-eu_1' was rejected by validator; stderr: ${stderr}`,
+      );
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
