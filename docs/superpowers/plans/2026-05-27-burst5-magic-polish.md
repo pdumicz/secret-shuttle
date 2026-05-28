@@ -3437,12 +3437,36 @@ test("auto-matched session whose uses exhausted between Phase 1 and Phase 2 is d
   //      containing the binding) NOT a session_uses_exhausted-style throw.
 });
 
-test("explicit --session for a non-matching session is demoted to mint (not throw)", async () => {
+test("explicit --session for a non-matching session falls through to mint (in Phase 1, not resolver)", async () => {
   // Pass opts.sessionId of a session whose pattern doesn't match the
-  // binding. resolveSessionRaces sees canMatchSession === false and
-  // demotes to kind:"mint". The resulting behavior is a fresh approval
-  // mint, matching the spec ("explicit --session for non-matching session
-  // falls back to per-op approval").
+  // binding. Phase 1's explicit-sessionId check (require-approvals.ts:130)
+  // calls canMatchSession; on false it does NOT create a kind:"session"
+  // plan entry and falls through to the supplied-approval / mint path.
+  // The resolver never sees this entry — its `if (!stillMatches)` branch
+  // is a defensive guard for matcher drift, not the normal path.
+  // Assert: the binding ends up with a fresh mint approval, matching the
+  // spec ("explicit --session for non-matching session falls back to
+  // per-op approval").
+});
+
+test("multi-entry capacity race: 2 bindings share a max_uses=2 session, 1 consumed concurrently → 1 demoted", async () => {
+  // The regression test that closes the keptUsesById gap.
+  //   1. Set up max_uses=2 session matching the binding.
+  //   2. Build 2 bindings for the same session pattern.
+  //   3. Phase 1 plans 2 kind:"session" entries (both pass the
+  //      plannedAutoSessionUsesById check since 0 + 0 + 1 ≤ 2 and
+  //      0 + 1 + 1 ≤ 2).
+  //   4. BEFORE Phase 2, consume one slot via a direct
+  //      mintFromSession call (simulates concurrent caller).
+  //      Now sess.uses = 1, max_uses = 2.
+  //   5. resolveSessionRaces runs:
+  //      - Entry 1: canMatchSession passes (1 < 2). keptUsesById={id:1}.
+  //      - Entry 2: canMatchSession passes (1 < 2). But
+  //        sess.uses(1) + alreadyKept(1) + 1 = 3 > max_uses(2) →
+  //        demote to kind:"mint".
+  //   6. Assert: exactly one kind:"session" survives, one demoted to
+  //      kind:"mint"; Phase 2 commits one session use and one fresh
+  //      approval mint without throwing.
 });
 
 test("session-uses-counter is tracked across N bindings in one call", async () => {
@@ -3589,7 +3613,11 @@ Phase 1's existing explicit-sessionId push site stamps `auto: false`. The new au
 **`canMatchSession` throws on race conditions.** Per `store.ts:305-343`, the function returns `false` ONLY on pattern mismatch; it THROWS for `session_max_uses_exceeded`, `session_expired`, `session_unauthorized` (status: denied / not-pending), and `session_not_found` (also covers revoked, which sets status). The resolver must wrap the call and translate specific error codes into demotion outcomes:
 
 ```ts
-import type { ShuttleError } from "../../shared/errors.js";
+// ShuttleError is already imported as a VALUE at the top of
+// require-approvals.ts:1 — do NOT add `import type { ShuttleError }` here
+// (would produce TS2300 "Duplicate identifier 'ShuttleError'"). The
+// existing value import is usable as a type. If pulling this resolver
+// into its own file, import ShuttleError as value once and reuse.
 
 // Error codes that indicate a runtime race / state-drift the session
 // resolver should demote to a fresh mint. session_max_uses_exceeded is the
@@ -3615,6 +3643,22 @@ function resolveSessionRaces(
   sessionStore: SessionStore,
   store: ApprovalStore,
 ): void {
+  // Multi-entry capacity tracking. `canMatchSession` only inspects live
+  // `session.uses` against `max_uses` (store.ts:335); it does NOT know
+  // about sibling entries in the same `plans` array that ALSO plan to
+  // consume the session. Without per-sessionId kept-uses tracking, two
+  // bindings against a max_uses=2 session could both pass canMatchSession
+  // after a concurrent caller had consumed one slot (uses=1, cap=2),
+  // and the SECOND mintFromSession in Phase 2 would throw
+  // session_max_uses_exceeded after the first already incremented uses.
+  //
+  // The resolver mirrors Phase 1's `plannedSessionUses` discipline
+  // (require-approvals.ts:112) but per-session (since auto-match can pick
+  // a different session per binding). For each kept entry, we add 1 to
+  // the count under its sessionId. Subsequent entries against the same
+  // sessionId must fit within remaining capacity OR they demote.
+  const keptUsesById = new Map<string, number>();
+
   for (let i = 0; i < plans.length; i++) {
     const p = plans[i];
     if (p === undefined || p.kind !== "session") continue;
@@ -3642,8 +3686,27 @@ function resolveSessionRaces(
 
     if (!stillMatches) {
       // Pattern mismatch — per spec, both auto and explicit demote.
+      // Note: in correctly-functioning code this branch should be
+      // unreachable, because Phase 1 only emits kind:"session" entries
+      // for bindings that already matched. Kept as a defensive guard
+      // against matcher drift between Phase 1 and the resolver.
       plans[i] = { kind: "mint", binding: p.binding };
+      continue;
     }
+
+    // Capacity check: live uses + already-kept-this-pass + this-entry
+    // must not exceed max_uses. canMatchSession already verified
+    // `session.uses < session.max_uses`; the additional sibling-aware
+    // check is what closes the multi-entry race.
+    const session = sessionStore.list().find((s) => s.id === p.sessionId);
+    if (session !== undefined && session.max_uses !== undefined) {
+      const alreadyKept = keptUsesById.get(p.sessionId) ?? 0;
+      if (session.uses + alreadyKept + 1 > session.max_uses) {
+        plans[i] = { kind: "mint", binding: p.binding };
+        continue;
+      }
+    }
+    keptUsesById.set(p.sessionId, (keptUsesById.get(p.sessionId) ?? 0) + 1);
   }
 }
 ```
@@ -3672,10 +3735,11 @@ function resolveSessionRaces(
 
 **Mint loop for demoted entries:** Phase 2's no-wait branch (line 237) and waiting-flow loop (line 280) both iterate `mintPlans`. Since `mintPlans` is computed AFTER `resolveSessionRaces` runs, demoted entries are included — same mint-and-wait semantics, same hub popup, no new code path.
 
-**Tests** must exercise both auto-matched and explicit-sessionId race demotion:
-- "auto-matched session whose uses exhausted between Phase 1 and Phase 2 is demoted to mint" — Phase 1 plans against a session with max_uses=1; another caller consumes the slot; assert the binding ends up with a fresh approval prompt, not a thrown error.
-- "explicit --session <id> for a non-matching session is demoted to mint" — pass `--session sess_X` where the session does not match; assert the binding mints fresh (not throws `session_pattern_no_match`).
-- "session-uses-counter is correctly tracked across N bindings in one call" — N=2 bindings, max_uses=1 session: Phase 1 plans one session, one mint (via `plannedAutoSessionUsesById` filter); no race occurs.
+**Tests** must exercise both auto-matched and explicit-sessionId race / capacity demotion:
+- "auto-matched session whose uses exhausted between Phase 1 and Phase 2 is demoted to mint" — Phase 1 plans against a session with max_uses=1; another caller consumes the slot before Phase 2; resolver catches the `session_max_uses_exceeded` throw from `canMatchSession`, demotes; assert the binding ends up with a fresh approval prompt, not a thrown error.
+- "multi-entry capacity race: 2 bindings share a max_uses=2 session, 1 consumed concurrently → 1 demoted" — the regression guard for `keptUsesById`: N=2 bindings; canMatchSession passes for both (live uses=1, cap=2); resolver's sibling-aware check `sess.uses + alreadyKept + 1 > max_uses` demotes the second; Phase 2 commits one session-mint and one fresh-approval mint.
+- "explicit --session for a non-matching session falls through to mint in Phase 1" — Phase 1's explicit-sessionId check (`require-approvals.ts:130`) gets `canMatchSession === false` and does NOT create a `kind:"session"` entry. The resolver never sees the binding. Assert: fresh mint, no throw.
+- "session-uses-counter is correctly tracked across N bindings in one call" — N=2 bindings, max_uses=1 session: Phase 1 plans one session, one mint (via `plannedAutoSessionUsesById` filter); no race / no resolver demotion occurs.
 
 - [ ] **Step 3: Run tests**
 
