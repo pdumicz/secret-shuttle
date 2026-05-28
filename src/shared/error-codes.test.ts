@@ -368,6 +368,24 @@ test("error-codes: bootstrap_destination_unknown registered with USAGE exit code
   assert.strictEqual(next, null, "no automatic recovery — recovery command is mode-dependent");
 });
 
+test("error-codes: infer_yml_exists nextAction is null (context-dependent — opts-aware throw-site builds recovery)", () => {
+  // §1 CTO-review P2b: the previous registry value
+  // "secret-shuttle provision --infer --force" silently dropped
+  // --environment when the user's original invocation passed it.
+  // The static registry function has no access to runtime opts, so the
+  // recovery string is now constructed at the throw-site in runInferMode
+  // (src/cli/commands/provision.ts) where opts.environment is in scope.
+  // The registry's nextAction returns null to surrender that decision to
+  // the throw-site — same precedent as P1.1 round-19
+  // (bootstrap_plan_invalid, bootstrap_capture_url_invalid,
+  // bootstrap_destination_unknown).
+  const entry = lookupErrorCode("infer_yml_exists");
+  assert.ok(entry);
+  assert.strictEqual(entry.exitCode, EXIT_CODE_CONFLICT);
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — opts-aware throw-site builds recovery");
+});
+
 test("error-codes: daemon_not_running has nextAction (mechanical recovery)", () => {
   const entry = lookupErrorCode("daemon_not_running");
   assert.ok(entry?.nextAction);

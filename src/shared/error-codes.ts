@@ -361,7 +361,14 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   infer_yml_exists: {
     exitCode: EXIT_CODE_CONFLICT,
     hint: () => "Re-run with --force to overwrite, or --dry-run to stdout only.",
-    nextAction: () => "secret-shuttle provision --infer --force",
+    // No nextAction in the registry: the correct recovery command depends
+    // on whether the user originally passed --environment <env>. The static
+    // registry function has no access to runtime opts, so the recovery
+    // string is constructed at the throw-site in runInferMode (src/cli/
+    // commands/provision.ts) where opts.environment is in scope. Matches
+    // the P1.1 round-19 precedent (bootstrap_plan_invalid,
+    // bootstrap_capture_url_invalid, bootstrap_destination_unknown).
+    nextAction: () => null,
   },
 
   // ── Audit-route codes ──────────────────────────────────────────────────────

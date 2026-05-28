@@ -15,6 +15,7 @@ import { readFile, writeFile, access, stat } from "node:fs/promises";
 import { stringify as yamlStringify } from "yaml";
 import { ShuttleError } from "../../shared/errors.js";
 import { daemonRequest } from "../../client/daemon-client.js";
+import { parseSecretRef } from "../../shared/refs.js";
 import { ok, outputJson } from "../../shared/result.js";
 import { runInfer } from "../provision/infer.js";
 import { addApprovalIdOption } from "./_approval-id-option.js";
@@ -152,20 +153,35 @@ async function runInferMode(opts: ProvisionOpts): Promise<void> {
   const ymlPath = "./secret-shuttle.yml";
   const exists = await fileExists(ymlPath);
   if (exists && !opts.force) {
+    // The recovery command needs --environment to be preserved when the
+    // user originally passed --environment <env> alongside --infer.
+    // infer_yml_exists.nextAction is null in the registry (the static
+    // function has no access to runtime opts), so we re-throw with a
+    // per-instance nextAction here where `opts.environment` is in scope.
+    // Same pattern as the bootstrap-route P1 fix.
+    const envSuffix = opts.environment !== undefined ? ` --environment ${opts.environment}` : "";
     throw new ShuttleError(
       "infer_yml_exists",
       "./secret-shuttle.yml already exists. Re-run with --force to overwrite, or --dry-run to print to stdout only.",
+      {
+        nextAction: `secret-shuttle provision --infer --force${envSuffix}`,
+      },
     );
   }
 
   await writeFile(ymlPath, result.yml, "utf8");
 
   if (!result.executable) {
+    // Preserve --environment in the recovery hint so a subsequent
+    // `provision --yml` runs against the same environment the user
+    // originally requested. Without this, --environment silently
+    // resets to the daemon's default (production).
+    const envSuffix = opts.environment !== undefined ? ` --environment ${opts.environment}` : "";
     outputJson(ok({
       needs_edit: true,
       yml_path: ymlPath,
       issues: result.issues,
-      next_action: "edit ./secret-shuttle.yml then run: secret-shuttle provision --yml ./secret-shuttle.yml",
+      next_action: `edit ./secret-shuttle.yml then run: secret-shuttle provision --yml ./secret-shuttle.yml${envSuffix}`,
     }));
     return;
   }
@@ -221,9 +237,14 @@ async function runSecretMode(opts: ProvisionOpts): Promise<void> {
 // Cheap input validation BEFORE serialization — never let attacker-controlled
 // newlines / colons / YAML directives reach the yaml writer untouched.
 function validateSecretScalars(opts: ProvisionOpts): void {
-  // env-var name: standard shell-name regex
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.secret!)) {
-    throw new ShuttleError("bad_request", `--secret name must match /^[A-Za-z_][A-Za-z0-9_]*$/; got '${opts.secret}'.`);
+  // env-var NAME: must match yml parser's stricter constraint
+  // (src/cli/bootstrap/yml.ts:23) — UPPERCASE start, then [A-Z0-9_]. The
+  // previous /^[A-Za-z_][A-Za-z0-9_]*$/ was looser than the yml parser,
+  // letting `--secret myKey ...` pass the CLI gate then fail with
+  // bootstrap_plan_invalid at the daemon. Aligning here surfaces the
+  // failure at the CLI surface with a focused message.
+  if (!/^[A-Z][A-Z0-9_]*$/.test(opts.secret!)) {
+    throw new ShuttleError("bad_request", `--secret name must match /^[A-Z][A-Z0-9_]*$/ (UPPERCASE letters, digits, underscore; must start with a letter); got '${opts.secret}'.`);
   }
   if (opts.url !== undefined) {
     // Must be https; no embedded credentials; no whitespace. Strict URL
@@ -235,9 +256,15 @@ function validateSecretScalars(opts: ProvisionOpts): void {
     if (u.username !== "" || u.password !== "") throw new ShuttleError("bad_request", "--url must not contain embedded credentials.");
   }
   if (opts.ref !== undefined) {
-    if (!/^ss:\/\/[a-z0-9_-]+\/[a-z0-9_-]+\/[A-Za-z_][A-Za-z0-9_]*$/.test(opts.ref)) {
-      throw new ShuttleError("bad_request", `--ref must match ss://<source>/<env>/<NAME>; got '${opts.ref}'.`);
-    }
+    // Use the canonical parser (src/shared/refs.ts:65) instead of a parallel
+    // regex. The previous regex /^ss:\/\/[a-z0-9_-]+\/[a-z0-9_-]+\/[A-Za-z_]
+    // [A-Za-z0-9_]*$/ rejected dotted source/env/name components that the
+    // canonical SOURCE_RE / ENV_RE / NAME_RE accept (e.g.,
+    // `ss://my.source/prod/UPSTREAM_SECRET`). parseSecretRef throws
+    // ShuttleError with code `invalid_ref` on bad input; surfacing that to
+    // the user gives a more accurate error than a regex mismatch message
+    // and eliminates the drift between CLI and server-side validation.
+    parseSecretRef(opts.ref);
   }
 }
 

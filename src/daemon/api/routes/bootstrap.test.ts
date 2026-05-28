@@ -186,6 +186,50 @@ secrets:
   });
 });
 
+test("POST /v1/bootstrap/plan: approval_required response carries provision --continue next_action (not the generic registry hint)", async () => {
+  // §1 CTO-review P1: the registry-level hint for approval_required
+  // (src/shared/error-codes.ts) suggests `--approval-id <id>` for the
+  // generic run / inject / template flows. For batch-style provision flows
+  // (--yml, --secret, --infer), that's the WRONG recovery command — the
+  // user needs to call `provision --continue --batch <id> --approval-id
+  // <id>`. The bootstrap plan route catches approval_required from
+  // requireApprovals and re-throws with a per-instance next_action that
+  // names the correct recovery. This test pins that override.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  API_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:production"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml });
+    assert.equal(r.status, 400, `expected 400, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as {
+      error: { code: string };
+      next_action: string | null;
+      details: { approvals: Array<{ approval_id: string }>; batch_id: string };
+    };
+    assert.equal(body.error.code, "approval_required");
+
+    // next_action MUST point at `provision --continue` with the actual
+    // batch_id and the first approval_id from the minted batch.
+    const batchId = body.details.batch_id;
+    const firstApprovalId = body.details.approvals[0]?.approval_id;
+    assert.ok(typeof batchId === "string" && batchId.startsWith("bootstrap-"), `expected bootstrap- batch_id, got: ${batchId}`);
+    assert.ok(typeof firstApprovalId === "string" && firstApprovalId.length > 0, `expected first approval_id, got: ${firstApprovalId}`);
+
+    const expected = `secret-shuttle provision --continue --batch ${batchId} --approval-id ${firstApprovalId}`;
+    assert.equal(
+      body.next_action,
+      expected,
+      `wire-level next_action must point at provision --continue with the minted batch+approval ids; got: ${body.next_action}`,
+    );
+  });
+});
+
 test("POST /v1/bootstrap/continue: with approval_id executes plan", async () => {
   await withDaemon(async (ctx) => {
     await unlockVault(ctx);

@@ -193,8 +193,24 @@ export function registerBootstrapRoutes(
         await writeDaemonAudit({ action: "bootstrap_plan", ok: true, approval_id: approvalId });
 
         // Re-throw with batch_id added to details so the caller knows which
-        // batch to pass to /continue.
+        // batch to pass to /continue, AND override the registry's generic
+        // `--approval-id <id>` recovery hint with the bootstrap-specific
+        // `provision --continue --batch <id> --approval-id <id>` next_action.
+        //
+        // Why this override matters: the registry-level hint at
+        // src/shared/error-codes.ts:238-244 is correct for run / inject /
+        // inject-submit / reveal-capture / template run, where the original
+        // command + --approval-id retries the same command. For batch-style
+        // bootstrap flows (--yml / --secret / --infer), the recovery is NOT
+        // to re-run --yml with --approval-id; it's to call --continue against
+        // the already-minted batch. Without this per-instance override the
+        // agent surface would see the generic registry hint and pick the
+        // wrong recovery command, leaving the minted batch stranded.
+        const nextAction = approvalId !== ""
+          ? `secret-shuttle provision --continue --batch ${batchId} --approval-id ${approvalId}`
+          : null;
         throw new ShuttleError("approval_required", e.message, {
+          nextAction,
           details: { ...details, batch_id: batchId },
         });
       }
