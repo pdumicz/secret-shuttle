@@ -71,6 +71,14 @@ test("CUSTOM_FEATURE_FLAG_KEY → unknown (no rule matches)", () => {
   assert.deepEqual(inferSourceForName("CUSTOM_FEATURE_FLAG_KEY"), { kind: "unknown" });
 });
 
+test("MYSECRET (no underscore separator) → unknown (regex requires _SECRET/_TOKEN suffix)", () => {
+  // Regression guard for the tightened fallback regex. The spec table is
+  // `*_SECRET` / `*_TOKEN` — names without the underscore separator must
+  // fall through to `unknown` rather than being silently auto-randomed.
+  assert.deepEqual(inferSourceForName("MYSECRET"), { kind: "unknown" });
+  assert.deepEqual(inferSourceForName("BIGTOKEN"), { kind: "unknown" });
+});
+
 test("case-insensitive matching", () => {
   assert.deepEqual(inferSourceForName("stripe_secret_key"), {
     kind: "capture",

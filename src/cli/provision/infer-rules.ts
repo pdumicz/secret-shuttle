@@ -11,7 +11,15 @@
 export type InferredSource =
   | { kind: "capture"; url: string }
   | { kind: "random_32_bytes" }
-  | { kind: "random_64_bytes" }
+  | { kind: "random_64_bytes" }  // forward-compat: union member; no rule emits this today
+  /**
+   * `existing` here carries only the kind + placeholder flag — the rule
+   * table knows the env-var *name* but not the vault ref. Downstream
+   * `InferredPlanEntry.source.existing` (in `./infer-gate.ts`) extends
+   * this shape with `ref?: string`; the `--infer` runner (Task 1.4)
+   * populates the ref before the gate runs. The boundary cast lives in
+   * Task 1.4 — don't add a `ref` field to this type.
+   */
   | { kind: "existing"; placeholder: boolean }
   | { kind: "unknown" };
 
@@ -51,10 +59,13 @@ const RULES: readonly Rule[] = [
     source: { kind: "existing", placeholder: true },
   },
   // Generic random fallback: any *_SECRET or *_TOKEN with no provider prefix.
+  // The leading `_` is required so we match the spec table literally
+  // (`*_SECRET`, `*_TOKEN`) and avoid sweeping up names like `MYSECRET`
+  // or `BIGTOKEN` that lack the conventional underscore separator.
   // Provider-prefixed names that didn't match a specific rule above fall
   // through to "unknown" (safer than auto-randoming a known-provider name).
   {
-    test: (n) => /(SECRET|TOKEN)$/.test(n) && !/^(STRIPE|SUPABASE|OPENAI|ANTHROPIC|CLERK)_/.test(n),
+    test: (n) => /_(SECRET|TOKEN)$/.test(n) && !/^(STRIPE|SUPABASE|OPENAI|ANTHROPIC|CLERK)_/.test(n),
     source: { kind: "random_32_bytes" },
   },
 ];
