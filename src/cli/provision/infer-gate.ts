@@ -7,7 +7,14 @@
  * Non-executable plans result in `needs_edit: true` from the
  * `provision --infer` command — the file is written but no batch is
  * minted. See spec §1 "Executability gate".
+ *
+ * Note: this function emits at most one issue per entry (the loop
+ * uses `continue` after each push). The first failing check for an
+ * entry wins; the user fixes that, re-runs, and surfaces the next
+ * one. This keeps the issue list focused — re-runs are cheap.
  */
+
+import { validateCaptureUrl } from "../bootstrap/yml.js";
 
 export interface InferredPlanEntry {
   secret: string;
@@ -31,6 +38,9 @@ export interface InferGateResult {
   issues: InferGateIssue[];
 }
 
+// Substring match: any destination shorthand containing the literal
+// "OWNER/REPO" (e.g., "github-actions:OWNER/REPO" or future variants
+// like "gha:OWNER/REPO/env") is treated as an unfilled template.
 const PLACEHOLDER_DEST = "OWNER/REPO";
 
 export function isInferYmlExecutable(entries: InferredPlanEntry[]): InferGateResult {
@@ -46,8 +56,9 @@ export function isInferYmlExecutable(entries: InferredPlanEntry[]): InferGateRes
         issues.push({ secret: e.secret, issue: "capture source missing required url" });
         continue;
       }
-      if (!e.source.url.startsWith("https://")) {
-        issues.push({ secret: e.secret, issue: `capture url must be https (got ${e.source.url})` });
+      const urlCheck = validateCaptureUrl(e.source.url);
+      if (!urlCheck.ok) {
+        issues.push({ secret: e.secret, issue: `capture url invalid: ${urlCheck.reason}` });
         continue;
       }
     }
@@ -59,8 +70,15 @@ export function isInferYmlExecutable(entries: InferredPlanEntry[]): InferGateRes
         });
         continue;
       }
+      if (typeof e.source.ref !== "string" || !e.source.ref.startsWith("ss://")) {
+        issues.push({
+          secret: e.secret,
+          issue: "existing source missing required ref (ss://source/env/NAME)",
+        });
+        continue;
+      }
     }
-    if (!Array.isArray(e.destinations) || e.destinations.length === 0) {
+    if (e.destinations.length === 0) {
       issues.push({ secret: e.secret, issue: "destinations is empty — add at least one" });
       continue;
     }

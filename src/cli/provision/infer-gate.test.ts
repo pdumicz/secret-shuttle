@@ -23,7 +23,7 @@ test("source.kind=unknown → not executable", () => {
 });
 
 test("capture source with missing url → not executable", () => {
-  const r = isInferYmlExecutable([ok({ source: { kind: "capture" } as any })]);
+  const r = isInferYmlExecutable([ok({ source: { kind: "capture" } })]);
   assert.equal(r.ok, false);
   assert.ok(r.issues.some((i) => i.issue.includes("capture") && i.issue.includes("url")));
 });
@@ -34,13 +34,13 @@ test("capture source with non-https url → not executable", () => {
 });
 
 test("existing source with placeholder=true → not executable", () => {
-  const r = isInferYmlExecutable([ok({ source: { kind: "existing", placeholder: true, ref: "ss://x/y/Z" } as any })]);
+  const r = isInferYmlExecutable([ok({ source: { kind: "existing", placeholder: true, ref: "ss://x/y/Z" } })]);
   assert.equal(r.ok, false);
   assert.ok(r.issues.some((i) => i.issue.includes("placeholder")));
 });
 
 test("existing source with real ref → executable", () => {
-  const r = isInferYmlExecutable([ok({ source: { kind: "existing", placeholder: false, ref: "ss://local/prod/REAL" } as any })]);
+  const r = isInferYmlExecutable([ok({ source: { kind: "existing", placeholder: false, ref: "ss://local/prod/REAL" } })]);
   assert.equal(r.ok, true);
 });
 
@@ -70,4 +70,33 @@ test("multiple entries, mixed: collects all issues", () => {
   assert.ok(issueA !== undefined && issueB !== undefined, "expected two issues");
   assert.equal(issueA.secret, "X");
   assert.equal(issueB.secret, "Y");
+});
+
+test("capture url with embedded credentials → not executable", () => {
+  const r = isInferYmlExecutable([ok({ source: { kind: "capture", url: "https://user:pass@example.com/" } })]);
+  assert.equal(r.ok, false);
+  assert.ok(r.issues.some((i) => i.issue.includes("credentials")));
+});
+
+test("capture url targeting localhost → not executable", () => {
+  const r = isInferYmlExecutable([ok({ source: { kind: "capture", url: "https://localhost/" } })]);
+  assert.equal(r.ok, false);
+  assert.ok(r.issues.some((i) => i.issue.includes("localhost")));
+});
+
+test("capture url targeting IP literal → not executable", () => {
+  const r = isInferYmlExecutable([ok({ source: { kind: "capture", url: "https://192.168.1.1/" } })]);
+  assert.equal(r.ok, false);
+  assert.ok(r.issues.some((i) => i.issue.includes("IP literal")));
+});
+
+test("existing source with placeholder=false but no ref → not executable", () => {
+  const r = isInferYmlExecutable([ok({ source: { kind: "existing", placeholder: false } as any })]);
+  assert.equal(r.ok, false);
+  assert.ok(r.issues.some((i) => i.issue.includes("missing required ref")));
+});
+
+test("random_64_bytes source → executable (forward-compat union member)", () => {
+  const r = isInferYmlExecutable([ok({ source: { kind: "random_64_bytes" } })]);
+  assert.equal(r.ok, true);
 });
