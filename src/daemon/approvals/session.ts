@@ -271,4 +271,24 @@ export function assertSessionPatternValid(pattern: SessionPattern): void {
       throw new ShuttleError("bad_request", `max_uses cannot exceed ${MAX_USES_MAX}.`);
     }
   }
+
+  // ── 9. required_params shape (optional) ──────────────────────────────────────
+  if (pattern.required_params !== undefined) {
+    if (
+      pattern.required_params === null ||
+      typeof pattern.required_params !== "object" ||
+      Array.isArray(pattern.required_params)
+    ) {
+      throw new ShuttleError("bad_request", "required_params must be an object (Record<string,string>).");
+    }
+    const KEY_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+    for (const [key, value] of Object.entries(pattern.required_params)) {
+      if (!KEY_RE.test(key)) {
+        throw new ShuttleError("bad_request", `required_params key '${key}' must match ${KEY_RE}.`);
+      }
+      if (typeof value !== "string") {
+        throw new ShuttleError("bad_request", `required_params value for key '${key}' must be a string.`);
+      }
+    }
+  }
 }
