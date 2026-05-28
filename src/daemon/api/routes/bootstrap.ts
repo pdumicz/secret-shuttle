@@ -215,10 +215,20 @@ export function registerBootstrapRoutes(
         // the already-minted batch. Agents read the recovery shape from
         // details.continue_command_after_approval and run it AFTER the human
         // approves.
+        //
+        // CTO-review round-4 P1.1: also override the wire `hint`. The registry
+        // hint at src/shared/error-codes.ts:238-244 instructs agents to "retry
+        // with --approval-id <id>" — correct for single-shot ops (run / inject
+        // / reveal-capture / template run) but WRONG for batch-style provision
+        // flows. Retrying `provision` with --approval-id would mint a new
+        // batch instead of continuing the existing one. The per-instance hint
+        // points agents at details.continue_command_after_approval, which
+        // carries the correct `--continue --batch X --approval-id Y` shape.
         const continueCommandAfterApproval = approvalId !== ""
           ? `secret-shuttle provision --continue --batch ${batchId} --approval-id ${approvalId}`
           : null;
         throw new ShuttleError("approval_required", e.message, {
+          hint: "Approve in the opened hub, then run the command in details.continue_command_after_approval.",
           nextAction: null,
           details: {
             ...details,

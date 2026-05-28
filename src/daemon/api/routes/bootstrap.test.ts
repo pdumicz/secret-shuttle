@@ -214,6 +214,7 @@ secrets:
     assert.equal(r.status, 400, `expected 400, got ${r.status} body=${JSON.stringify(r.body)}`);
     const body = r.body as {
       error: { code: string };
+      hint: string | null;
       next_action: string | null;
       details: {
         approvals: Array<{ approval_id: string }>;
@@ -241,6 +242,26 @@ secrets:
       body.details.continue_command_after_approval,
       expectedContinue,
       `details.continue_command_after_approval must name the post-approval recovery command; got: ${body.details.continue_command_after_approval}`,
+    );
+
+    // CTO-review round-4 P1.1: the wire `hint` must be the per-instance
+    // override pointing at details.continue_command_after_approval — NOT the
+    // registry's generic "retry with --approval-id <id>" text, which is wrong
+    // for batch-style provision flows (retrying `provision` with --approval-id
+    // would mint a new batch instead of continuing the existing one).
+    assert.ok(
+      typeof body.hint === "string" && body.hint.length > 0,
+      `expected a non-empty hint string, got: ${body.hint}`,
+    );
+    assert.match(
+      body.hint!,
+      /details\.continue_command_after_approval/i,
+      `hint must point at details.continue_command_after_approval (per-instance override); got: ${body.hint}`,
+    );
+    assert.doesNotMatch(
+      body.hint!,
+      /retry with --approval-id/i,
+      `hint must NOT be the registry's generic --approval-id retry text (wrong for batch-style provision); got: ${body.hint}`,
     );
   });
 });
