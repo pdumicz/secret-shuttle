@@ -91,7 +91,9 @@ test("capture url targeting IP literal → not executable", () => {
 });
 
 test("existing source with placeholder=false but no ref → not executable", () => {
-  const r = isInferYmlExecutable([ok({ source: { kind: "existing", placeholder: false } as any })]);
+  // `ref` is optional in the type, so omitting it is a valid construction
+  // for this test. The gate's job is to reject it at runtime.
+  const r = isInferYmlExecutable([ok({ source: { kind: "existing", placeholder: false } })]);
   assert.equal(r.ok, false);
   assert.ok(r.issues.some((i) => i.issue.includes("missing required ref")));
 });
