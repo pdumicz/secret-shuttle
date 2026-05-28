@@ -327,6 +327,14 @@ test("CUSTOM_FEATURE_FLAG_KEY → unknown (no rule matches)", () => {
   assert.deepEqual(inferSourceForName("CUSTOM_FEATURE_FLAG_KEY"), { kind: "unknown" });
 });
 
+test("MYSECRET (no underscore separator) → unknown (regex requires _SECRET/_TOKEN suffix)", () => {
+  // Regression guard for the tightened fallback regex. The spec table is
+  // `*_SECRET` / `*_TOKEN` — names without the underscore separator must
+  // fall through to `unknown` rather than being silently auto-randomed.
+  assert.deepEqual(inferSourceForName("MYSECRET"), { kind: "unknown" });
+  assert.deepEqual(inferSourceForName("BIGTOKEN"), { kind: "unknown" });
+});
+
 test("case-insensitive matching", () => {
   assert.deepEqual(inferSourceForName("stripe_secret_key"), {
     kind: "capture",
@@ -397,10 +405,13 @@ const RULES: readonly Rule[] = [
     source: { kind: "existing", placeholder: true },
   },
   // Generic random fallback: any *_SECRET or *_TOKEN with no provider prefix.
+  // The leading `_` is required so we match the spec table literally
+  // (`*_SECRET`, `*_TOKEN`) and avoid sweeping up names like `MYSECRET`
+  // or `BIGTOKEN` that lack the conventional underscore separator.
   // Provider-prefixed names that didn't match a specific rule above fall
   // through to "unknown" (safer than auto-randoming a known-provider name).
   {
-    test: (n) => /(SECRET|TOKEN)$/.test(n) && !/^(STRIPE|SUPABASE|OPENAI|ANTHROPIC|CLERK)_/.test(n),
+    test: (n) => /_(SECRET|TOKEN)$/.test(n) && !/^(STRIPE|SUPABASE|OPENAI|ANTHROPIC|CLERK)_/.test(n),
     source: { kind: "random_32_bytes" },
   },
 ];
