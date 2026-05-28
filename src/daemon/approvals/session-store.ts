@@ -22,6 +22,21 @@ export class SessionStore {
 
   create(pattern: SessionPattern): SessionGrant {
     assertSessionPatternValid(pattern);
+    return this.createInternal(pattern, getCurrentAgentId());
+  }
+
+  /**
+   * Create a session pattern with the owner stamped EXPLICITLY rather than
+   * read from `getCurrentAgentId()`. Used by raw UI routes (which run without
+   * an ALS AuthContext) that act on behalf of a stored grant's owner.
+   * Mirrors the AuditActorSite.persisted-owner pattern.
+   */
+  createForOwner(pattern: SessionPattern, owner_agent_id: string): SessionGrant {
+    assertSessionPatternValid(pattern);
+    return this.createInternal(pattern, owner_agent_id);
+  }
+
+  private createInternal(pattern: SessionPattern, owner_agent_id: string): SessionGrant {
     const created = this.now();
     const grant: SessionGrant = {
       ...pattern,
@@ -32,7 +47,7 @@ export class SessionStore {
       approved_at: null,
       expires_at: created + PENDING_TTL_MS, // PENDING window; reset on approve
       uses: 0,
-      owner_agent_id: getCurrentAgentId(),
+      owner_agent_id,
     };
     this.grants.set(grant.id, grant);
     return grant;
