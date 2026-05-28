@@ -18,6 +18,7 @@ import { importCommand } from "./commands/import.js";
 import { provisionCommand } from "./commands/provision.js";
 import { internalCommand } from "./commands/internal.js";
 import { helpCommand } from "./commands/help.js";
+import { auditCommand } from "./commands/audit.js";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
 import { consumePendingDeprecationWarning } from "../shared/deprecation.js";
 
@@ -60,6 +61,7 @@ program.addCommand(bootstrapStub);
 
 program.addCommand(runCommand());
 program.addCommand(injectCommand());
+program.addCommand(auditCommand());
 program.addCommand(internalCommand(), { hidden: true });
 program.addCommand(helpCommand());
 

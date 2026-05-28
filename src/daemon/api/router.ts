@@ -28,6 +28,7 @@ import { registerBootstrapCaptureUi } from "./routes/bootstrap-capture-ui.js";
 import { registerTokens } from "./routes/tokens.js";
 import { registerWhoami } from "./routes/whoami.js";
 import { registerDaemonAdmin } from "./routes/daemon-admin.js";
+import { registerAuditSummaryRoute } from "./routes/audit-summary.js";
 
 export function registerRoutes(
   server: DaemonServer,
@@ -72,4 +73,7 @@ export function registerRoutes(
   registerTokens(server, () => server.getRootToken());
   registerWhoami(server);
   registerDaemonAdmin(server, daemonPortRef);
+  // Burst 5 §4 Task 4.6: owner-scoped audit summary + batch lookup with
+  // BootstrapStore-first / audit-log fallback for pruned batches.
+  registerAuditSummaryRoute(server, { bootstrapStore: services.bootstrapStore });
 }
