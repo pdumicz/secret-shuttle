@@ -108,13 +108,19 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   bootstrap_plan_invalid: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => "Edit secret-shuttle.yml to fix the schema error, then re-run.",
-    nextAction: () => "secret-shuttle provision --yml ./secret-shuttle.yml",
+    // No nextAction: the recovery command depends on which provision mode was
+    // running (--yml <path>, --infer, --secret), and the registry has no way
+    // to know which one. The human-readable message at the throw-site names
+    // the relevant file/mode; the agent reads that and retries with the
+    // right command.
+    nextAction: () => null,
   },
   bootstrap_capture_url_invalid: {
     exitCode: EXIT_CODE_USAGE,
     hint: () =>
       "source.url for kind=capture must be https, must not embed credentials, must not be an IP literal or localhost. Edit secret-shuttle.yml and re-run.",
-    nextAction: () => "secret-shuttle provision --yml ./secret-shuttle.yml",
+    // No nextAction: see bootstrap_plan_invalid above — mode-dependent.
+    nextAction: () => null,
   },
   bootstrap_capture_skipped: {
     exitCode: EXIT_CODE_TRANSIENT,
@@ -131,7 +137,8 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   bootstrap_destination_unknown: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => "Edit secret-shuttle.yml: replace the unknown destination shorthand with one of: vercel:<env>, github-actions:owner/repo, cloudflare:<env>, supabase:<projectref>.",
-    nextAction: () => "secret-shuttle provision --yml ./secret-shuttle.yml",
+    // No nextAction: see bootstrap_plan_invalid above — mode-dependent.
+    nextAction: () => null,
   },
   agent_id_namespace_violation: {
     exitCode: EXIT_CODE_USAGE,

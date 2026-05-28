@@ -46,7 +46,7 @@ export function provisionCommand(): Command {
     .option("--infer", "Generate a yml from .env.example + framework signals (default for new projects)")
     .option("--yml <file>", "Read an existing secret-shuttle.yml")
     .option("--secret <NAME>", "Single-secret inline (requires --from + --to)")
-    .option("--continue", "Resume an approved batch (requires --batch + --approval-id)")
+    .option("--continue", "Resume an approved batch (requires --batch; --approval-id only needed on the first /continue when batch is still pending)")
     .option("--list", "List in-flight batches")
     .option("--abandon", "Abandon a batch (requires --batch)")
     // Parameters:

@@ -216,22 +216,26 @@ test("error-codes: keychain_key_invalid registered with PERMISSION exit code + n
   assert.strictEqual(entry.nextAction!(""), "secret-shuttle unlock");
 });
 
-test("error-codes: bootstrap_plan_invalid registered with USAGE exit code + nextAction", () => {
-  // Burst 5 §1 P1.2 remediation: nextAction now points at the `provision --yml`
-  // verb (the `bootstrap` verb was removed by Task 1.7 and dead-ends through
-  // command_renamed). The recovery context here is "edit yml and retry."
+test("error-codes: bootstrap_plan_invalid registered with USAGE exit code + null nextAction (mode-dependent)", () => {
+  // Burst 5 §1 closeout: nextAction is null because the recovery command
+  // depends on which provision mode is in play (--yml <path>, --infer,
+  // --secret). The registry has no context to produce the right verb, so
+  // the human-readable message at the throw-site carries the recovery
+  // guidance and the agent picks the correct retry command.
   const entry = lookupErrorCode("bootstrap_plan_invalid");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_USAGE);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle provision --yml ./secret-shuttle.yml");
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — recovery command is mode-dependent");
 });
 
-test("error-codes: bootstrap_capture_url_invalid registered with USAGE exit code + nextAction + hint", () => {
-  // Burst 5 §1 P1.2 remediation: see bootstrap_plan_invalid above.
+test("error-codes: bootstrap_capture_url_invalid registered with USAGE exit code + null nextAction + hint", () => {
+  // Burst 5 §1 closeout: see bootstrap_plan_invalid above — mode-dependent recovery.
   const entry = lookupErrorCode("bootstrap_capture_url_invalid");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_USAGE);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle provision --yml ./secret-shuttle.yml");
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — recovery command is mode-dependent");
   assert.match(
     entry.hint("") ?? "",
     /https/,
@@ -355,12 +359,13 @@ test("error-codes: bootstrap_batch_not_found registered with NOT_FOUND exit code
   assert.strictEqual(next, null, "no automatic recovery — recovery context is ambiguous");
 });
 
-test("error-codes: bootstrap_destination_unknown registered with USAGE exit code + nextAction", () => {
-  // Burst 5 §1 P1.2 remediation: now points at `provision --yml` (edit yml and retry).
+test("error-codes: bootstrap_destination_unknown registered with USAGE exit code + null nextAction (mode-dependent)", () => {
+  // Burst 5 §1 closeout: see bootstrap_plan_invalid above — mode-dependent recovery.
   const entry = lookupErrorCode("bootstrap_destination_unknown");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_USAGE);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle provision --yml ./secret-shuttle.yml");
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — recovery command is mode-dependent");
 });
 
 test("error-codes: daemon_not_running has nextAction (mechanical recovery)", () => {

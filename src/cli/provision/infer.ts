@@ -45,7 +45,7 @@ export async function runInfer(opts: InferOptions): Promise<InferResult> {
   if (names.length === 0) {
     throw new ShuttleError(
       "infer_no_env_example",
-      ".env.example exists but contains no usable secret names (lines must be of the form NAME= or NAME=value with NAME matching /^[A-Z_][A-Z0-9_]*$/i).",
+      ".env.example exists but contains no usable secret names (lines must be of the form NAME= or NAME=value with NAME matching /^[A-Z][A-Z0-9_]*$/ — uppercase letter first, then uppercase letters, digits, and underscores).",
     );
   }
   const destinations = await detectDestinations(opts.cwd);
