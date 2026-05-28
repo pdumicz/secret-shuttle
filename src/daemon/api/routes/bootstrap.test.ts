@@ -511,6 +511,28 @@ test("POST /v1/bootstrap/continue: retry after failed_partial does NOT require f
       state!.status === "completed" || state!.status === "failed_partial",
       `unexpected batch status after retry: ${state!.status}`,
     );
+
+    // Burst 5 §4 Task 4.5: response carries batch_status + (when failed_partial)
+    // a copy-pasteable resume hint. The destination will fail again (no real
+    // binary), so we expect failed_partial here — but defensively the test
+    // assertion handles both terminal cases without relying on a specific
+    // failure cause.
+    const wireBody = r.body as { batch_status?: string; next_action?: string };
+    assert.equal(
+      wireBody.batch_status,
+      state!.status,
+      "response batch_status must mirror the on-disk state.status",
+    );
+    if (state!.status === "failed_partial") {
+      assert.equal(
+        wireBody.next_action,
+        `secret-shuttle provision --continue --batch ${batchId}`,
+        "failed_partial response must carry agent-actionable next_action",
+      );
+    } else {
+      // status === "completed" path: no next_action surfaced (terminal success).
+      assert.equal(wireBody.next_action, undefined, "completed batch must NOT carry next_action");
+    }
   });
 });
 

@@ -264,7 +264,7 @@ export function registerBootstrapRoutes(
       throw new ShuttleError("bootstrap_batch_not_found", `unknown batch_id: ${batchId}`);
     }
     if (state.status === "completed") {
-      return { ok: true, ...summarizeFromState(state) };
+      return { ok: true, batch_status: "completed", ...summarizeFromState(state) };
     }
 
     // C10: capture-conditional pre-flight blind guard. Runs AFTER owner check
@@ -394,7 +394,23 @@ export function registerBootstrapRoutes(
           daemonPortRef,
         };
         const result = await executeBatch(services.bootstrapStore, batchId, deps);
-        return { ok: true, ...result };
+        // Burst 5 §4 Task 4.5: surface batch_status + an agent-actionable
+        // resume hint when the batch ended failed_partial. The executor
+        // saved final state before returning (executor.ts:394) so re-read
+        // is consistent. Status "completed" and "abandoned" do NOT carry
+        // next_action — completed is terminal-success, abandoned is the
+        // user's explicit choice to walk away.
+        const finalState = await services.bootstrapStore.get(batchId);
+        const status = finalState?.status ?? "in_progress";
+        const isResumable = status === "failed_partial";
+        return {
+          ok: true,
+          batch_status: status,
+          ...result,
+          ...(isResumable
+            ? { next_action: `secret-shuttle provision --continue --batch ${batchId}` }
+            : {}),
+        };
       } finally {
         // Capture-conditional teardown: ALWAYS runs before lock release. If a
         // bootstrap-owned Chrome was actually killed AND blind is still active
