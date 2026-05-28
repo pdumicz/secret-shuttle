@@ -1471,17 +1471,19 @@ const execp = promisify(execFile);
 const CLI = join(process.cwd(), "dist/cli/index.js");
 
 test("`secret-shuttle bootstrap` exits 2 with command_renamed JSON pointing at provision", async () => {
-  let stdout = "";
+  // The top-level catch in src/cli/index.ts writes error JSON to STDERR
+  // (not stdout) and sets process.exitCode. Read e.stderr accordingly.
+  let stderr = "";
   let exitCode = 0;
   try {
     const r = await execp("node", [CLI, "bootstrap"]);
-    stdout = r.stdout;
+    stderr = r.stderr;
   } catch (e: any) {
-    stdout = e.stdout ?? "";
+    stderr = e.stderr ?? "";
     exitCode = e.code ?? 1;
   }
   assert.equal(exitCode, 2, `expected exit 2, got ${exitCode}`);
-  const parsed = JSON.parse(stdout);
+  const parsed = JSON.parse(stderr);
   assert.equal(parsed.ok, false);
   assert.equal(parsed.error_code, "command_renamed");
   assert.match(parsed.message, /provision/);
