@@ -65,6 +65,12 @@ export interface SessionPattern {
   allowed_actions?: string[];      // REQUIRED non-empty when actions includes secrets-set; entries validated against ALL_SECRET_ACTIONS
   ttl_ms: number;                  // 1_000 ≤ ttl_ms ≤ 900_000 (15 min)
   max_uses?: number;               // 1 ≤ max_uses ≤ 1000
+  required_params?: Record<string, string>;
+  // Applies ONLY to the template-run matcher branch. When present and
+  // non-empty, the template-run matcher requires the binding's
+  // template_params to contain every key here with strict-equal
+  // value. When absent/empty, today's matcher behavior is preserved.
+  // See Burst 5 spec §2 "Template-param constraint primitive".
 }
 
 export const PENDING_TTL_MS = 2 * 60 * 1000; // 2 minutes for human to approve
