@@ -220,7 +220,29 @@ export function registerUiRoutes(server: DaemonServer, deps: ApprovalsUiDeps): v
     }
 
     // ───── PHASE B: approve the main grant. Irreversible from here. ─────
-    deps.approvals.approve(id);
+    // approve() can throw (already approved/denied/expired between Phase A
+    // and now, or a state-machine invariant violation). If it does, we have
+    // NOT committed the main grant — so the all-or-nothing contract still
+    // requires rolling back Phase A's precreated PENDING sessions. Without
+    // this catch, they'd linger until TTL: not an authorization leak (they're
+    // pending, never reachable), but a contract violation visible to anyone
+    // listing the user's sessions.
+    try {
+      deps.approvals.approve(id);
+    } catch (approveErr) {
+      for (const sid of precreatedIds) {
+        try {
+          deps.sessions.revoke(sid);
+        } catch (revokeErr) {
+          console.warn(
+            `[secret-shuttle] approval ${id}: failed to roll back precreated session ${sid} after Phase B approve() threw: ${
+              revokeErr instanceof Error ? revokeErr.message : String(revokeErr)
+            }`,
+          );
+        }
+      }
+      throw approveErr;
+    }
 
     // ───── PHASE C: flip precreated sessions to granted. ─────
     // If approve() throws here (extremely unlikely — a non-pending session

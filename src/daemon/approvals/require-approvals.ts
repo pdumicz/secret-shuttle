@@ -202,13 +202,19 @@ export async function requireApprovals(
 
     // 2b. Auto-match owned active session (Burst 5 §2b Task 2b.6).
     // Only runs when the caller did NOT supply an explicit sessionId (the
-    // explicit path is more specific and takes precedence). Excluded for
-    // root tokens because they bypass owner filtering — auto-matching would
-    // let an admin token silently consume agent-owned slots.
+    // explicit path is more specific and takes precedence). Excluded for:
+    //   - "root" tokens — they bypass owner filtering; auto-matching would
+    //     let an admin token silently consume agent-owned slots.
+    //   - "daemon" — the no-ALS sentinel from getCurrentAgentId(). Also
+    //     reserved at the agent-id assertion level (see agent-id.ts), so
+    //     no real agent can present this id — but defense in depth: if a
+    //     handler ever skipped withAuthContext, auto-match would silently
+    //     attribute the call to the sentinel and could leak sessions.
     if (
       opts.sessionStore !== undefined &&
       opts.sessionId === undefined &&
-      callerAgentId !== "root"
+      callerAgentId !== "root" &&
+      callerAgentId !== "daemon"
     ) {
       const autoPlan = planFromAutoMatchedSession(
         binding,

@@ -251,6 +251,11 @@ test("formatDoctorText renders 'active sessions:' section when health.active_ses
   assert.match(text, /vercel-env-add/);
   assert.match(text, /name=STRIPE_KEY/);
   assert.match(text, /expires in 12 min/);
+  // The CLI must surface the full session id alongside a copy-pasteable
+  // revoke command. The store accepts only exact ids (session-store.ts:69),
+  // so a truncated id would not work. Closes the codex gate's P3 finding.
+  assert.match(text, /11111111-1111-1111-1111-111111111111/, "full session id must appear in active-sessions block");
+  assert.match(text, /secret-shuttle internal session revoke 11111111-1111-1111-1111-111111111111/, "revoke command must be copy-pasteable with full id");
 });
 
 test("formatDoctorText omits 'active sessions:' section when array is empty", () => {

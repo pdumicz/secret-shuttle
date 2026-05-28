@@ -56,12 +56,19 @@ export function formatDoctorText(report: DoctorReport): string {
     // sessions from the /v1/health body. Older daemons predate the field,
     // so missing/empty arrays render no section (defensive read).
     const activeSessions = (health as Record<string, unknown>)["active_sessions"] as
-      | Array<{ pattern_summary: string; minutes_remaining: number }>
+      | Array<{ id: string; pattern_summary: string; minutes_remaining: number }>
       | undefined;
     if (activeSessions !== undefined && activeSessions.length > 0) {
       lines.push(`active sessions:`);
       for (const s of activeSessions) {
+        // Surface the full id on the same block so the user can revoke
+        // without copy-paste from a separate list endpoint. The UI's
+        // session-affordance notice tells users they can revoke via
+        // `secret-shuttle internal session revoke <id>` — that command
+        // accepts only exact ids (no prefix matching at the store layer,
+        // see session-store.ts:69), so we render the full id verbatim.
         lines.push(`  - ${s.pattern_summary} (expires in ${s.minutes_remaining} min)`);
+        lines.push(`    revoke: secret-shuttle internal session revoke ${s.id}`);
       }
     }
   }
