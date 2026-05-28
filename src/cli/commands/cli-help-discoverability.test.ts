@@ -15,3 +15,14 @@ test("--help mentions AGENT QUICKSTART + SKILL.md", async () => {
   assert.match(r.stdout, /AGENT QUICKSTART/);
   assert.match(r.stdout, /SKILL\.md/);
 });
+
+test("`secret-shuttle help` subcommand mentions AGENT QUICKSTART + SKILL.md + new audit verb", async () => {
+  // Drift-guard: the `help` subcommand (separate from --help) is the curated
+  // grouped list. Codex review §3+§4 P2-2: it must point agents at the SKILL
+  // and surface the new `audit` verb. Without these the §3 / §4.6 work is
+  // silently undiscoverable from the curated help.
+  const r = await execp("node", [CLI, "help"]);
+  assert.match(r.stdout, /AGENT QUICKSTART/);
+  assert.match(r.stdout, /SKILL\.md/);
+  assert.match(r.stdout, /\baudit\b/);
+});

@@ -62,6 +62,10 @@ export function parseDuration(input: string): number {
 // runtime shape beyond what renderText inspects defensively.
 
 interface BatchStep {
+  // P2-3: optional `status` discriminator (added by the daemon to distinguish
+  // un-attempted steps from real failures). Older daemons emit only `ok`;
+  // renderer falls back to `ok` when `status` is absent.
+  status?: "ok" | "failed" | "pending";
   ok: boolean;
   ref?: string;
   source_kind?: string;
@@ -118,12 +122,24 @@ export function renderText(r: AuditSummaryResponse): string {
       lines.push(`batch ${batch.id}${status}${src}`);
       const steps = batch.steps ?? [];
       for (const step of steps) {
-        const mark = step.ok ? "ok " : "ERR";
+        // P2-3: prefer the daemon-provided `status` discriminator. Fall back
+        // to the legacy `ok` boolean (older daemons that don't set `status`).
+        // The three-way marker ("ok " / "ERR" / "...") makes un-attempted
+        // steps visually distinct from real failures.
+        const effectiveStatus =
+          step.status ?? (step.ok ? "ok" : "failed");
+        const mark =
+          effectiveStatus === "ok"
+            ? "ok "
+            : effectiveStatus === "pending"
+              ? "..."
+              : "ERR";
         const dests = (step.destinations ?? []).join(", ");
         const sourceKind = step.source_kind ?? "(unknown)";
         const arrow = dests.length > 0 ? ` -> ${dests}` : "";
         lines.push(`  ${mark}  ${step.ref ?? "(no ref)"}  ${sourceKind}${arrow}`);
-        if (!step.ok && step.error_code !== undefined) {
+        // Only real failures carry an error_code; pending steps haven't run.
+        if (effectiveStatus === "failed" && step.error_code !== undefined) {
           lines.push(`       error: ${step.error_code}`);
         }
       }

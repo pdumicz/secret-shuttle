@@ -641,6 +641,55 @@ secrets:
   });
 });
 
+test("POST /v1/bootstrap/plan: dev-env inline-execute on failed_partial surfaces batch_status + next_action", async () => {
+  // Burst 5 §4 Task 4.5 (P2-1 follow-up): the dev/no-approval inline-execute
+  // path at /v1/bootstrap/plan must carry the SAME batch_status + agent-actionable
+  // resume hint that /continue does. Before this fix the enrichment lived only on
+  // the /continue path, so agents hitting the inline path on a failed_partial
+  // outcome had no way to recover (no next_action), defeating the whole point
+  // of Task 4.5. The vercel CLI is not present in the test environment, so the
+  // single destination always fails → failed_partial.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  INLINE_FAIL_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    assert.equal(r.status, 200, `expected 200 inline-execute, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as { ok: boolean; batch_id: string; batch_status?: string; next_action?: string; failed: number };
+    assert.equal(body.ok, true);
+    assert.ok(typeof body.batch_id === "string" && body.batch_id.startsWith("bootstrap-"), "batch_id required");
+
+    // Verify the disk state went to failed_partial so the assertion below is meaningful.
+    const state = await ctx.services.bootstrapStore.get(body.batch_id);
+    assert.ok(state !== null, "batch must be persisted");
+    assert.equal(state!.status, "failed_partial", `expected failed_partial (vercel CLI not present in test env), got: ${state!.status}`);
+
+    // The fix: response carries batch_status mirroring on-disk state.
+    assert.equal(
+      body.batch_status,
+      "failed_partial",
+      "inline-execute /plan response must carry batch_status (P2-1 fix)",
+    );
+
+    // The fix: failed_partial response carries the agent-actionable resume hint.
+    assert.equal(
+      body.next_action,
+      `secret-shuttle provision --continue --batch ${body.batch_id}`,
+      "failed_partial inline-execute MUST surface next_action for agent recovery (P2-1 fix)",
+    );
+  });
+});
+
 test("POST /v1/bootstrap/plan: dev environment batch is idempotent — /continue with dev batch_id returns cached result", async () => {
   // After the fix, the batch is already in a terminal state after /plan.
   // Calling /continue with the returned batch_id must hit the "completed" short-circuit

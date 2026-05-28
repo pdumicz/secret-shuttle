@@ -66,6 +66,13 @@ function isAuditRow(v: unknown): v is AuditRow {
 // from a live BootstrapStore record or was reconstructed from audit-log rows.
 
 interface SerializedStep {
+  // P2-3: `status` discriminates ok / failed / pending. We keep `ok` as a
+  // legacy boolean compat field — true when status==="ok", false otherwise —
+  // so consumers that haven't been updated (older CLI versions, JSON readers
+  // outside this repo) still see something coherent. New consumers MUST
+  // branch on `status` to render pending (un-attempted) steps distinctly
+  // from failed steps.
+  status: "ok" | "failed" | "pending";
   ok: boolean;
   ref?: string;
   source_kind?: string;
@@ -154,9 +161,14 @@ function serializeBatchFromState(state: BatchState): SerializedBatch {
   for (const entry of state.plan) {
     const result = state.step_results[entry.secret];
     if (result === undefined) {
-      // Step not yet attempted — surface as a pending row so the human view
-      // matches the live BatchState semantics.
+      // P2-3 fix: step not yet attempted → emit status="pending" so the CLI
+      // can render it distinctly from a failure. Pre-fix this came through as
+      // `ok: false`, which the CLI rendered as "ERR" — exactly the same as a
+      // real failure, hiding the fact that the executor never tried this
+      // step. The `ok: false` legacy field is kept for back-compat with
+      // older readers (a not-yet-attempted step is also not-yet-ok).
       const pending: SerializedStep = {
+        status: "pending",
         ok: false,
         ref: entry.ref,
         source_kind: entry.source.kind,
@@ -169,6 +181,7 @@ function serializeBatchFromState(state: BatchState): SerializedBatch {
     const okCount = destsPushed.filter((d) => d.ok).length;
     const failedCount = destsPushed.filter((d) => !d.ok).length;
     const step: SerializedStep = {
+      status: result.ok ? "ok" : "failed",
       ok: result.ok,
       ref: result.ref ?? entry.ref,
       source_kind: entry.source.kind,
@@ -199,7 +212,12 @@ function reconstructBatchFromRows(rows: AuditRow[]): SerializedBatch {
   }
   const steps: SerializedStep[] = [];
   for (const row of byRef.values()) {
+    // Audit-log fallback: every row here corresponds to a bootstrap_step that
+    // actually ran (writeDaemonAudit only emits these on attempt), so status
+    // is always ok / failed — never pending. Pending steps live only in
+    // BatchState (the live-source path above).
     const step: SerializedStep = {
+      status: row.ok ? "ok" : "failed",
       ok: row.ok,
       ...(row.ref !== undefined ? { ref: row.ref } : {}),
       ...(row.source_kind !== undefined ? { source_kind: row.source_kind } : {}),

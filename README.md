@@ -62,15 +62,15 @@ The daemon owns every secret moment. The agent sees refs and status, never raw v
 ## Quickstart
 
 ```bash
-secret-shuttle generate \
-  --name INTERNAL_CRON_SECRET \
+secret-shuttle provision --secret INTERNAL_CRON_SECRET \
   --env production \
   --kind random_32_bytes \
-  --allow-domain vercel.com
+  --to vercel:production
 # (production secret — approve in the window the daemon opens)
 
-secret-shuttle list --env production
-secret-shuttle inspect ss://local/prod/INTERNAL_CRON_SECRET
+secret-shuttle secrets list --env production
+secret-shuttle secrets get-ref ss://local/prod/INTERNAL_CRON_SECRET
+secret-shuttle audit --since=1d
 ```
 
 For the full browser walkthrough see [examples/stripe-to-vercel/walkthrough.md](examples/stripe-to-vercel/walkthrough.md).

@@ -118,6 +118,74 @@ test("renderText: audit-reconstructed batch → '(reconstructed from audit log)'
   assert.match(out, /error: destination_unreachable/);
 });
 
+test("renderText: mixed ok/failed/pending batch renders three distinct status markers", () => {
+  // P2-3: pending steps (status="pending") must render as "..." — not "ERR" —
+  // so the human can see that the executor hasn't attempted that step yet.
+  // Real failures (status="failed") still get "ERR" + the error_code line.
+  const out = renderText({
+    since: "5m",
+    summary: {
+      batches: [
+        {
+          id: "mixed",
+          status: "failed_partial",
+          source: "live",
+          steps: [
+            { status: "ok", ok: true, ref: "ss://local/prod/A", source_kind: "random_32_bytes" },
+            {
+              status: "failed",
+              ok: false,
+              ref: "ss://local/prod/B",
+              source_kind: "random_64_bytes",
+              error_code: "template_exec_failed",
+            },
+            {
+              status: "pending",
+              ok: false,
+              ref: "ss://local/prod/C",
+              source_kind: "random_32_bytes",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  // Each marker appears exactly where it should.
+  assert.match(out, /ok\s+ss:\/\/local\/prod\/A/);
+  assert.match(out, /ERR\s+ss:\/\/local\/prod\/B/);
+  assert.match(out, /\.\.\.\s+ss:\/\/local\/prod\/C/);
+  // Real failure carries error_code line; pending step does NOT.
+  assert.match(out, /error: template_exec_failed/);
+  // Pending step ref does NOT appear on an "error:" line.
+  const pendingErrorLine = new RegExp(
+    `error:.*ss:\\/\\/local\\/prod\\/C`,
+  );
+  assert.doesNotMatch(out, pendingErrorLine);
+});
+
+test("renderText: legacy step shape without `status` field still renders (back-compat)", () => {
+  // Older daemons emit `ok: boolean` without the new `status` discriminator.
+  // The renderer must fall back to the `ok` field so a mixed cluster (newer
+  // CLI talking to an older daemon) doesn't crash or mis-render.
+  const out = renderText({
+    summary: {
+      batches: [
+        {
+          id: "legacy",
+          source: "audit",
+          steps: [
+            { ok: true, ref: "ss://local/dev/legacy-ok" },
+            { ok: false, ref: "ss://local/dev/legacy-err", error_code: "destination_unreachable" },
+          ],
+        },
+      ],
+    },
+  });
+  assert.match(out, /ok\s+ss:\/\/local\/dev\/legacy-ok/);
+  assert.match(out, /ERR\s+ss:\/\/local\/dev\/legacy-err/);
+  assert.match(out, /error: destination_unreachable/);
+});
+
 test("renderText: individual_ops section renders user-facing actions", () => {
   const out = renderText({
     summary: {

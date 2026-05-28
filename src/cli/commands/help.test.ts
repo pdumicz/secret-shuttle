@@ -3,14 +3,23 @@ import assert from "node:assert/strict";
 import { Command } from "commander";
 import { renderTopLevelHelp, helpCommand } from "./help.js";
 
-test("renderTopLevelHelp output groups commands and stays under 30 lines", () => {
+test("renderTopLevelHelp output groups commands and stays compact (under ~45 lines)", () => {
   const output = renderTopLevelHelp();
   const lines = output.split("\n");
-  assert.ok(lines.length <= 34, `expected ≤34 lines, got ${lines.length}`); // 30 + small buffer
+  // Burst 5 §3+§4 P2-2: the curated help now includes the AGENT QUICKSTART
+  // block (4 lines pointing agents at SKILL.md + the raw URL) and the
+  // Audit & history group (3 lines for the new `audit` verb). Hard cap
+  // raised from 34 → 45 to accommodate both, with a small buffer.
+  assert.ok(lines.length <= 45, `expected ≤45 lines, got ${lines.length}`);
+  // AGENT QUICKSTART line must be present (P2-2 fix: discoverability for
+  // agents reading the curated help instead of --help).
+  assert.match(output, /AGENT QUICKSTART/);
+  assert.match(output, /SKILL\.md/);
   // Spot-check the groups are present:
   assert.match(output, /Setup/);
   assert.match(output, /Secrets/);
   assert.match(output, /Provider integration/);
+  assert.match(output, /Audit & history/);
   assert.match(output, /Agent/);
   // Spot-check a few commands are listed:
   assert.match(output, /\binit\b/);
@@ -19,6 +28,8 @@ test("renderTopLevelHelp output groups commands and stays under 30 lines", () =>
   // Plan 3 commands must appear under Provider integration:
   assert.match(output, /\brun\b/);
   assert.match(output, /\binject\b/);
+  // Burst 5 §4.6 audit verb must appear under Audit & history (P2-2 fix).
+  assert.match(output, /\baudit\b/);
   // Public recovery commands MUST appear — registry hints + status.next_action
   // emit these as bare top-level commands, so the curated help has to surface
   // them too, or agents reading help will look for the wrong place.

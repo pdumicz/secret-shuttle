@@ -190,6 +190,130 @@ test("POST /v1/audit/summary: --batch reads BootstrapStore first (source=live)",
   });
 });
 
+test("POST /v1/audit/summary: --batch live state emits status=ok/failed/pending discriminators", async () => {
+  // P2-3 regression: mixed-state batch must surface ok / failed / pending as
+  // three distinct statuses on each serialized step. Before the fix, the
+  // un-attempted (pending) step came through as `ok: false`, which the CLI
+  // rendered identically to a real failure ("ERR") — hiding the fact that the
+  // executor never tried it. The legacy `ok` boolean is preserved for
+  // back-compat (false for both failed and pending), but new readers MUST
+  // branch on `status`.
+  await withDaemon(async (ctx) => {
+    const batchId = "mixed-state-batch";
+    await ctx.services.bootstrapStore.save({
+      batch_id: batchId,
+      approval_id: "approval-mixed",
+      plan_file_path: "/tmp/mixed.yml",
+      plan: [
+        {
+          secret: "OK_SECRET",
+          ref: "ss://local/prod/OK_SECRET",
+          source: { kind: "random_32_bytes" },
+          destinations: [
+            {
+              shorthand: "vercel:production",
+              template_id: "vercel-env-add",
+              template_params: { name: "OK_SECRET", environment: "production" },
+              domain: "vercel.com",
+            },
+          ],
+        },
+        {
+          secret: "FAIL_SECRET",
+          ref: "ss://local/prod/FAIL_SECRET",
+          source: { kind: "random_64_bytes" },
+          destinations: [
+            {
+              shorthand: "vercel:production",
+              template_id: "vercel-env-add",
+              template_params: { name: "FAIL_SECRET", environment: "production" },
+              domain: "vercel.com",
+            },
+          ],
+        },
+        {
+          secret: "PENDING_SECRET",
+          ref: "ss://local/prod/PENDING_SECRET",
+          source: { kind: "random_32_bytes" },
+          destinations: [
+            {
+              shorthand: "github-actions:prod",
+              template_id: "github-actions-secret-set",
+              template_params: { name: "PENDING_SECRET", environment: "production" },
+              domain: "github.com",
+            },
+          ],
+        },
+      ],
+      step_results: {
+        // Only the first two are attempted; PENDING_SECRET has no entry → pending.
+        OK_SECRET: {
+          ok: true,
+          ref: "ss://local/prod/OK_SECRET",
+          destinations_pushed: [{ destination: "vercel:production", ok: true }],
+        },
+        FAIL_SECRET: {
+          ok: false,
+          ref: "ss://local/prod/FAIL_SECRET",
+          destinations_pushed: [
+            {
+              destination: "vercel:production",
+              ok: false,
+              error_code: "template_exec_failed",
+              message: "exit 1",
+            },
+          ],
+          error_code: "destination_partial_failure",
+        },
+      },
+      created_at: Date.now(),
+      status: "failed_partial",
+      owner_agent_id: "claude-mixed",
+    });
+
+    const bearer = agentBearer(ctx.token, "claude-mixed");
+    const r = await callWithBearer(ctx, bearer, "POST", "/v1/audit/summary", {
+      batch_id: batchId,
+    });
+    assert.equal(r.status, 200, `expected 200, got ${r.status} body=${JSON.stringify(r.body)}`);
+
+    const body = r.body as {
+      summary: {
+        batches: Array<{
+          id: string;
+          source: string;
+          steps: Array<{ status?: string; ok: boolean; ref?: string; error_code?: string }>;
+        }>;
+      };
+    };
+    assert.equal(body.summary.batches.length, 1, "expected exactly one batch");
+    const steps = body.summary.batches[0]!.steps;
+    assert.equal(steps.length, 3, `expected 3 steps (1 ok, 1 failed, 1 pending), got: ${steps.length}`);
+
+    // Map by ref for deterministic assertions independent of plan ordering.
+    const byRef = new Map(steps.map((s) => [s.ref ?? "", s]));
+    const okStep = byRef.get("ss://local/prod/OK_SECRET");
+    const failStep = byRef.get("ss://local/prod/FAIL_SECRET");
+    const pendStep = byRef.get("ss://local/prod/PENDING_SECRET");
+    assert.ok(okStep !== undefined, "OK step must be present");
+    assert.ok(failStep !== undefined, "FAIL step must be present");
+    assert.ok(pendStep !== undefined, "PENDING step must be present");
+
+    // The fix: three distinct status values.
+    assert.equal(okStep!.status, "ok", `OK step status must be "ok", got: ${okStep!.status}`);
+    assert.equal(failStep!.status, "failed", `FAILED step status must be "failed", got: ${failStep!.status}`);
+    assert.equal(pendStep!.status, "pending", `PENDING step status must be "pending" (P2-3 fix), got: ${pendStep!.status}`);
+
+    // Legacy `ok` field still preserved for back-compat: true on ok, false on both fail and pending.
+    assert.equal(okStep!.ok, true, "legacy ok must remain true for ok step");
+    assert.equal(failStep!.ok, false, "legacy ok must remain false for failed step");
+    assert.equal(pendStep!.ok, false, "legacy ok must remain false for pending step (back-compat)");
+
+    // Pending steps MUST NOT carry an error_code — they haven't run.
+    assert.equal(pendStep!.error_code, undefined, "pending step must not have error_code");
+  });
+});
+
 test("POST /v1/audit/summary: --batch falls back to audit log when batch is pruned", async () => {
   // No live state in BootstrapStore — only audit-log rows. Response must
   // carry source=audit and details.reconstructed_from=audit so consumers can

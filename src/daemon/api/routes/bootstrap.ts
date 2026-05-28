@@ -7,11 +7,11 @@ import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { parseBootstrapYml } from "../../../cli/bootstrap/yml.js";
 import { computeBootstrapPlan } from "../../bootstrap/plan.js";
-import { executeBatch, type ExecutorDeps } from "../../bootstrap/executor.js";
+import { executeBatch, type ExecuteResult, type ExecutorDeps } from "../../bootstrap/executor.js";
 import type { DaemonServer } from "../../server.js";
 import type { BootstrapBrowserLease, DaemonServices } from "../../services.js";
 import type { ApprovalBinding } from "../../approvals/store.js";
-import type { BatchState, PlanEntry } from "../../bootstrap/store.js";
+import type { BatchState, BootstrapStore, PlanEntry } from "../../bootstrap/store.js";
 
 // Cores from Task I:
 import { generateSecretCore } from "./secrets.js";
@@ -177,7 +177,12 @@ export function registerBootstrapRoutes(
         ok: true,
         ...(grant?.id !== undefined && grant.id !== "no-approval-required" ? { approval_id: grant.id } : {}),
       });
-      return { ok: true, batch_id: batchId, ...result };
+      // Burst 5 §4 Task 4.5 (P2-1 follow-up): inline-execute path must mirror
+      // /continue's batch_status + resume hint contract. Without this, agents
+      // hitting the dev/no-approval inline path on a failed_partial outcome
+      // would miss the agent-actionable `next_action` field they rely on.
+      const decorated = await decorateWithBatchStatus(result, services.bootstrapStore, batchId);
+      return { ok: true, batch_id: batchId, ...decorated };
     } catch (e) {
       if (e instanceof ShuttleError && e.code === "approval_required") {
         const details = e.details as { approvals: Array<{ approval_id: string; expires_at: number; action: string }> } | undefined;
@@ -399,18 +404,10 @@ export function registerBootstrapRoutes(
         // saved final state before returning (executor.ts:394) so re-read
         // is consistent. Status "completed" and "abandoned" do NOT carry
         // next_action — completed is terminal-success, abandoned is the
-        // user's explicit choice to walk away.
-        const finalState = await services.bootstrapStore.get(batchId);
-        const status = finalState?.status ?? "in_progress";
-        const isResumable = status === "failed_partial";
-        return {
-          ok: true,
-          batch_status: status,
-          ...result,
-          ...(isResumable
-            ? { next_action: `secret-shuttle provision --continue --batch ${batchId}` }
-            : {}),
-        };
+        // user's explicit choice to walk away. Shared with the /plan
+        // inline-execute path via decorateWithBatchStatus.
+        const decorated = await decorateWithBatchStatus(result, services.bootstrapStore, batchId);
+        return { ok: true, ...decorated };
       } finally {
         // Capture-conditional teardown: ALWAYS runs before lock release. If a
         // bootstrap-owned Chrome was actually killed AND blind is still active
@@ -497,6 +494,37 @@ export function registerBootstrapRoutes(
       })),
     };
   });
+}
+
+/**
+ * Decorate an ExecuteResult with the post-execute batch_status and a
+ * conditional agent-actionable resume hint (next_action).
+ *
+ * Shared by both /plan inline-execute and /continue: the response shape MUST
+ * match across the two paths so agents can rely on `batch_status` to drive
+ * their next action — and a failed_partial outcome MUST carry the exact
+ * resume command, regardless of which entry point produced it.
+ *
+ * Re-reads state from the store because the executor mutates state on disk
+ * during the run (executor.ts:394 saves before returning) and we want the
+ * canonical final status. Status "completed" and "abandoned" do NOT carry
+ * next_action: completed is terminal-success and abandoned is the user's
+ * explicit choice to walk away.
+ */
+async function decorateWithBatchStatus(
+  result: ExecuteResult,
+  bootstrapStore: BootstrapStore,
+  batchId: string,
+): Promise<ExecuteResult & { batch_status: BatchState["status"]; next_action?: string }> {
+  const state = await bootstrapStore.get(batchId);
+  const status: BatchState["status"] = state?.status ?? "in_progress";
+  return {
+    ...result,
+    batch_status: status,
+    ...(status === "failed_partial"
+      ? { next_action: `secret-shuttle provision --continue --batch ${batchId}` }
+      : {}),
+  };
 }
 
 function buildPlanSummary(plan: PlanEntry[]): Array<{ name: string; source: string; destinations: string[] }> {
