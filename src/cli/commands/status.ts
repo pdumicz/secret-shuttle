@@ -52,6 +52,18 @@ export function formatDoctorText(report: DoctorReport): string {
       }
       lines.push(`agentic flows: unavailable (${advice})`);
     }
+    // Burst 5 §2b Task 2b.7: surface the caller's owner-scoped active
+    // sessions from the /v1/health body. Older daemons predate the field,
+    // so missing/empty arrays render no section (defensive read).
+    const activeSessions = (health as Record<string, unknown>)["active_sessions"] as
+      | Array<{ pattern_summary: string; minutes_remaining: number }>
+      | undefined;
+    if (activeSessions !== undefined && activeSessions.length > 0) {
+      lines.push(`active sessions:`);
+      for (const s of activeSessions) {
+        lines.push(`  - ${s.pattern_summary} (expires in ${s.minutes_remaining} min)`);
+      }
+    }
   }
   return lines.join("\n") + "\n";
 }
