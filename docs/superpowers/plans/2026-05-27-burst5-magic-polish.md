@@ -685,7 +685,9 @@ test("missing .env.example → infer_no_env_example", async () => {
   try {
     await assert.rejects(
       runInfer({ cwd: dir }),
-      (err: any) => err.error_code === "infer_no_env_example",
+      // ShuttleError exposes `.code` (instance field per src/shared/errors.ts:22).
+      // `error_code` is the JSON wire-shape key — only present after errorToJson().
+      (err: any) => err.code === "infer_no_env_example",
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -850,14 +852,31 @@ export async function runInfer(opts: InferOptions): Promise<InferResult> {
 }
 
 function parseEnvExampleNames(content: string): string[] {
+  // Tighter than the dotenv standard:
+  // - Names must match yml.ts's strict regex (uppercase + digits + _ only),
+  //   so an infer-generated yml will always parse cleanly via
+  //   parseBootstrapYml. Without this, mixed-case names slip through
+  //   infer and fail at `provision --yml`.
+  // - Shell-style `export VAR=` prefix is stripped so common .env.example
+  //   formats don't silently drop entries.
+  // - Duplicates are deduplicated first-wins; a second occurrence of a
+  //   name is logged via a dropped_duplicates record (see InferResult).
+  //   Without this, a copy-paste-duplicate .env.example produces a yml
+  //   that fails the strict parser with "Map keys must be unique."
   const names: string[] = [];
+  const seen = new Set<string>();
   for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
+    let line = rawLine.trim();
     if (line.length === 0 || line.startsWith("#")) continue;
+    // Strip optional `export ` prefix
+    line = line.replace(/^export\s+/, "");
     const eq = line.indexOf("=");
     if (eq <= 0) continue;
     const name = line.slice(0, eq).trim();
-    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) names.push(name);
+    if (!/^[A-Z][A-Z0-9_]*$/.test(name)) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
   }
   return names;
 }
