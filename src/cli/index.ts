@@ -2,16 +2,12 @@
 import { Command } from "commander";
 import { browserCommand } from "./commands/browser.js";
 import { daemonCommand } from "./commands/daemon.js";
-import { generateCommand } from "./commands/generate.js";
 import { initCommand } from "./commands/init.js";
 import { injectSubmitCommand } from "./commands/inject-submit.js";
 import { revealCaptureCommand } from "./commands/reveal-capture.js";
-import { inspectCommand } from "./commands/inspect.js";
-import { listCommand } from "./commands/list.js";
 import { unlockCommand } from "./commands/unlock.js";
 import { templateCommand } from "./commands/template.js";
 import { migrateCommand } from "./commands/migrate.js";
-import { doctorCommand } from "./commands/doctor.js";
 import { statusCommand } from "./commands/status.js";
 import { agentCommand } from "./commands/agent.js";
 import { secretsCommand } from "./commands/secrets/index.js";
@@ -19,7 +15,7 @@ import { keychainCommand } from "./commands/keychain/index.js";
 import { runCommand } from "./commands/run.js";
 import { injectCommand } from "./commands/inject.js";
 import { importCommand } from "./commands/import.js";
-import { bootstrapCommand } from "./commands/bootstrap.js";
+import { provisionCommand } from "./commands/provision.js";
 import { internalCommand } from "./commands/internal.js";
 import { helpCommand } from "./commands/help.js";
 import { ShuttleError, errorToJson } from "../shared/errors.js";
@@ -36,20 +32,32 @@ program.addCommand(initCommand());
 program.addCommand(browserCommand());
 program.addCommand(injectSubmitCommand());
 program.addCommand(revealCaptureCommand());
-program.addCommand(generateCommand());
-program.addCommand(listCommand());
-program.addCommand(inspectCommand());
 program.addCommand(unlockCommand());
 program.addCommand(templateCommand());
 program.addCommand(daemonCommand());
 program.addCommand(migrateCommand());
-program.addCommand(doctorCommand());
 program.addCommand(statusCommand());
 program.addCommand(agentCommand());
 program.addCommand(secretsCommand());
 program.addCommand(keychainCommand());
 program.addCommand(importCommand());
-program.addCommand(bootstrapCommand());
+program.addCommand(provisionCommand());
+
+// Stub `bootstrap` so running it surfaces command_renamed via the top-level
+// catch in src/cli/index.ts:62 (writes JSON to stderr, sets exitCode).
+// DO NOT outputJson + process.exit here — that bypasses the top-level
+// deprecation-warning handling and writes to stdout instead of stderr.
+const bootstrapStub = new Command("bootstrap")
+  .description("Renamed to `provision` in v0.3.0.")
+  .allowUnknownOption()
+  .action(() => {
+    throw new ShuttleError(
+      "command_renamed",
+      "The `bootstrap` verb was renamed to `provision` in v0.3.0. Re-run with `secret-shuttle provision <same flags>`.",
+    );
+  });
+program.addCommand(bootstrapStub);
+
 program.addCommand(runCommand());
 program.addCommand(injectCommand());
 program.addCommand(internalCommand(), { hidden: true });
