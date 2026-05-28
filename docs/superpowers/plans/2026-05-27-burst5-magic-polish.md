@@ -828,6 +828,12 @@ export async function runInfer(opts: InferOptions): Promise<InferResult> {
   }
 
   const names = parseEnvExampleNames(envContent);
+  if (names.length === 0) {
+    throw new ShuttleError(
+      "infer_no_env_example",
+      ".env.example exists but contains no usable secret names (lines must be of the form NAME= or NAME=value with NAME matching /^[A-Z_][A-Z0-9_]*$/i).",
+    );
+  }
   const destinations = await detectDestinations(opts.cwd);
 
   const entries: InferredPlanEntry[] = names.map((name) => {
@@ -1095,6 +1101,7 @@ interface ProvisionOpts {
   abandon?: boolean;
   dryRun?: boolean;
   force?: boolean;
+  environment?: string;
   from?: string;
   url?: string;
   ref?: string;
@@ -1120,7 +1127,8 @@ export function provisionCommand(): Command {
     .option("--to <dest[,dest...]>", "Comma-separated destination shorthands")
     .option("--batch <id>", "Batch id (with --continue or --abandon)")
     .option("--dry-run", "Print planned yml to stdout, no file write, no batch (--infer only)")
-    .option("--force", "Overwrite existing yml (--infer only)");
+    .option("--force", "Overwrite existing yml (--infer) AND force re-push / regenerate at the daemon (--yml/--secret/--infer)")
+    .option("--environment <env>", "Target environment for non-prod ref creation (passed to daemon)");
   addApprovalIdOption(cmd);
   cmd.action(async (raw: ProvisionOpts) => {
     // Follow project convention: commands throw; src/cli/index.ts:62 catches
@@ -1237,12 +1245,15 @@ async function runInferMode(opts: ProvisionOpts): Promise<void> {
   await runYmlMode(ymlPath, opts);
 }
 
-async function runYmlMode(ymlPath: string, _opts: ProvisionOpts): Promise<void> {
+async function runYmlMode(ymlPath: string, opts: ProvisionOpts): Promise<void> {
   // Hands off to the existing bootstrap plan route (server-side route name
   // kept per spec; internal-only). Route body shape per
   // src/daemon/api/routes/bootstrap.ts:32 is `{ plan_yml, force?, environment? }`.
   const ymlText = await readFile(ymlPath, "utf8");
-  const r = await daemonRequest("POST", "/v1/bootstrap/plan", { plan_yml: ymlText });
+  const body: Record<string, unknown> = { plan_yml: ymlText };
+  if (opts.force === true) body.force = true;
+  if (opts.environment !== undefined) body.environment = opts.environment;
+  const r = await daemonRequest("POST", "/v1/bootstrap/plan", body);
   outputJson(ok(r as Record<string, unknown>));
 }
 
@@ -1271,7 +1282,10 @@ async function runSecretMode(opts: ProvisionOpts): Promise<void> {
     },
   };
   const ymlText: string = yamlStringify(planDoc);
-  const r = await daemonRequest("POST", "/v1/bootstrap/plan", { plan_yml: ymlText });
+  const body: Record<string, unknown> = { plan_yml: ymlText };
+  if (opts.force === true) body.force = true;
+  if (opts.environment !== undefined) body.environment = opts.environment;
+  const r = await daemonRequest("POST", "/v1/bootstrap/plan", body);
   outputJson(ok(r as Record<string, unknown>));
 }
 
@@ -1316,13 +1330,14 @@ function buildSecretSourceObject(opts: ProvisionOpts): Record<string, string> {
 
 async function runContinueMode(opts: ProvisionOpts): Promise<void> {
   if (!opts.batch) throw new ShuttleError("missing_param", "--continue requires --batch <id>.");
-  if (!opts.approvalId || opts.approvalId.length === 0) {
-    throw new ShuttleError("missing_param", "--continue requires at least one --approval-id <id>.");
+  // approval_ids only required on the FIRST /continue (when batch status is
+  // still "pending"). Retries for in_progress / failed_partial are
+  // authorized by batch_id alone — see src/daemon/api/routes/bootstrap.ts:292.
+  const body: Record<string, unknown> = { batch_id: opts.batch };
+  if (opts.approvalId !== undefined && opts.approvalId.length > 0) {
+    body.approval_ids = opts.approvalId;
   }
-  const r = await daemonRequest("POST", "/v1/bootstrap/continue", {
-    batch_id: opts.batch,
-    approval_ids: opts.approvalId,
-  });
+  const r = await daemonRequest("POST", "/v1/bootstrap/continue", body);
   outputJson(ok(r as Record<string, unknown>));
 }
 
