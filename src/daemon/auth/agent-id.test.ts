@@ -16,6 +16,19 @@ test("assertAgentIdValid rejects 'root' (reserved) with agent_id_invalid", () =>
   );
 });
 
+test("assertAgentIdValid rejects 'daemon' (reserved no-ALS sentinel) with agent_id_invalid", () => {
+  // Burst 5 §2b codex-gate finding: getCurrentAgentId() returns "daemon"
+  // as the no-ALS sentinel. If "daemon" were a valid agent id, a privileged
+  // actor could mint a "daemon"-named token whose auto-matched sessions
+  // would collide with the sentinel-based defensive excludes elsewhere
+  // (health route filter, require-approvals auto-match guard). Reserving
+  // at the producer side closes that conflation.
+  assert.throws(
+    () => assertAgentIdValid("daemon"),
+    (e: unknown) => e instanceof ShuttleError && e.code === "agent_id_invalid",
+  );
+});
+
 test("assertAgentIdValid rejects empty / bad-charset / leading-dash / uppercase / too-long", () => {
   for (const id of ["", "-abc", "ABC", "a/b", "x@y", "1abc", "a".repeat(65)]) {
     assert.throws(

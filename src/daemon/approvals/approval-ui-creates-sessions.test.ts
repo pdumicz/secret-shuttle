@@ -222,3 +222,61 @@ test("if any createForOwner throws, previously-minted grants in the batch roll b
     );
   });
 });
+
+test("if Phase B approvals.approve() throws, Phase A's precreated sessions are revoked", async () => {
+  // Burst 5 §2b codex-gate finding: Phase B was previously unguarded.
+  // If approve() throws (already approved/denied/expired between Phase A
+  // and Phase B, or a state-machine invariant violation), the precreated
+  // PENDING sessions from Phase A used to linger until TTL — a contract
+  // violation of the stated all-or-nothing semantics. Pin the fix.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const { approvalId, uiToken } = await mintBootstrapApproval(ctx);
+
+    // Stub approve() to throw. createForOwner runs unmodified (so Phase A
+    // succeeds and we have precreated sessions to roll back).
+    Object.defineProperty(ctx.services.approvals, "approve", {
+      configurable: true,
+      value: function (_id: string): never {
+        throw new Error("stub: simulated Phase B approve() failure");
+      },
+    });
+
+    const res = await fetch(
+      `http://127.0.0.1:${ctx.port}/ui/approvals/${approvalId}/approve?token=${uiToken}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session: { ttl_minutes: 15 } }),
+      },
+    );
+    assert.notEqual(
+      res.status,
+      200,
+      `approve POST should have failed on Phase B throw; got status ${res.status}`,
+    );
+
+    // Main grant must NOT be granted — the stub threw before mutation.
+    assert.equal(
+      ctx.services.approvals.get(approvalId)?.status,
+      "pending",
+      "main grant should still be pending after Phase B failure",
+    );
+
+    // Phase A created sessions; the catch must have revoked them all.
+    // Zero granted, zero pending; everything in the store is "revoked".
+    const sessions = ctx.services.sessionStore.list();
+    assert.ok(
+      sessions.length > 0,
+      "Phase A must have precreated at least one session (otherwise the test isn't exercising the rollback)",
+    );
+    const allRevoked = sessions.every((s) => s.status === "revoked");
+    assert.ok(
+      allRevoked,
+      `every Phase A session must be revoked after Phase B failure; got: ${JSON.stringify(
+        sessions.map((s) => ({ id: s.id, status: s.status })),
+      )}`,
+    );
+  });
+});
