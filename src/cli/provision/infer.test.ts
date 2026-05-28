@@ -100,3 +100,48 @@ test("env.example with comment lines and blank lines parses correctly", async ()
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("env.example with `export VAR=` prefix is parsed correctly", async () => {
+  const dir = await setupTmp();
+  try {
+    await writeFile(join(dir, ".env.example"), "export STRIPE_SECRET_KEY=\nexport INTERNAL_TOKEN=\n");
+    await writeFile(join(dir, "vercel.json"), "{}");
+    const r = await runInfer({ cwd: dir });
+    assert.match(r.yml, /STRIPE_SECRET_KEY/);
+    assert.match(r.yml, /INTERNAL_TOKEN/);
+    assert.equal((r.yml.match(/^  [A-Z]/gm) ?? []).length, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("env.example with lowercase or mixed-case names is silently skipped (yml.ts rejects them downstream)", async () => {
+  const dir = await setupTmp();
+  try {
+    await writeFile(join(dir, ".env.example"), "lowercase_name=\nMixedCase=\nSTRIPE_SECRET_KEY=\n");
+    await writeFile(join(dir, "vercel.json"), "{}");
+    const r = await runInfer({ cwd: dir });
+    // Only the uppercase name survives the strict regex.
+    assert.match(r.yml, /STRIPE_SECRET_KEY/);
+    assert.doesNotMatch(r.yml, /lowercase_name/);
+    assert.doesNotMatch(r.yml, /MixedCase/);
+    assert.equal((r.yml.match(/^  [A-Z]/gm) ?? []).length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("env.example with duplicate names dedupes first-wins (does not emit a yml that breaks the parser)", async () => {
+  const dir = await setupTmp();
+  try {
+    await writeFile(join(dir, ".env.example"), "STRIPE_SECRET_KEY=\nSTRIPE_SECRET_KEY=\nINTERNAL_TOKEN=\n");
+    await writeFile(join(dir, "vercel.json"), "{}");
+    const r = await runInfer({ cwd: dir });
+    assert.match(r.yml, /STRIPE_SECRET_KEY/);
+    assert.match(r.yml, /INTERNAL_TOKEN/);
+    // Exactly two entries (not three).
+    assert.equal((r.yml.match(/^  [A-Z]/gm) ?? []).length, 2);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
