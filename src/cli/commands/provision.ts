@@ -11,10 +11,9 @@
  * See spec §1.
  */
 import { Command } from "commander";
-import { writeFile, access, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, writeFile, access, stat } from "node:fs/promises";
 import { stringify as yamlStringify } from "yaml";
-import { ShuttleError, errorToJson } from "../../shared/errors.js";
+import { ShuttleError } from "../../shared/errors.js";
 import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
 import { runInfer } from "../provision/infer.js";
@@ -177,7 +176,7 @@ async function runYmlMode(ymlPath: string, _opts: ProvisionOpts): Promise<void> 
   // Hands off to the existing bootstrap plan route (server-side route name
   // kept per spec; internal-only). Route body shape per
   // src/daemon/api/routes/bootstrap.ts:32 is `{ plan_yml, force?, environment? }`.
-  const ymlText = await import("node:fs/promises").then((m) => m.readFile(ymlPath, "utf8"));
+  const ymlText = await readFile(ymlPath, "utf8");
   const r = await daemonRequest("POST", "/v1/bootstrap/plan", { plan_yml: ymlText });
   outputJson(ok(r as Record<string, unknown>));
 }
