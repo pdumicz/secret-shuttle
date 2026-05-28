@@ -258,14 +258,17 @@ test("provision --infer with pre-existing yml (no --environment): infer_yml_exis
   }
 });
 
-test("provision --infer --environment 'staging; ls' is rejected with bad_request (shell injection guard)", async () => {
+test("provision --infer --environment 'staging; ls' is rejected with invalid_environment (shell injection guard)", async () => {
   // §1 CTO-review round-2 P1.2: the previous code interpolated
   // opts.environment directly into next_action strings without
   // validation. `--environment 'staging; ls'` would survive into the
   // wire JSON, and an agent running next_action through a shell would
   // execute the injected command. The fix validates --environment
-  // against /^[a-zA-Z0-9_-]+$/ in validateProvisionScalars, called
-  // from every provision mode that forwards env.
+  // against the shared ENV_RE in validateProvisionScalars (round 3:
+  // delegated to assertEnvironmentValid in src/shared/refs.ts), called
+  // from every provision mode that forwards env. Error code is
+  // `invalid_environment` (round 3 — was `bad_request` in round 2;
+  // realigned to the canonical code used by buildSecretRef/parseSecretRef).
   const cmd = provisionCommand();
   let caught: { code: string | null; message: string | null } = { code: null, message: null };
   try {
@@ -281,12 +284,8 @@ test("provision --infer --environment 'staging; ls' is rejected with bad_request
   }
   assert.equal(
     caught.code,
-    "bad_request",
-    `expected bad_request for env with shell metacharacters; got code=${caught.code} message=${caught.message}`,
-  );
-  assert.ok(
-    caught.message !== null && caught.message.includes("--environment"),
-    `expected message to name the --environment flag; got: ${caught.message}`,
+    "invalid_environment",
+    `expected invalid_environment for env with shell metacharacters; got code=${caught.code} message=${caught.message}`,
   );
   assert.ok(
     caught.message !== null && caught.message.includes("staging; ls"),
@@ -294,7 +293,7 @@ test("provision --infer --environment 'staging; ls' is rejected with bad_request
   );
 });
 
-test("provision --secret --environment '$(rm -rf)' is rejected with bad_request (shell injection guard)", async () => {
+test("provision --secret --environment '$(rm -rf)' is rejected with invalid_environment (shell injection guard)", async () => {
   // Same P1.2 fix as the --infer test above, but exercised through the
   // --secret mode codepath. The validator runs in every provision mode
   // that accepts --environment.
@@ -318,8 +317,39 @@ test("provision --secret --environment '$(rm -rf)' is rejected with bad_request 
   }
   assert.equal(
     caught.code,
-    "bad_request",
-    `expected bad_request for env with command substitution; got code=${caught.code} message=${caught.message}`,
+    "invalid_environment",
+    `expected invalid_environment for env with command substitution; got code=${caught.code} message=${caught.message}`,
+  );
+});
+
+test("provision --infer --environment '-bad' is rejected (leading hyphen rejected by shared ENV_RE)", async () => {
+  // §1 CTO-review round-3: the round-2 regex /^[a-zA-Z0-9_-]+$/ wrongly
+  // accepted a leading hyphen, which the canonical ENV_RE
+  // /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ rejects. Beyond shell hygiene, an env
+  // string starting with `-` would also be parsed as a flag if spliced
+  // into a literal recovery command (next_action). Delegating to
+  // assertEnvironmentValid restores the stricter shared grammar.
+  const cmd = provisionCommand();
+  let caught: { code: string | null; message: string | null } = { code: null, message: null };
+  try {
+    await cmd.parseAsync([
+      "node",
+      "provision",
+      "--infer",
+      "--environment",
+      "-bad",
+    ]);
+  } catch (err: any) {
+    caught = { code: err?.code ?? null, message: err?.message ?? null };
+  }
+  assert.equal(
+    caught.code,
+    "invalid_environment",
+    `expected invalid_environment for env with leading hyphen; got code=${caught.code} message=${caught.message}`,
+  );
+  assert.ok(
+    caught.message !== null && caught.message.includes("-bad"),
+    `expected message to include the rejected value; got: ${caught.message}`,
   );
 });
 
@@ -327,8 +357,8 @@ test("provision --infer --environment 'staging-eu_1' (valid token) does not reje
   // Positive case for the P1.2 validator: alphanumeric + underscore +
   // hyphen are allowed. We expect the CLI to pass argv through to the
   // infer pipeline (which typically writes a yml and exits 0 in this
-  // directory shape). The only assertion is that bad_request is NOT
-  // thrown by the validator.
+  // directory shape). The only assertion is that invalid_environment is
+  // NOT thrown by the validator.
   const dir = await mkdtemp(join(tmpdir(), "ss-provision-env-valid-"));
   try {
     await writeFile(join(dir, ".env.example"), "MY_CUSTOM_FLAG=\n");
@@ -343,12 +373,42 @@ test("provision --infer --environment 'staging-eu_1' (valid token) does not reje
     }
     // The CLI may exit 0 (needs_edit path) or non-zero for downstream
     // reasons (e.g., daemon unreachable in CI). What MUST NOT happen
-    // is a CLI-side bad_request rejection for the env value itself.
+    // is a CLI-side invalid_environment rejection for the env value
+    // itself. We assert the error code does not appear (matches both
+    // the round-2 and round-3 message shapes).
     if (exitCode !== 0) {
-      // Confirm no validator-side bad_request fired for the env.
       assert.ok(
-        !stderr.includes("--environment must match"),
+        !stderr.includes("invalid_environment"),
         `valid token 'staging-eu_1' was rejected by validator; stderr: ${stderr}`,
+      );
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("provision --infer --environment 'qa.us-east' (dotted env) does not reject at the validator", async () => {
+  // §1 CTO-review round-3 positive: the canonical ENV_RE
+  // /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ accepts dotted envs (e.g.
+  // 'qa.us-east'), which round-2's parallel /^[a-zA-Z0-9_-]+$/ rejected.
+  // Delegating to assertEnvironmentValid restores parity with
+  // buildSecretRef/parseSecretRef.
+  const dir = await mkdtemp(join(tmpdir(), "ss-provision-env-dotted-"));
+  try {
+    await writeFile(join(dir, ".env.example"), "MY_CUSTOM_FLAG=\n");
+
+    let exitCode = 0;
+    let stderr = "";
+    try {
+      await execp("node", [CLI, "provision", "--infer", "--environment", "qa.us-east"], { cwd: dir });
+    } catch (e: any) {
+      exitCode = e.code ?? 1;
+      stderr = e.stderr ?? "";
+    }
+    if (exitCode !== 0) {
+      assert.ok(
+        !stderr.includes("invalid_environment"),
+        `valid dotted env 'qa.us-east' was rejected by validator; stderr: ${stderr}`,
       );
     }
   } finally {

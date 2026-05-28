@@ -15,7 +15,7 @@ import { readFile, writeFile, access, stat } from "node:fs/promises";
 import { stringify as yamlStringify } from "yaml";
 import { ShuttleError } from "../../shared/errors.js";
 import { daemonRequest } from "../../client/daemon-client.js";
-import { parseSecretRef } from "../../shared/refs.js";
+import { assertEnvironmentValid, parseSecretRef } from "../../shared/refs.js";
 import { ok, outputJson } from "../../shared/result.js";
 import { runInfer } from "../provision/infer.js";
 import { addApprovalIdOption } from "./_approval-id-option.js";
@@ -270,20 +270,17 @@ async function runSecretMode(opts: ProvisionOpts): Promise<void> {
 // corresponding flag is set — the function is safe to call from modes that
 // don't accept those flags.
 function validateProvisionScalars(opts: ProvisionOpts): void {
-  // --environment: strict allowlist of safe shell tokens. Pattern matches
-  // alphanumerics, underscore, and hyphen — no whitespace, no shell
-  // metacharacters (; & | $ ` \ ' " etc.), no path separators. This is
-  // the actual P1.2 fix: `--environment 'staging; ls'` previously
-  // survived interpolation into next_action strings in runInferMode and
-  // (through the daemon round-trip) anywhere else env is spliced into a
-  // literal command. The validator runs in every provision mode that
-  // forwards opts.environment, so the wire next_action is shell-safe by
-  // construction.
-  if (opts.environment !== undefined && !/^[a-zA-Z0-9_-]+$/.test(opts.environment)) {
-    throw new ShuttleError(
-      "bad_request",
-      `--environment must match /^[a-zA-Z0-9_-]+$/ (alphanumeric, underscore, hyphen; no spaces or shell metacharacters); got '${opts.environment}'.`,
-    );
+  // --environment: delegate to the canonical assertEnvironmentValid()
+  // helper in src/shared/refs.ts. Round-2 used a parallel regex
+  // /^[a-zA-Z0-9_-]+$/, which diverged from the shared ENV_RE
+  // (/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/) used by buildSecretRef/parseSecretRef:
+  // it rejected valid dotted envs (qa.us-east) and accepted invalid
+  // leading-hyphen envs (-bad). Centralising on the shared grammar
+  // restores a single source of truth and keeps the shell-injection
+  // guarantee (the shared regex still rejects every shell metacharacter,
+  // since it limits chars to [a-zA-Z0-9._-] and forbids a leading dash).
+  if (opts.environment !== undefined) {
+    assertEnvironmentValid(opts.environment);
   }
 
   // env-var NAME (only when --secret is in play): must match yml parser's

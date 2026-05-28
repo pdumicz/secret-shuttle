@@ -55,6 +55,29 @@ export function assertSecretParts(source: string, environment: string, name: str
   }
 }
 
+/**
+ * Validate a raw --environment scalar (CLI / API surface) against the
+ * canonical ENV_RE grammar. Single source of truth for environment
+ * grammar across the codebase; call sites that previously open-coded a
+ * parallel regex (e.g. provision.ts validateProvisionScalars) must
+ * route through this helper to stay in sync.
+ *
+ * Shell-safety guarantee: ENV_RE limits characters to [a-zA-Z0-9._-]
+ * and requires alphanumeric first, so every shell metacharacter
+ * (whitespace, ;, &, |, $, `, \, ', ", <, >, *, ?, (, ), etc.) and the
+ * argv-leading `-` (which would be parsed as a flag) are rejected.
+ * That is the same guarantee the round-2 fix in provision.ts relied
+ * on, recentered on the canonical grammar.
+ */
+export function assertEnvironmentValid(env: string): void {
+  if (!ENV_RE.test(env)) {
+    throw new ShuttleError(
+      "invalid_environment",
+      `Environment must match ${ENV_RE.source} (alphanumeric first, then alphanumeric, dot, underscore, or hyphen); got '${env}'.`,
+    );
+  }
+}
+
 export function buildSecretRef(source: string, environment: string, name: string): string {
   const normalizedSource = source.trim().toLowerCase();
   const normalizedName = name.trim();
