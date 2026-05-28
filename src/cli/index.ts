@@ -26,7 +26,7 @@ const program = new Command();
 
 program
   .name("secret-shuttle")
-  .description("A local blind-secret bridge for AI coding agents.")
+  .description("Local-daemon CLI for AI coding agents.\nAGENT QUICKSTART: read skills/secret-shuttle/SKILL.md or run `secret-shuttle help`.")
   .version("0.1.1");
 
 program.addCommand(initCommand());
