@@ -1,6 +1,7 @@
 import { ShuttleError } from "../../shared/errors.js";
 import { getCurrentAgentId } from "../auth/auth-context.js";
 import { openUrl } from "./open-url.js";
+import { matchesSessionPattern } from "./session-matchers.js";
 import {
   approvalBindingsMatch,
   type ApprovalBinding,
@@ -24,9 +25,28 @@ export interface RequireApprovalsOptions {
 
 type Plan =
   | { kind: "synth"; binding: ApprovalBinding }
-  | { kind: "session"; binding: ApprovalBinding }
+  | { kind: "session"; binding: ApprovalBinding; sessionId: string; auto: boolean }
   | { kind: "consume"; binding: ApprovalBinding; id: string }
   | { kind: "mint"; binding: ApprovalBinding };
+
+// Error codes that resolveSessionRaces translates into demotion (kind:"session" →
+// kind:"mint") rather than rethrowing. session_max_uses_exceeded is the
+// concurrent-consume race; session_expired is the TTL-elapsed twin. Both are
+// runtime races: Phase 1's snapshot was valid; Phase 2 saw the world move.
+const RACE_DEMOTE_CODES: ReadonlySet<string> = new Set([
+  "session_max_uses_exceeded",
+  "session_expired",
+]);
+
+// Error codes that indicate the session pointer itself became invalid (revoked,
+// denied, or unknown) between Phase 1 and Phase 2. For auto-matched entries we
+// still demote — auto-match picked the candidate blindly, so any failure should
+// fall back to a fresh per-op approval. For explicit (--session) entries we
+// rethrow: the user named that session and deserves to see the original error.
+const EXPLICIT_HARD_FAIL_CODES: ReadonlySet<string> = new Set([
+  "session_not_found",
+  "session_unauthorized",
+]);
 
 const DEFAULT_WAIT_MS = 2 * 60 * 1000;
 const POLL_MS = 200;
@@ -116,6 +136,13 @@ export async function requireApprovals(
   // Phase 2 would fail mid-loop on the Nth mintFromSession — breaking the
   // two-phase invariant.
   let plannedSessionUses = 0;
+  // Burst 5 §2b Task 2b.6: per-sessionId planned-use counter for the
+  // auto-match path. Distinct from the scalar `plannedSessionUses` above
+  // because auto-match can pick a different sessionId per binding within
+  // the same call. Without this, two bindings could both auto-match the
+  // same max_uses=1 session in Phase 1 and the second mintFromSession
+  // in Phase 2 would throw.
+  const plannedAutoSessionUsesById = new Map<string, number>();
 
   for (const binding of opts.bindings) {
     // 1. Synth path
@@ -149,13 +176,46 @@ export async function requireApprovals(
             break;
           }
         }
-        plans.push({ kind: "session", binding });
+        plans.push({ kind: "session", binding, sessionId: opts.sessionId, auto: false });
         continue;
       }
       // canMatchSession contract: returns false on pattern no-match
       // (fall through to supplied-ID path); throws on hard-fail session
       // states (revoked / expired / denied / at-max-uses) which bubble
       // out of requireApprovals entirely.
+    }
+
+    // 2b. Auto-match owned active session (Burst 5 §2b Task 2b.6).
+    // Only runs when the caller did NOT supply an explicit sessionId (the
+    // explicit path is more specific and takes precedence). Excluded for
+    // root tokens because they bypass owner filtering — auto-matching would
+    // let an admin token silently consume agent-owned slots.
+    if (
+      opts.sessionStore !== undefined &&
+      opts.sessionId === undefined &&
+      callerAgentId !== "root"
+    ) {
+      const autoPlan = planFromAutoMatchedSession(
+        binding,
+        opts.sessionStore,
+        callerAgentId,
+        plannedAutoSessionUsesById,
+      );
+      if (autoPlan !== null) {
+        // Session-first precedence mirror of the explicit path above: if the
+        // client also supplied an ID matching this binding, silently drop it
+        // from unusedIds so it doesn't trigger approval_mismatch in the
+        // leftover-ID check. Do NOT consume it (status stays "granted").
+        for (const id of unusedIds) {
+          const peek = opts.store.get(id);
+          if (peek !== undefined && approvalBindingsMatch(peek, binding)) {
+            unusedIds.delete(id);
+            break;
+          }
+        }
+        plans.push(autoPlan);
+        continue;
+      }
     }
 
     // 3. Supplied-ID match
@@ -228,6 +288,14 @@ export async function requireApprovals(
         `Supplied approval id(s) did not match any required binding: ${[...unusedIds].join(", ")}`,
       );
     }
+  }
+
+  // Burst 5 §2b Task 2b.6: race resolution. Runs AFTER Phase 1 planning is
+  // complete and BEFORE mintPlans is computed, so demoted entries flow into
+  // the mint loop the same as originally-planned mints. After this call,
+  // every remaining plans[i].kind === "session" entry is safely committable.
+  if (opts.sessionStore !== undefined) {
+    resolveSessionRaces(plans, opts.sessionStore, opts.store);
   }
 
   // Phase 2: commit.
@@ -324,9 +392,14 @@ export async function requireApprovals(
     // a boolean for pattern-match. Phase 1 already established pattern-match,
     // so a fresh `false` here would indicate state drift between Phase 1 and
     // Phase 2 (extremely unlikely in single-tick Node; defensive guard).
+    //
+    // Note: `resolveSessionRaces` (called above) has already demoted any
+    // throw-prone entries to kind:"mint". This belt-and-suspenders pass
+    // catches matcher drift between Phase 1 and the resolver — should be
+    // unreachable in healthy code.
     for (const p of plans) {
       if (p.kind === "session") {
-        const ok = opts.store.canMatchSession(opts.sessionId!, p.binding, opts.sessionStore!);
+        const ok = opts.store.canMatchSession(p.sessionId, p.binding, opts.sessionStore!);
         if (!ok) {
           throw new ShuttleError(
             "session_pattern_no_match",
@@ -341,7 +414,7 @@ export async function requireApprovals(
     for (let i = 0; i < plans.length; i++) {
       const p = plans[i]!;
       if (p.kind === "session") {
-        sessionGrants.set(i, opts.store.mintFromSession(opts.sessionId!, p.binding, opts.sessionStore!));
+        sessionGrants.set(i, opts.store.mintFromSession(p.sessionId, p.binding, opts.sessionStore!));
       }
     }
 
@@ -419,4 +492,141 @@ function synthesizeGrant(binding: ApprovalBinding): ApprovalGrant {
     ui_token: "",
     owner_agent_id: getCurrentAgentId(),
   };
+}
+
+/**
+ * Burst 5 §2b Task 2b.6: find an owned active session whose pattern matches
+ * `binding`. Returns a plan entry (kind:"session", auto:true) on hit, or null
+ * if no candidate matches. Bumps `plannedSessionUsesById` for the picked
+ * session BEFORE returning, so subsequent bindings in the same call see
+ * the decremented capacity.
+ *
+ * Candidate filter:
+ *  - Owned by `ownerAgentId` (never root — that guard lives at the call site).
+ *  - status === "granted" — `sessionStore.list()` normalizes expiry on every
+ *    call (session-store.ts:91-104), so any granted-but-past-TTL grant is
+ *    already flipped to "expired" by the time we read it. We rely on this
+ *    rather than a separate `expires_at > now` check; that means the helper
+ *    uses the SessionStore's injected clock, which matters for tests with
+ *    fake clocks (the alternative — `Date.now()` here — would skip valid
+ *    sessions whose fake-clock TTL is in the future relative to the real one).
+ *  - max_uses cap accounting for sibling-binding plans in the same call.
+ *
+ * Selection: newest-first (`approved_at` DESC). Deterministic tie-breaker
+ * within the same approved-at via the underlying Map insertion order.
+ */
+function planFromAutoMatchedSession(
+  binding: ApprovalBinding,
+  sessionStore: SessionStore,
+  ownerAgentId: string,
+  plannedSessionUsesById: Map<string, number>,
+): Plan | null {
+  const candidates = sessionStore
+    .list()
+    .filter((s) => s.owner_agent_id === ownerAgentId)
+    .filter((s) => s.status === "granted")
+    .filter((s) => {
+      if (s.max_uses === undefined) return true;
+      const planned = plannedSessionUsesById.get(s.id) ?? 0;
+      return s.uses + planned < s.max_uses;
+    })
+    .slice() // copy before sort (list() returns readonly)
+    .sort((a, b) => (b.approved_at ?? 0) - (a.approved_at ?? 0));
+
+  for (const candidate of candidates) {
+    if (matchesSessionPattern(binding, candidate)) {
+      plannedSessionUsesById.set(
+        candidate.id,
+        (plannedSessionUsesById.get(candidate.id) ?? 0) + 1,
+      );
+      return { kind: "session", binding, sessionId: candidate.id, auto: true };
+    }
+  }
+  return null;
+}
+
+/**
+ * Burst 5 §2b Task 2b.6: resolve session-race conditions between Phase 1
+ * planning and Phase 2 commit. Iterates `plans` in place; any kind:"session"
+ * entry whose backing session has become unusable (TTL elapsed, max_uses
+ * exhausted by a concurrent caller, or sibling entries within this same
+ * call would push us over the cap) is rewritten to kind:"mint" so the
+ * existing mint-and-wait loop handles it like any fresh-approval need.
+ *
+ * Semantics differ by `auto` flag:
+ *  - auto entries: ALL hard-failure codes demote silently (auto-match picked
+ *    the candidate blindly; falling back to fresh approval is correct).
+ *  - explicit (--session) entries: only race codes
+ *    (session_max_uses_exceeded, session_expired) demote; pointer-validity
+ *    codes (session_not_found, session_unauthorized) rethrow so the user
+ *    who named the session sees the original error.
+ *
+ * The pattern-mismatch (`canMatchSession` returns false) branch is a
+ * defensive guard against matcher drift between Phase 1 and the resolver
+ * — Phase 1 only emits kind:"session" for bindings that matched, so this
+ * branch should be unreachable in healthy code.
+ */
+function resolveSessionRaces(
+  plans: Plan[],
+  sessionStore: SessionStore,
+  store: ApprovalStore,
+): void {
+  // Multi-entry capacity tracking. canMatchSession only inspects live
+  // `session.uses` against `max_uses`; it does NOT know about sibling
+  // entries in the same `plans` array that ALSO plan to consume the
+  // session. Without per-sessionId kept-uses tracking, two bindings against
+  // a max_uses=2 session could both pass canMatchSession after a concurrent
+  // caller had consumed one slot (uses=1, cap=2), and the SECOND
+  // mintFromSession in Phase 2 would throw session_max_uses_exceeded after
+  // the first already incremented uses.
+  const keptUsesById = new Map<string, number>();
+
+  for (let i = 0; i < plans.length; i++) {
+    const p = plans[i];
+    if (p === undefined || p.kind !== "session") continue;
+
+    let stillMatches: boolean;
+    try {
+      stillMatches = store.canMatchSession(p.sessionId, p.binding, sessionStore);
+    } catch (err) {
+      const code = err instanceof ShuttleError ? err.code : undefined;
+      if (code !== undefined && RACE_DEMOTE_CODES.has(code)) {
+        // Race (uses exhausted, TTL elapsed) — demote for BOTH auto and explicit.
+        plans[i] = { kind: "mint", binding: p.binding };
+        continue;
+      }
+      if (p.auto && code !== undefined && EXPLICIT_HARD_FAIL_CODES.has(code)) {
+        // Auto-matched candidate became revoked / denied between Phase 1 and
+        // now. The user didn't name this specific session; quietly demote.
+        plans[i] = { kind: "mint", binding: p.binding };
+        continue;
+      }
+      // Explicit user-named session with a hard-failure state (or unknown
+      // error): rethrow so the user sees the original error code.
+      throw err;
+    }
+
+    if (!stillMatches) {
+      // Defensive guard against matcher drift between Phase 1 and the
+      // resolver. Should be unreachable: Phase 1 only emits kind:"session"
+      // for bindings that already matched (either via the explicit-sessionId
+      // canMatchSession check or the auto-match matchesSessionPattern hit).
+      plans[i] = { kind: "mint", binding: p.binding };
+      continue;
+    }
+
+    // Sibling-aware capacity check. canMatchSession verified
+    // `session.uses < session.max_uses` against live state; this additional
+    // check folds in the kept-this-pass sibling entries to close the
+    // multi-entry race.
+    const session = sessionStore.list().find((s) => s.id === p.sessionId);
+    if (session !== undefined && session.max_uses !== undefined) {
+      const alreadyKept = keptUsesById.get(p.sessionId) ?? 0;
+      if (session.uses + alreadyKept + 1 > session.max_uses) {
+        plans[i] = { kind: "mint", binding: p.binding };
+        continue;
+      }
+    }
+    keptUsesById.set(p.sessionId, (keptUsesById.get(p.sessionId) ?? 0) + 1);
+  }
 }
