@@ -142,7 +142,11 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   command_renamed: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => null,
-    nextAction: () => "secret-shuttle provision",
+    // No nextAction: a bare `secret-shuttle provision` would itself fail
+    // with provision_no_mode, so chaining it as a "recovery" command would
+    // produce a second error. The bootstrap-stub throw-site (Task 1.6)
+    // names the replacement verb in the human-readable message; the agent
+    // reads that and picks the correct mode flag.
   },
   provision_mode_conflict: {
     exitCode: EXIT_CODE_USAGE,
@@ -353,7 +357,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     nextAction: () => "secret-shuttle provision --infer --force",
   },
 
-  // ── Audit-route codes (Task 4.6) ─────────────────────────────────────────────
+  // ── Audit-route codes ──────────────────────────────────────────────────────
   audit_window_invalid: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => "Pass --since with format Ns/Nm/Nh/Nd (e.g., 5m, 1h, 1d).",
