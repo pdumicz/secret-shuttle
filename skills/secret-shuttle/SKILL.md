@@ -1,4 +1,4 @@
-# secret-shuttle
+# Secret Shuttle
 
 Local-daemon CLI that lets AI coding agents provision and use secrets without ever seeing them.
 You work with refs (`ss://stripe/prod/STRIPE_WEBHOOK_SECRET`); the daemon resolves them at the last possible moment.
