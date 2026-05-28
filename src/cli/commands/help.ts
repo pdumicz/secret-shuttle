@@ -27,7 +27,7 @@ export function renderTopLevelHelp(): string {
     "  secrets rotate <ref>        Rotate a secret",
     "",
     "Provider integration:",
-    "  bootstrap                                    Provision a project's secrets in one approval (secret-shuttle.yml)",
+    "  provision --infer|--yml|--secret|--continue  Make secrets exist in vault + destinations (single verb)",
     "  run --env-file=<f> -- <cmd>                  Run a command with secrets injected as env vars",
     "  inject -i <tpl> -o <out>                     Render a template with ss:// refs into a file",
     "  template list / template run <id>            Vetted CLI integrations",

@@ -217,17 +217,21 @@ test("error-codes: keychain_key_invalid registered with PERMISSION exit code + n
 });
 
 test("error-codes: bootstrap_plan_invalid registered with USAGE exit code + nextAction", () => {
+  // Burst 5 §1 P1.2 remediation: nextAction now points at the `provision --yml`
+  // verb (the `bootstrap` verb was removed by Task 1.7 and dead-ends through
+  // command_renamed). The recovery context here is "edit yml and retry."
   const entry = lookupErrorCode("bootstrap_plan_invalid");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_USAGE);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle bootstrap");
+  assert.strictEqual(entry.nextAction!(""), "secret-shuttle provision --yml ./secret-shuttle.yml");
 });
 
 test("error-codes: bootstrap_capture_url_invalid registered with USAGE exit code + nextAction + hint", () => {
+  // Burst 5 §1 P1.2 remediation: see bootstrap_plan_invalid above.
   const entry = lookupErrorCode("bootstrap_capture_url_invalid");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_USAGE);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle bootstrap");
+  assert.strictEqual(entry.nextAction!(""), "secret-shuttle provision --yml ./secret-shuttle.yml");
   assert.match(
     entry.hint("") ?? "",
     /https/,
@@ -297,13 +301,16 @@ test("error-codes: bootstrap_batch_abandoned registered with CONFLICT + null nex
 });
 
 test("error-codes: bootstrap_capture_skipped → TRANSIENT exit + retry hint (C16)", () => {
+  // Burst 5 §1 P1.2 remediation: the hint now points at `provision --continue
+  // --batch <id>` (the new resume verb) rather than the removed `bootstrap`
+  // verb. Per-secret retry on a partial-failure batch is the resume path.
   const entry = lookupErrorCode("bootstrap_capture_skipped");
   assert.ok(entry, "bootstrap_capture_skipped must be registered");
   assert.strictEqual(entry.exitCode, EXIT_CODE_TRANSIENT);
-  assert.match(entry.hint("") ?? "", /Re-run bootstrap/);
-  // No nextAction: re-running bootstrap is the same command the user just
-  // invoked, so a literal recovery command would be redundant; the hint
-  // already names it.
+  assert.match(entry.hint("") ?? "", /provision --continue/);
+  // No nextAction: the recovery command needs a batch_id that the registry
+  // doesn't know, so it stays in the hint string for the agent to template
+  // from context (e.g. the calling /continue response's batch_id).
   const next = entry.nextAction ? entry.nextAction("") : null;
   assert.strictEqual(next, null);
 });
@@ -336,18 +343,24 @@ test("error-codes: bootstrap_capture_cleanup_failed → CONFLICT exit + nextActi
   assert.strictEqual(entry.nextAction!(""), "secret-shuttle blind end");
 });
 
-test("error-codes: bootstrap_batch_not_found registered with NOT_FOUND exit code + nextAction", () => {
+test("error-codes: bootstrap_batch_not_found registered with NOT_FOUND exit code + nextAction null (ambiguous context)", () => {
+  // Burst 5 §1 P1.2 remediation: nextAction is null because the recovery is
+  // context-dependent — the batch may have been pruned (start a fresh plan),
+  // or the agent may have looked up the wrong batch_id (re-check via --list).
+  // Either way, the agent should ask the user rather than autorun a recovery.
   const entry = lookupErrorCode("bootstrap_batch_not_found");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_NOT_FOUND);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle bootstrap");
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — recovery context is ambiguous");
 });
 
 test("error-codes: bootstrap_destination_unknown registered with USAGE exit code + nextAction", () => {
+  // Burst 5 §1 P1.2 remediation: now points at `provision --yml` (edit yml and retry).
   const entry = lookupErrorCode("bootstrap_destination_unknown");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_USAGE);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle bootstrap");
+  assert.strictEqual(entry.nextAction!(""), "secret-shuttle provision --yml ./secret-shuttle.yml");
 });
 
 test("error-codes: daemon_not_running has nextAction (mechanical recovery)", () => {

@@ -108,21 +108,21 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   bootstrap_plan_invalid: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => "Edit secret-shuttle.yml to fix the schema error, then re-run.",
-    nextAction: () => "secret-shuttle bootstrap",
+    nextAction: () => "secret-shuttle provision --yml ./secret-shuttle.yml",
   },
   bootstrap_capture_url_invalid: {
     exitCode: EXIT_CODE_USAGE,
     hint: () =>
       "source.url for kind=capture must be https, must not embed credentials, must not be an IP literal or localhost. Edit secret-shuttle.yml and re-run.",
-    nextAction: () => "secret-shuttle bootstrap",
+    nextAction: () => "secret-shuttle provision --yml ./secret-shuttle.yml",
   },
   bootstrap_capture_skipped: {
     exitCode: EXIT_CODE_TRANSIENT,
-    hint: () => "Re-run bootstrap to retry the skipped secret.",
+    hint: () => "Re-run `secret-shuttle provision --continue --batch <id>` to retry the skipped secret.",
   },
   bootstrap_capture_timeout: {
     exitCode: EXIT_CODE_TRANSIENT,
-    hint: () => "5 minutes elapsed without a capture. Re-run bootstrap and click Capture promptly.",
+    hint: () => "5 minutes elapsed without a capture. Re-run `secret-shuttle provision --continue --batch <id>` and click Capture promptly.",
   },
   bootstrap_capture_aborted: {
     exitCode: EXIT_CODE_TRANSIENT,
@@ -131,7 +131,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   bootstrap_destination_unknown: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => "Edit secret-shuttle.yml: replace the unknown destination shorthand with one of: vercel:<env>, github-actions:owner/repo, cloudflare:<env>, supabase:<projectref>.",
-    nextAction: () => "secret-shuttle bootstrap",
+    nextAction: () => "secret-shuttle provision --yml ./secret-shuttle.yml",
   },
   agent_id_namespace_violation: {
     exitCode: EXIT_CODE_USAGE,
@@ -196,8 +196,8 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   session_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   bootstrap_batch_not_found: {
     exitCode: EXIT_CODE_NOT_FOUND,
-    hint: () => "The batch was pruned or never existed. Generate a fresh batch:",
-    nextAction: () => "secret-shuttle bootstrap",
+    hint: () => "The batch was pruned or never existed. The right recovery depends on context — generate a fresh plan, or look up the batch first.",
+    nextAction: () => null,
   },
   infer_no_env_example: {
     exitCode: EXIT_CODE_NOT_FOUND,
@@ -304,7 +304,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   },
   bootstrap_batch_abandoned: {
     exitCode: EXIT_CODE_CONFLICT,
-    hint: () => "This batch was abandoned. Start a new one with `secret-shuttle bootstrap`.",
+    hint: () => "This batch was abandoned. Start a new one with `secret-shuttle provision --yml ./secret-shuttle.yml` (or `--infer`).",
     nextAction: () => null,
   },
   bootstrap_browser_busy: {

@@ -21,6 +21,29 @@ test("missing .env.example → infer_no_env_example", async () => {
   }
 });
 
+test(".env.example exists but contains no usable names (comments/blanks only) → infer_no_env_example", async () => {
+  // Distinct from the "missing file" case: file present, but parseEnvExampleNames
+  // returns []. Without this guard, runInfer would proceed to render a yml with
+  // `secrets:` and nothing under it, which the daemon then rejects as
+  // bootstrap_plan_invalid — a less actionable error.
+  const dir = await setupTmp();
+  try {
+    const content = [
+      "# These are notes only",
+      "",
+      "# No actual assignments",
+      "  ",
+    ].join("\n");
+    await writeFile(join(dir, ".env.example"), content);
+    await assert.rejects(
+      runInfer({ cwd: dir }),
+      (err: any) => err.code === "infer_no_env_example",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("env.example with one Stripe key + vercel.json → executable plan", async () => {
   const dir = await setupTmp();
   try {
