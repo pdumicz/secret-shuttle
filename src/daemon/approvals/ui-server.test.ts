@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { DaemonServer } from "../server.js";
+import { BootstrapStore } from "../bootstrap/store.js";
 import { ApprovalStore } from "./store.js";
+import { SessionStore } from "./session-store.js";
 import { registerUiRoutes } from "./ui-server.js";
 
 const SAMPLE = {
@@ -21,12 +24,18 @@ const SAMPLE = {
 async function withServer<T>(fn: (ctx: { store: ApprovalStore; port: number }) => Promise<T>): Promise<T> {
   const server = new DaemonServer({ token: "t" });
   const store = new ApprovalStore({ ttlMs: 60_000 });
-  registerUiRoutes(server, store);
+  const sessions = new SessionStore();
+  // Burst 5 §2b: registerUiRoutes now takes { approvals, sessions, bootstrap }.
+  // BootstrapStore needs a rootDir; isolate per test with a temp dir.
+  const home = await mkdtemp(path.join(os.tmpdir(), "ss-ui-server-test-"));
+  const bootstrap = new BootstrapStore({ rootDir: path.join(home, "bootstrap-batches") });
+  registerUiRoutes(server, { approvals: store, sessions, bootstrap });
   const { port } = await server.listen(0);
   try {
     return await fn({ store, port });
   } finally {
     await server.close();
+    await rm(home, { recursive: true, force: true });
   }
 }
 

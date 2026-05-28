@@ -34,7 +34,11 @@ export function registerRoutes(
   services: DaemonServices,
   daemonPortRef: () => number,
 ): void {
-  registerUiRoutes(server, services.approvals);
+  registerUiRoutes(server, {
+    approvals: services.approvals,
+    sessions: services.sessionStore,
+    bootstrap: services.bootstrapStore,
+  });
   registerSessionUiRoutes(server, services.sessionStore);
   registerHubRoutes(server, services.hubBroker);
   registerStatus(server, services);
