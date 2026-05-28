@@ -1,6 +1,6 @@
 {
   "name": "secret-shuttle",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "description": "Local-daemon CLI that lets AI coding agents use secrets without seeing them.",
   "homepage": "https://github.com/pdumicz/secret-shuttle",
   "repository": {
