@@ -139,6 +139,23 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
       "Non-root callers can only mint children under their own agent_id prefix (e.g., caller \"claude-7f2a\" can mint \"claude-7f2a.helper-3a1b\"). Re-run with --child-id starting with your own agent_id followed by a dot.",
   },
   agent_id_invalid: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  command_renamed: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => null,
+    nextAction: () => "secret-shuttle provision",
+  },
+  provision_mode_conflict: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Pass exactly one of: --infer, --yml, --secret, --continue, --list, --abandon.",
+  },
+  provision_no_mode: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Pass --infer, --yml, --secret, --continue, --list, or --abandon.",
+  },
+  session_ttl_exceeds_cap: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Reduce ttl_minutes (max 60).",
+  },
 
   // ── Not found ──────────────────────────────────────────────────────────────
   not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -177,6 +194,10 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     exitCode: EXIT_CODE_NOT_FOUND,
     hint: () => "The batch was pruned or never existed. Generate a fresh batch:",
     nextAction: () => "secret-shuttle bootstrap",
+  },
+  infer_no_env_example: {
+    exitCode: EXIT_CODE_NOT_FOUND,
+    hint: () => "Create a .env.example listing your secret names, then re-run.",
   },
 
   // ── Permission ─────────────────────────────────────────────────────────────
@@ -325,6 +346,21 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   root_token_malformed: {
     exitCode: EXIT_CODE_CONFLICT,
     hint: () => "<SHUTTLE_HOME>/root-token content is not a 43-char base64url-no-pad string. Delete it to regenerate (note: this also invalidates all derived agent tokens).",
+  },
+  infer_yml_exists: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "Re-run with --force to overwrite, or --dry-run to stdout only.",
+    nextAction: () => "secret-shuttle provision --infer --force",
+  },
+
+  // ── Audit-route codes (Task 4.6) ─────────────────────────────────────────────
+  audit_window_invalid: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Pass --since with format Ns/Nm/Nh/Nd (e.g., 5m, 1h, 1d).",
+  },
+  audit_batch_not_found: {
+    exitCode: EXIT_CODE_NOT_FOUND,
+    hint: () => null,
   },
 
   // ── Keychain (Part B; full implementations come in Plan 5a) ────────────────
