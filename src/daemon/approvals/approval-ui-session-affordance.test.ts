@@ -125,6 +125,18 @@ test("GET /ui/approvals/:id of a bootstrap-action grant returns session_affordan
       assert.ok(typeof p.ref_glob === "string" && p.ref_glob.length > 0, `pattern.ref_glob must be non-empty: ${JSON.stringify(p)}`);
       assert.ok(typeof p.required_params === "object" && p.required_params !== null, "pattern.required_params must be an object");
     }
+    // vercel-env-add declares sessionDefiningParams = ["name", "environment"]
+    // (src/daemon/templates/builtin/vercel-env-add.ts). The derived
+    // required_params for every vercel-env-add pattern MUST surface both
+    // — guards against regressions in the param-extraction loop in
+    // inferSessionPatternFromPlan.
+    for (const p of aff.patterns) {
+      if (p.template_id === "vercel-env-add") {
+        assert.ok("name" in p.required_params, `vercel-env-add pattern must carry required_params.name; got ${JSON.stringify(p.required_params)}`);
+        assert.ok("environment" in p.required_params, `vercel-env-add pattern must carry required_params.environment; got ${JSON.stringify(p.required_params)}`);
+        assert.equal(p.required_params["name"], "API_KEY", "required_params.name must match the secret name from the plan");
+      }
+    }
   });
 });
 

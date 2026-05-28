@@ -54,22 +54,27 @@
       //   both === 0 or aff missing                    → hidden
       function renderSessionAffordance(aff) {
         const container = document.getElementById('session-affordance');
-        if (!aff || (aff.patterns.length === 0 && aff.excluded.length === 0)) {
+        // Defensive reads: match the Array.isArray() pattern used for
+        // g.allowed_domains / g.allowed_actions elsewhere. Tolerates server
+        // contract drift without throwing TypeError on .length.
+        const patterns = Array.isArray(aff && aff.patterns) ? aff.patterns : [];
+        const excluded = Array.isArray(aff && aff.excluded) ? aff.excluded : [];
+        if (!aff || (patterns.length === 0 && excluded.length === 0)) {
           container.hidden = true;
           return;
         }
         container.hidden = false;
-        const excludedHtml = aff.excluded.length === 0 ? '' :
-          `<p><em>Note: ${aff.excluded.length} destination(s) excluded from any session derivation
+        const excludedHtml = excluded.length === 0 ? '' :
+          `<p><em>Note: ${esc(String(excluded.length))} destination(s) excluded from any session derivation
           (template not registered, or required destination param missing). Pushes to those
           destinations will require fresh approval each time.</em></p>`;
-        if (aff.patterns.length === 0) {
+        if (patterns.length === 0) {
           container.innerHTML = `<fieldset style="margin: 1em 0; padding: 0.75em; border: 1px solid #ddd;">${excludedHtml}</fieldset>`;
           return;
         }
-        const patternHtml = aff.patterns.map((p) =>
+        const patternHtml = patterns.map((p) =>
           `<li><code>${esc(p.template_id ?? '?')}</code> &nbsp; <code>${esc(p.ref_glob)}</code> &nbsp; ${
-            Object.entries(p.required_params).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(', ')
+            Object.entries(p.required_params || {}).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(', ')
           }</li>`
         ).join('');
         container.innerHTML = `
