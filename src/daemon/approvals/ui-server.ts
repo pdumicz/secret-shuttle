@@ -3,18 +3,23 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ShuttleError } from "../../shared/errors.js";
+import { asObject } from "../api/validate.js";
+import type { BootstrapStore } from "../bootstrap/store.js";
 import { readBoundedJson } from "../helpers/bounded-json.js";
 import type { DaemonServer } from "../server.js";
-import type { BootstrapStore } from "../bootstrap/store.js";
-import type { ApprovalStore } from "./store.js";
 import { inferSessionPatternFromPlan } from "./infer-session-pattern.js";
 import type { SessionStore } from "./session-store.js";
 import type { SessionPattern } from "./session.js";
+import type { ApprovalStore } from "./store.js";
 
 const HTML_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "ui.html",
 );
+
+/** Allowed `ttl_minutes` values on the session-on-approve body. Anything else
+ * → bad_request. Keep in lockstep with the dropdown options in ui.html. */
+const TTL_MINUTES_ALLOWED: readonly number[] = [5, 15, 30, 60] as const;
 
 /**
  * Dependencies the approvals UI server needs. Bundled as an object so callers
@@ -113,16 +118,20 @@ export function registerUiRoutes(server: DaemonServer, deps: ApprovalsUiDeps): v
     // ── approve path with optional session-on-approve body ─────────────────
     // Burst 5 §2b Task 2b.4. allowEmpty:true so a legacy approve POST with
     // no body still works (the existing UI form sends an empty POST when the
-    // checkbox is unchecked).
-    const sessionBody = (await readBoundedJson(req, 1024, { allowEmpty: true })) as {
-      session?: { ttl_minutes?: number };
-    };
+    // checkbox is unchecked). asObject() rejects arrays/primitives — every
+    // other JSON route uses it too.
+    const body = asObject(await readBoundedJson(req, 1024, { allowEmpty: true }));
+    const sessionRequest = body["session"];
 
     let sessionPlan: { ttl_ms: number; patterns: SessionPattern[] } | null = null;
-    const sessionRequest = sessionBody.session;
-    if (sessionRequest !== undefined && sessionRequest !== null && typeof sessionRequest === "object") {
-      const ttl_minutes = sessionRequest.ttl_minutes;
-      if (typeof ttl_minutes !== "number" || ![5, 15, 30, 60].includes(ttl_minutes)) {
+    if (
+      sessionRequest !== undefined &&
+      sessionRequest !== null &&
+      typeof sessionRequest === "object" &&
+      !Array.isArray(sessionRequest)
+    ) {
+      const ttl_minutes = (sessionRequest as Record<string, unknown>)["ttl_minutes"];
+      if (typeof ttl_minutes !== "number" || !TTL_MINUTES_ALLOWED.includes(ttl_minutes)) {
         throw new ShuttleError(
           "bad_request",
           `ttl_minutes must be one of 5, 15, 30, 60; got ${String(ttl_minutes)}.`,
@@ -157,10 +166,21 @@ export function registerUiRoutes(server: DaemonServer, deps: ApprovalsUiDeps): v
         }
       } catch (err) {
         // Roll back what we precreated. SessionStore has revoke(id), NOT
-        // delete (src/daemon/approvals/session-store.ts:84). Revoke is fine:
-        // these grants were never approved, never reachable by other actors.
+        // delete. Revoke is fine: these grants were never approved, never
+        // reachable by other actors. If revoke ITSELF fails (concurrent
+        // mutation, store-corruption invariant) the orphan PENDING grant
+        // lingers until TTL — log so operators can trace it back to this
+        // approval.
         for (const sid of precreatedIds) {
-          try { deps.sessions.revoke(sid); } catch { /* best-effort */ }
+          try {
+            deps.sessions.revoke(sid);
+          } catch (revokeErr) {
+            console.warn(
+              `[secret-shuttle] approval ${id}: failed to roll back precreated session ${sid}: ${
+                revokeErr instanceof Error ? revokeErr.message : String(revokeErr)
+              }`,
+            );
+          }
         }
         throw err;
       }
@@ -174,9 +194,17 @@ export function registerUiRoutes(server: DaemonServer, deps: ApprovalsUiDeps): v
     // would mean concurrent revocation), best-effort: log and continue. The
     // main approval has already committed; we can't un-do that. A missing
     // session means the next matching op will pop a fresh approval, which is
-    // correct behavior.
+    // correct behavior — just visible churn the operator should see in logs.
     for (const sid of precreatedIds) {
-      try { deps.sessions.approve(sid); } catch { /* see comment above */ }
+      try {
+        deps.sessions.approve(sid);
+      } catch (approveErr) {
+        console.warn(
+          `[secret-shuttle] approval ${id}: failed to flip precreated session ${sid} to granted: ${
+            approveErr instanceof Error ? approveErr.message : String(approveErr)
+          }`,
+        );
+      }
     }
 
     res.statusCode = 200;
