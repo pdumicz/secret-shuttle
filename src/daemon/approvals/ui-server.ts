@@ -61,6 +61,38 @@ export function registerUiRoutes(server: DaemonServer, deps: ApprovalsUiDeps): v
     const grant = deps.approvals.get(id);
     if (grant === undefined) throw new ShuttleError("approval_not_found", "Unknown approval id.");
     if (grant.ui_token !== token) throw new ShuttleError("ui_token_mismatch", "Invalid UI token.");
+
+    // Burst 5 §2b Task 2b.5: derive session-affordance data for the client-side
+    // renderer when this grant is a bootstrap action whose batch exists and
+    // resolves to at least one pattern OR excluded destination. The renderer
+    // hides the affordance entirely when this field is absent — see
+    // ui.html#renderSessionAffordance.
+    let affordance:
+      | {
+          patterns: Array<{ template_id: string | null; ref_glob: string; required_params: Record<string, string> }>;
+          excluded: Array<{ secret: string; template_id: string }>;
+        }
+      | null = null;
+    if (grant.action === "bootstrap") {
+      const batchId = grant.template_params?.["batch_id"];
+      if (typeof batchId === "string" && batchId.length > 0) {
+        const batch = await deps.bootstrap.get(batchId);
+        if (batch !== null) {
+          const { patterns, excluded } = inferSessionPatternFromPlan(batch.plan);
+          if (patterns.length > 0 || excluded.length > 0) {
+            affordance = {
+              patterns: patterns.map((p) => ({
+                template_id: p.template_ids?.[0] ?? null,
+                ref_glob: p.ref_glob,
+                required_params: p.required_params ?? {},
+              })),
+              excluded: excluded.map((x) => ({ secret: x.secret, template_id: x.template_id })),
+            };
+          }
+        }
+      }
+    }
+
     res.statusCode = 200;
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({
@@ -93,6 +125,7 @@ export function registerUiRoutes(server: DaemonServer, deps: ApprovalsUiDeps): v
       page_url_host: grant.page_url_host ?? null,
       status: grant.status,
       expires_at: grant.expires_at,
+      ...(affordance !== null ? { session_affordance: affordance } : {}),
     }));
   });
 

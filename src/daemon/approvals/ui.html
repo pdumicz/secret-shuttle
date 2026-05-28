@@ -17,6 +17,7 @@
   <body>
     <h1>Secret Shuttle</h1>
     <div class="card" id="grant"></div>
+    <div id="session-affordance" hidden></div>
     <div id="actions"></div>
     <div class="status" id="status"></div>
     <script type="module">
@@ -42,6 +43,53 @@
         return `
           <h2 style="margin-top:0">Bootstrap (${n} secret${n === 1 ? "" : "s"})</h2>
           <ul class="bootstrap-secrets" style="list-style:none;padding:0;margin:0">${rows}</ul>
+        `;
+      }
+      // Burst 5 §2b Task 2b.5: render the session-on-approve affordance from
+      // the GET /ui/approvals/:id JSON's session_affordance field. The field
+      // is only attached for bootstrap-action grants whose batch resolves to
+      // ≥1 pattern OR ≥1 excluded destination. Three render modes:
+      //   patterns.length > 0                          → checkbox + TTL dropdown + pattern list (+ optional excluded notice)
+      //   patterns.length === 0 && excluded.length > 0 → excluded notice ONLY (no checkbox/TTL)
+      //   both === 0 or aff missing                    → hidden
+      function renderSessionAffordance(aff) {
+        const container = document.getElementById('session-affordance');
+        if (!aff || (aff.patterns.length === 0 && aff.excluded.length === 0)) {
+          container.hidden = true;
+          return;
+        }
+        container.hidden = false;
+        const excludedHtml = aff.excluded.length === 0 ? '' :
+          `<p><em>Note: ${aff.excluded.length} destination(s) excluded from any session derivation
+          (template not registered, or required destination param missing). Pushes to those
+          destinations will require fresh approval each time.</em></p>`;
+        if (aff.patterns.length === 0) {
+          container.innerHTML = `<fieldset style="margin: 1em 0; padding: 0.75em; border: 1px solid #ddd;">${excludedHtml}</fieldset>`;
+          return;
+        }
+        const patternHtml = aff.patterns.map((p) =>
+          `<li><code>${esc(p.template_id ?? '?')}</code> &nbsp; <code>${esc(p.ref_glob)}</code> &nbsp; ${
+            Object.entries(p.required_params).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(', ')
+          }</li>`
+        ).join('');
+        container.innerHTML = `
+          <fieldset style="margin: 1em 0; padding: 0.75em; border: 1px solid #ddd;">
+            <label>
+              <input type="checkbox" id="session-on-approve" />
+              Also approve any matching shape for the next
+              <select id="ttl-minutes">
+                <option value="5">5 min</option>
+                <option value="15" selected>15 min</option>
+                <option value="30">30 min</option>
+                <option value="60">60 min</option>
+              </select>
+            </label>
+            <p>This would let the same secret(s) be pushed again to the exact destinations below, within the time window:</p>
+            <ul>${patternHtml}</ul>
+            <p>Different env-var names, environments, repos, or projects are NOT covered.</p>
+            ${excludedHtml}
+            <p style="font-size: 90%;">Revoke any time: <code>secret-shuttle internal session revoke &lt;session-id&gt;</code></p>
+          </fieldset>
         `;
       }
       const params = new URLSearchParams(location.search);
@@ -157,9 +205,25 @@
         `;
         }
         document.getElementById("status").textContent = `Status: ${g.status}`;
+        renderSessionAffordance(g.session_affordance);
       }
       async function send(action) {
-        const r = await fetch(`/ui/approvals/${id}/${action}?token=${token}`, { method: "POST" });
+        // Burst 5 §2b Task 2b.5: when the user checks "Also approve any matching
+        // shape for the next N minutes" on a bootstrap-action grant, attach
+        // `{ session: { ttl_minutes } }` to the approve POST body. The route
+        // (Task 2b.4) reads it via readBoundedJson(..., { allowEmpty: true });
+        // an empty body is the legacy unchecked-path behavior.
+        const init = { method: 'POST', headers: { 'content-type': 'application/json' } };
+        if (action === 'approve') {
+          const sessionCheck = document.getElementById('session-on-approve');
+          const ttlSelect = document.getElementById('ttl-minutes');
+          const body = {};
+          if (sessionCheck && sessionCheck.checked && ttlSelect) {
+            body.session = { ttl_minutes: parseInt(ttlSelect.value, 10) };
+          }
+          init.body = JSON.stringify(body);
+        }
+        const r = await fetch(`/ui/approvals/${id}/${action}?token=${token}`, init);
         if (r.ok) {
           document.getElementById("status").textContent = `Status: ${action}d`;
           stopPolling();

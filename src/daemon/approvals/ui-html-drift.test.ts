@@ -113,3 +113,13 @@ test("ui.html: renders bootstrap action with plan_summary parse", async () => {
     "ui.html must call renderBootstrap(g) when action === 'bootstrap'",
   );
 });
+
+test("ui.html: contains the session-affordance placeholder + renderer + ttl_minutes wiring", async () => {
+  const html = await loadHtml();
+  // Placeholder div the renderer fills in or hides.
+  assert.match(html, /id="session-affordance"/, "ui.html must include the #session-affordance placeholder");
+  // Renderer function is invoked from load().
+  assert.match(html, /renderSessionAffordance\s*\(/, "ui.html must call renderSessionAffordance() in load()");
+  // Approve POST body carries ttl_minutes when checkbox is checked.
+  assert.match(html, /ttl_minutes/, "ui.html must reference ttl_minutes in approve POST body");
+});
