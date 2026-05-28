@@ -47,14 +47,17 @@ export function registerSessionUiRoutes(server: DaemonServer, sessionStore: Sess
       destination_domains: grant.destination_domains,
       template_ids: grant.template_ids,
       allowed_actions: grant.allowed_actions,
+      required_params: grant.required_params,
       ttl_ms: grant.ttl_ms,
       max_uses: grant.max_uses,
     }, null, 2);
+    const requiredParamsLine = formatRequiredParamsLine(grant.required_params);
     const html = template
       .replaceAll("__SESSION_ID__", htmlEscape(grant.id))
       .replaceAll("__UI_TOKEN__", htmlEscape(grant.ui_token))
       .replaceAll("__TTL_MINUTES__", String(Math.round(grant.ttl_ms / 60_000)))
-      .replaceAll("__PATTERN_JSON__", htmlEscape(safePattern));
+      .replaceAll("__PATTERN_JSON__", htmlEscape(safePattern))
+      .replaceAll("__REQUIRED_PARAMS_LINE__", requiredParamsLine);
     res.statusCode = 200;
     res.setHeader("content-type", "text/html; charset=utf-8");
     res.setHeader("cache-control", "no-store");
@@ -147,6 +150,22 @@ export function registerSessionUiRoutes(server: DaemonServer, sessionStore: Sess
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ ok: true, status: verb === "approve" ? "granted" : "denied" }));
   });
+}
+
+/**
+ * Render a human-readable `Required params:` row for the session approval UI.
+ * Returns a fully-escaped <p> element when non-empty, or an empty string when
+ * the pattern has no `required_params` constraint. The empty-string path keeps
+ * the template clean for the common case (no param constraints).
+ */
+function formatRequiredParamsLine(rp: Record<string, string> | undefined): string {
+  if (rp === undefined) return "";
+  const entries = Object.entries(rp);
+  if (entries.length === 0) return "";
+  const formatted = entries
+    .map(([k, v]) => `${htmlEscape(k)}=${htmlEscape(v)}`)
+    .join(", ");
+  return `<p class="required-params"><strong>Required params:</strong> ${formatted}</p>`;
 }
 
 function htmlEscape(s: string): string {
