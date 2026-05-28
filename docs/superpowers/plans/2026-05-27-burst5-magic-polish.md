@@ -23,12 +23,12 @@ This plan went through three review rounds against the actual codebase. The foll
 - **Bootstrap batch_id on `ApprovalGrant`**: lives at `grant.template_params.batch_id` (set by `src/daemon/api/routes/bootstrap.ts:107`), NOT `grant.batch_id`.
 - **`SessionStore.revoke(id)`** is the method to flip a session to `revoked` status (`src/daemon/approvals/session-store.ts:69`). There is **no `delete` method**.
 - **Session fields**: `uses: number` (incremented on consume) and `max_uses?: number` (optional cap, 1..1000). There is no `uses_remaining`. The max-uses check is `s.max_uses === undefined || s.uses < s.max_uses`.
-- **`requireApprovals` option names** (`src/daemon/approvals/require-approvals.ts:12`): `approvalIdsFromClient` (NOT `approval_ids`), `sessionId` (NOT `session_id`), `sessionStore`. The function already implements a two-phase plan/commit architecture — auto-match is a new Phase-1 sub-case that emits `{ kind: "session", binding, sessionId }`, reusing Phase-2's existing session-commit primitive.
+- **`requireApprovals` option names** (`src/daemon/approvals/require-approvals.ts:12`): `approvalIdsFromClient` (NOT `approval_ids`), `sessionId` (NOT `session_id`), `sessionStore`. The function already implements a two-phase plan/commit architecture — auto-match is a new Phase-1 sub-case that emits `{ kind: "session", binding, sessionId, auto: true }`, reusing Phase-2's existing session-commit primitive. The `auto` boolean is required by `resolveSessionRaces` to distinguish auto-matched entries (silently demote on hard-failure session states) from explicit-sessionId entries (rethrow hard-failure codes).
 - **Session matcher entry point**: `matchesSessionPattern(binding, pattern)` at `src/daemon/approvals/session-matchers.ts:5` — single exported function that dispatches on action. The internal helpers (`templateRunMatches` etc.) are NOT exported. `ApprovalBinding.action` is stored as `"template"` and canonicalized to `"template-run"` by `canonicalAction()`.
 - **Template registry**: `TemplateRegistry` class with private `map` and `list()` method (`src/daemon/templates/registry.ts:37`). No module-level `TEMPLATES` constant. Helpers like `validateDestinationDefiningParamsCoverage` take a `TemplateRegistry` instance.
 - **`server.addRoute` body**: handlers receive ALREADY-PARSED JSON via `readJsonBody` (see `src/daemon/server.ts:223`). Use `asObject(raw)` + `reqString` / `optString` / `optBool` from `src/daemon/api/validate.ts`, matching the pattern in `bootstrap.ts:31`. **Do not call `JSON.parse(raw)`**.
 - **`parseSessionPatternFromBody`** (`src/daemon/api/routes/approvals-session.ts:103`) dereferences `const p = o.pattern` at line 110. **Every pattern field is read from `p`, NOT from the outer body `o`.** New fields (e.g. `required_params`) must read from `p`.
-- **`Plan` type in `require-approvals.ts:25`**: `kind: "session"` has no `sessionId` field today. Phase 2 reads `opts.sessionId!` at lines 329 and 344 (single-session-for-the-call assumption). Auto-match REQUIRES refactoring `Plan` to `{ kind: "session"; binding; sessionId: string }` so each per-binding plan entry can target its own session (auto-matched vs explicit). The explicit-sessionId path also gets updated to stamp `opts.sessionId` onto its plan entries.
+- **`Plan` type in `require-approvals.ts:25`**: `kind: "session"` has no `sessionId` field today. Phase 2 reads `opts.sessionId!` at lines 329 and 344 (single-session-for-the-call assumption). Auto-match REQUIRES refactoring `Plan` to `{ kind: "session"; binding; sessionId: string; auto: boolean }` so each per-binding plan entry can (a) target its own session — auto-matched picks a candidate per binding while explicit-sessionId reuses opts.sessionId — and (b) tell `resolveSessionRaces` whether to silently demote vs rethrow on hard-failure session states. The explicit-sessionId path stamps `auto: false`; the auto-match path stamps `auto: true`.
 - **Template registry is module-scoped**: `export const registry = new TemplateRegistry()` at `src/daemon/api/routes/templates.ts:25`. `DaemonServices` has no `templates` field. The validator import is `import { registry as templateRegistry } from "./routes/templates.js"`; calls look like `validateDestinationDefiningParamsCoverage(templateRegistry)`.
 - **Audit log path** on `ShuttlePaths` is `auditLogPath` (`src/shared/config.ts:13,31`), **not `auditLog`**. Audit-route code reads `paths.auditLogPath`.
 - **CLI status route**: `secret-shuttle status` calls `GET /v1/health` at `src/cli/commands/status.ts:53`, **not `/v1/status`**. New status fields (`active_sessions[]`) belong on the health route (`src/daemon/api/routes/health.ts`). A separate `/v1/status` route exists but is unused by the CLI for the user-facing status command.
@@ -3770,7 +3770,20 @@ Create `src/cli/commands/status-active-sessions.test.ts`:
 ```ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import path from "node:path";
 import { withDaemonForTest, asAgent, call } from "../../test-helpers/daemon.js";
+
+const execp = promisify(execFile);
+
+// Helper: destructure-and-guard so test code typechecks under
+// noUncheckedIndexedAccess (length assertions don't narrow index access).
+function first<T>(arr: readonly T[], label: string): T {
+  const [x] = arr;
+  assert.ok(x !== undefined, `expected ${label}[0] to exist`);
+  return x;
+}
 
 test("GET /v1/health includes active_sessions[] for the calling agent", async () => {
   await withDaemonForTest(async (ctx) => {
@@ -3788,9 +3801,10 @@ test("GET /v1/health includes active_sessions[] for the calling agent", async ()
       const health = await call(ctx, "GET", "/v1/health", null);
       assert.ok(Array.isArray(health.active_sessions));
       assert.equal(health.active_sessions.length, 1);
-      assert.equal(health.active_sessions[0].id, s.id);
-      assert.match(health.active_sessions[0].pattern_summary, /vercel-env-add/);
-      assert.match(health.active_sessions[0].pattern_summary, /name=STRIPE_KEY/);
+      const session = first(health.active_sessions, "health.active_sessions");
+      assert.equal(session.id, s.id);
+      assert.match(session.pattern_summary, /vercel-env-add/);
+      assert.match(session.pattern_summary, /name=STRIPE_KEY/);
     });
   });
 });
