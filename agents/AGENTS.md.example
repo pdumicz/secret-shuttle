@@ -5,10 +5,10 @@ Use Secret Shuttle whenever this repository or task needs API keys, tokens, webh
 Setup:
 
 ```bash
-secret-shuttle daemon start && secret-shuttle unlock
+npx secret-shuttle init
 ```
 
-Run these before the first secret operation. `unlock` opens a local web window for the passphrase.
+Run this once per project. `init` spawns the daemon, walks the user through setting a vault passphrase via a local browser window (the CLI never reads the passphrase), and auto-installs this agent's canonical skill file. After `init` succeeds the agent is ready to use the Burst 5+ verb surface (`provision`, `secrets list`, `audit`, etc.).
 
 Rules:
 
@@ -19,7 +19,7 @@ Rules:
 - When a secret is visible or about to be entered, stop observing the page.
 - While blind mode is active, do not use screenshots, DOM inspection, accessibility-tree reads, console reads, network-body reads, or clipboard reads.
 - Use `secret-shuttle capture` for visible generated secrets.
-- Use `secret-shuttle generate` for new local secrets.
+- Use `secret-shuttle provision --secret <NAME> --from random_32_bytes` for new local secrets.
 - Use `secret-shuttle inject` for focused-field secret entry.
 - Use `secret-shuttle compare` for verification without reading values.
 - Verify production setup using non-secret UI signals only.
