@@ -66,8 +66,8 @@ EOF
 
 [Notes on what flew. Be specific — name verbs, prompts, scene URLs, error codes.]
 
-- 
-- 
+-
+-
 
 ---
 
@@ -75,8 +75,8 @@ EOF
 
 [Notes. Each entry should name the verb/step, what blocked, and how recovery happened (or didn't).]
 
-- 
-- 
+-
+-
 
 ---
 
@@ -84,8 +84,8 @@ EOF
 
 [Concrete reproducible-or-not-reproducible bugs. If reproducible, paste the agent's transcript + the daemon's audit/error response.]
 
-- 
-- 
+-
+-
 
 ---
 
@@ -93,8 +93,8 @@ EOF
 
 [UX target misses that don't block publish. File as ranked items.]
 
-- 
-- 
+-
+-
 
 ---
 

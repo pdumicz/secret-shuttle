@@ -221,3 +221,74 @@ test("runInfer: mixed Vercel + Supabase project routes Supabase to matching name
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("runInfer: supabase config present but NOT linked → supabase_not_linked issue, plan non-executable", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ss-infer-notlinked-"));
+  try {
+    // supabase/config.toml present (Supabase detected) but no .supabase/project.json
+    // (project never linked). A SUPABASE_* name routes to Supabase, but with no
+    // ref the detector emits the per-secret needs_edit instead of a real dest.
+    await writeFile(join(dir, "vercel.json"), "{}\n");
+    await mkdir(join(dir, "supabase"));
+    await writeFile(join(dir, "supabase/config.toml"), 'project_id = "local-dev"\n');
+    await writeFile(join(dir, ".env.example"), "SUPABASE_SERVICE_ROLE_KEY=\n");
+
+    const result = await runInfer({ cwd: dir });
+
+    // The Supabase name still routes to a Supabase destination, but it's the
+    // TODO sentinel the user must resolve by running `supabase link`.
+    const bySecret = new Map(result.plan.map((e) => [e.secret, e.destinations]));
+    assert.deepEqual(bySecret.get("SUPABASE_SERVICE_ROLE_KEY"), [
+      "vercel:production",
+      "supabase:TODO_run_supabase_link_first",
+    ]);
+    // Exactly one needs_edit issue, on the matching secret, of kind supabase_not_linked,
+    // and it tells the user how to fix it.
+    assert.equal(result.issues.length, 1);
+    assert.equal(result.issues[0]?.secret, "SUPABASE_SERVICE_ROLE_KEY");
+    assert.match(result.issues[0]?.issue ?? "", /\[supabase_not_linked\]/);
+    assert.match(result.issues[0]?.issue ?? "", /supabase link --project-ref/);
+    // An unresolved needs_edit issue means the plan is not executable as-is.
+    assert.equal(result.executable, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("runInfer: infer.supabaseNames is not an array → whole override dropped, supabase_inferconfig_invalid issue, non-executable", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ss-infer-badoverride-"));
+  try {
+    // Linked Supabase project, but the override is malformed (a string, not an
+    // array). The sanitizer drops the whole override and emits one batch-wide
+    // needs_edit issue attributed to the config file (no secret owns it).
+    await writeFile(join(dir, "vercel.json"), "{}\n");
+    await mkdir(join(dir, "supabase"));
+    await writeFile(join(dir, "supabase/config.toml"), 'project_id = "local-dev"\n');
+    await mkdir(join(dir, ".supabase"));
+    await writeFile(
+      join(dir, ".supabase/project.json"),
+      JSON.stringify({ ref: "abcdefghijklmnopqrst" }),
+    );
+    await writeFile(join(dir, ".env.example"), "DATABASE_SERVICE_SECRET=\n");
+    await writeFile(
+      join(dir, "secret-shuttle.config.json"),
+      JSON.stringify({ infer: { supabaseNames: "DATABASE_SERVICE_SECRET" } }),
+    );
+
+    const result = await runInfer({ cwd: dir });
+
+    // The malformed override surfaces once, attributed to the config file.
+    const overrideIssue = result.issues.find(
+      (i) => i.secret === "secret-shuttle.config.json",
+    );
+    assert.notEqual(overrideIssue, undefined, "one batch-wide override issue");
+    assert.match(overrideIssue?.issue ?? "", /\[supabase_inferconfig_invalid\]/);
+    // Override dropped → the non-matching name does NOT route to Supabase.
+    const bySecret = new Map(result.plan.map((e) => [e.secret, e.destinations]));
+    assert.deepEqual(bySecret.get("DATABASE_SERVICE_SECRET"), ["vercel:production"]);
+    // A needs_edit issue means the plan is not executable as-is.
+    assert.equal(result.executable, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

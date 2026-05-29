@@ -897,6 +897,46 @@
     /* ── PER-SCENE LAYOUTS ─────────────────────────────────────────── */
     /* Scenes 1, 2, 4, 9 use data-layout="center" (flex centered) */
 
+    /* Scene 0 — magic path: terminal left, hub approval card right */
+    .scene-stage[data-scene="0"] .term {
+      position: absolute;
+      top: 64px; left: 36px;
+      width: 560px;
+    }
+    .scene-stage[data-scene="0"] .approval {
+      position: absolute;
+      top: 150px; right: 40px;
+      width: 392px;
+      z-index: 3;
+    }
+
+    /* Session-affordance checkbox inside the hub approval card */
+    .approval-session {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      margin-top: 12px;
+      padding: 9px 11px;
+      background: var(--accent-soft);
+      border: 1px solid var(--ap-rule);
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--ink-strong);
+    }
+    .approval-session .box {
+      flex: 0 0 auto;
+      width: 15px; height: 15px;
+      margin-top: 1px;
+      border-radius: 3px;
+      background: #0a7a4c;
+      color: #fff;
+      display: grid; place-items: center;
+      font-size: 10px;
+      box-shadow: inset 0 -1px 0 rgba(0,0,0,0.12);
+    }
+    .approval-session em { font-style: normal; font-weight: 600; }
+
     /* Scene 3 — terminal left, unlock window right */
     .scene-stage[data-scene="3"] .term {
       position: absolute;
@@ -1303,10 +1343,13 @@
     <!-- ────────────────────────── STAGE ─────────────────────────────── -->
     <section class="stage">
 
-      <!-- Scene 0: the magic path — provision --infer → one approval → continue → audit -->
-      <div class="scene-stage active" data-scene="0" data-layout="center">
-        <div class="scene-caption">scene 00 — claude code · ~/projects/myapp</div>
-        <div class="win term" style="width:720px">
+      <!-- Scene 0: the magic path — provision --infer → one approval → continue → audit.
+           Terminal-left + hub-approval-card-right (per spec §4): the card makes the
+           one-approval session-affordance UX visible, not just terminal text. -->
+      <div class="scene-stage active" data-scene="0">
+        <div class="scene-caption">scene 00 — claude code · one approval ships every secret</div>
+
+        <div class="win term">
           <div class="win-bar">
             <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
             <div class="win-title">~/projects/myapp — claude</div>
@@ -1324,9 +1367,7 @@
               <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  approval_required · batch b_8f3a… · 1 approval · </span><span class="em">opening hub →</span></div>
             </div>
             <div class="group">
-              <div class="line assistant"><span><span class="warn">Approve in the window your browser just opened.</span> One card covers the whole batch:</span></div>
-              <div class="line assistant" style="margin-top:6px"><span>  ☑ Also approve any matching shape for the next <span class="em">15 min</span></span></div>
-              <div class="line assistant" style="margin-top:4px"><span class="dim">  (you click Approve — the agent never sees a value)</span></div>
+              <div class="line assistant"><span><span class="warn">Approve in the window your browser just opened.</span> One card covers the whole batch — <span class="dim">you click Approve, the agent never sees a value.</span></span></div>
             </div>
             <div class="group">
               <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">provision</span><span class="args">--continue --batch b_8f3a… --approval-id ag_2c1…</span></div>
@@ -1338,6 +1379,29 @@
             </div>
             <div class="group">
               <div class="line assistant"><span>Done. Three secrets live in prod. Nobody pasted anything; I never saw a value.<span class="cursor"></span></span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hub approval card — one card covers the whole batch, session checkbox visible -->
+        <div class="win approval">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">Secret Shuttle Approval</div>
+          </div>
+          <div class="approval-body">
+            <h2>Secret Shuttle</h2>
+            <div class="approval-action">Push <b>3 secrets</b> from batch <b>b_8f3a…</b> → <b>vercel:production</b>, <b>supabase:&lt;ref&gt;</b></div>
+            <div class="row"><span class="label">Environment</span><span class="v">production</span></div>
+            <div class="row"><span class="label">Destinations</span><span class="v">vercel · supabase</span></div>
+            <div class="row"><span class="label">Agent</span><span class="v"><code>ag_2c1…</code></span></div>
+            <label class="approval-session">
+              <span class="box">✓</span>
+              <span>Also approve any matching shape for the next <em>15 min</em></span>
+            </label>
+            <div class="approval-actions">
+              <button class="ap-btn ap-deny">Deny</button>
+              <button class="ap-btn ap-approve">Approve</button>
             </div>
           </div>
         </div>
@@ -1868,7 +1932,10 @@
       function getInitialScene() {
         const raw = new URLSearchParams(window.location.search).get("scene");
         if (raw === null) return 0;
-        const n = Number.parseInt(raw, 10);
+        // Strict: only bare integers count. Number("1abc") is NaN and
+        // Number("1.5") is non-integer, so "?scene=1abc" / "?scene=1.5"
+        // both fall back to Scene 0 (Number.parseInt would wrongly accept them).
+        const n = Number(raw);
         if (!Number.isInteger(n) || n < 0 || n > TOTAL) return 0;
         return n;
       }
