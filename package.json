@@ -1,6 +1,6 @@
 {
   "name": "secret-shuttle",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Local-daemon CLI that lets AI coding agents use secrets without seeing them.",
   "homepage": "https://github.com/pdumicz/secret-shuttle",
   "repository": {
@@ -18,7 +18,6 @@
     "!dist/**/*.test.d.ts",
     "!dist/**/*.js.map",
     "!dist/**/*.tsbuildinfo",
-    "SKILL.md",
     "skills/secret-shuttle/SKILL.md",
     "agents",
     "docs",

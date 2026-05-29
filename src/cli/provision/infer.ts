@@ -15,6 +15,20 @@ import { promisify } from "node:util";
 import { ShuttleError } from "../../shared/errors.js";
 import { inferSourceForName, type InferredSource } from "./infer-rules.js";
 import { isInferYmlExecutable, type InferredPlanEntry, type InferGateIssue } from "./infer-gate.js";
+// Burst 6 §2: per-secret Supabase routing. The detector emits its own
+// additive SupabaseDetectorIssue ({ kind; message }); the wiring below maps
+// each into the existing InferGateIssue ({ secret; issue }) contract.
+// resolveSupabaseProject + sanitizeSupabaseOverride do all the cwd-invariant
+// work ONCE before the per-secret loop; detectSupabaseForSecret is then a
+// pure sync predicate over that pre-resolved state. fileExists is shared
+// here too (one definition, not a per-file duplicate).
+import {
+  detectSupabaseForSecret,
+  fileExists,
+  resolveSupabaseProject,
+  sanitizeSupabaseOverride,
+  type InferConfig,
+} from "./infer-supabase.js";
 
 const execp = promisify(exec);
 
@@ -49,24 +63,83 @@ export async function runInfer(opts: InferOptions): Promise<InferResult> {
     );
   }
   const destinations = await detectDestinations(opts.cwd);
+  const inferConfig = await loadInferConfig(opts.cwd);
 
-  const entries: InferredPlanEntry[] = names.map((name) => {
+  // Burst 6 §2: resolve all cwd-invariant Supabase state ONCE, before the
+  // per-secret loop (mirroring detectDestinations' single filesystem probe).
+  // - resolveSupabaseProject: the supabase/config.toml stat + project.json read.
+  // - sanitizeSupabaseOverride: validates secret-shuttle.config.json's
+  //   infer.supabaseNames. Its issues are batch-wide (they describe the whole
+  //   override, not one secret), so they're surfaced ONCE here rather than
+  //   re-derived inside every per-secret call.
+  const supabaseProject = await resolveSupabaseProject(opts.cwd);
+  const supabaseOverride = sanitizeSupabaseOverride(inferConfig?.supabaseNames);
+
+  const entries: InferredPlanEntry[] = [];
+  // Per-secret Supabase issues (only ever `supabase_not_linked`). On an
+  // unlinked project every matching secret emits the SAME message, which is
+  // noise — dedupe by `kind::message` via an O(1) Set lookup (not the old
+  // O(n²) .some() scan). Batch-wide override issues are added once below and
+  // bypass this dedupe.
+  const supabaseIssues: InferGateIssue[] = [];
+  const seenIssueKeys = new Set<string>();
+
+  // Batch-wide override-validation issues, surfaced once.
+  for (const issue of [
+    supabaseOverride.wholeOverrideDroppedIssue,
+    supabaseOverride.invalidEntriesIssue,
+  ]) {
+    if (issue === null) continue;
+    // No secret owns a whole-override issue; attribute it to the config file.
+    supabaseIssues.push({
+      secret: "secret-shuttle.config.json",
+      issue: `[${issue.kind}] ${issue.message}`,
+    });
+  }
+
+  for (const name of names) {
     const source = inferSourceForName(name);
-    return {
+    // Burst 6 §2: per-secret Supabase routing. The project-wide detectors
+    // above contribute their string[] uniformly; Supabase appends per-secret
+    // only when the name predicate matches. Pure sync call over pre-resolved
+    // state — no filesystem I/O per secret.
+    const supa = detectSupabaseForSecret({
+      secretName: name,
+      project: supabaseProject,
+      validOverrideNames: supabaseOverride.validNames,
+    });
+
+    // Map the detector-native SupabaseDetectorIssue to the existing
+    // InferGateIssue { secret; issue } contract, folding `kind` into the
+    // human-readable string so no information is lost. Dedupe identical
+    // per-secret messages.
+    for (const issue of supa.issues) {
+      const key = `${issue.kind}::${issue.message}`;
+      if (seenIssueKeys.has(key)) continue;
+      seenIssueKeys.add(key);
+      supabaseIssues.push({ secret: name, issue: `[${issue.kind}] ${issue.message}` });
+    }
+
+    entries.push({
       secret: name,
       ref: refFor(name, source),
       source: source as InferredPlanEntry["source"], // existing source pushes placeholder
-      destinations: destinations.length > 0 ? [...destinations] : [],
-    };
-  });
+      destinations: [
+        ...(destinations.length > 0 ? destinations : []),
+        ...supa.destinations,
+      ],
+    });
+  }
 
   const gate = isInferYmlExecutable(entries);
   const yml = renderYml(entries);
 
   return {
     yml,
-    executable: gate.ok,
-    issues: gate.issues,
+    // If supabase-derived needs_edit issues exist, the yml isn't fully
+    // executable until the user resolves them (e.g., runs `supabase link`).
+    executable: gate.ok && supabaseIssues.length === 0,
+    issues: [...gate.issues, ...supabaseIssues],
     plan: entries,
   };
 }
@@ -102,6 +175,27 @@ function parseEnvExampleNames(content: string): string[] {
   return names;
 }
 
+// Burst 6 §2: optional opt-in override for Supabase routing.
+async function loadInferConfig(cwd: string): Promise<InferConfig | null> {
+  try {
+    const raw = await readFile(join(cwd, "secret-shuttle.config.json"), "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const root = parsed as Record<string, unknown>;
+    const infer = root["infer"];
+    if (infer === undefined || infer === null || typeof infer !== "object" || Array.isArray(infer)) {
+      return null;
+    }
+    // Pass through whatever shape is at `infer` — detectSupabaseForSecret
+    // sanitizes inside (and emits needs_edit issues for invalid entries).
+    return infer as InferConfig;
+  } catch {
+    return null;
+  }
+}
+
 async function detectDestinations(cwd: string): Promise<string[]> {
   const out: string[] = [];
   if (await fileExists(join(cwd, "vercel.json"))) {
@@ -115,15 +209,6 @@ async function detectDestinations(cwd: string): Promise<string[]> {
     out.push(repo ? `github-actions:${repo}` : "github-actions:OWNER/REPO");
   }
   return out;
-}
-
-async function fileExists(p: string): Promise<boolean> {
-  try {
-    const s = await stat(p);
-    return s.isFile();
-  } catch {
-    return false;
-  }
 }
 
 async function dirExists(p: string): Promise<boolean> {
