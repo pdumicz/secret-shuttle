@@ -24,7 +24,7 @@ These are verified facts about the current codebase that the engineer needs befo
 
 5. **Inference tests live at `src/cli/provision/infer.test.ts`** with the `mkdtemp` + `writeFile` pattern. Test fixtures use `import { runInfer } from "./infer.js"` (ESM `.js` extension).
 
-6. **`InferGateIssue` is the existing `needs_edit` shape** — defined at `src/cli/provision/infer-gate.ts`. Read it before composing the Supabase detector's `needs_edit` messages. The Supabase detector's issues must match the existing shape (no new type).
+6. **`InferGateIssue` is the existing `needs_edit` shape** — defined at `src/cli/provision/infer-gate.ts:31-34` as `{ secret: string; issue: string }` (NOT `{ kind; message }`). The Supabase detector therefore CANNOT emit `InferGateIssue` objects directly — its issues are not yet bound to a single secret name (override-validation issues span the whole batch) and carry a machine-readable `kind`. The Supabase detector emits its own additive `SupabaseDetectorIssue` type (`{ kind: string; message: string }`); the wiring step in `runInfer` (Task 2.3) maps each into the existing `{ secret, issue }` contract before merging into `InferResult.issues`. `InferGateIssue` itself is NOT modified — `isInferYmlExecutable` and the existing infer tests depend on its current shape. This is the "compatible additive contract" decision (see §2 Open-Question resolution below).
 
 7. **No `secret-shuttle.config.json` loader exists yet.** Plan must introduce a minimal one — either inline in the Supabase detector, or as a small shared helper. Recommended: inline (no new config infrastructure for one optional field).
 
@@ -58,7 +58,7 @@ These are verified facts about the current codebase that the engineer needs befo
 | `examples/stripe-to-vercel/walkthrough.md` | MODIFY | Prepend Magic Path section; existing content moves under "Advanced: low-level mechanics" |
 | `README.md` | MODIFY | Banner rewrite (0.1.1 → 0.3.1); positioning section between hero and Quickstart; demo URL update to `?scene=0` |
 | `src/cli/provision/infer.ts` | MODIFY | Add per-secret Supabase invocation in the entries.map loop; accept optional inferConfig |
-| `src/cli/provision/infer-supabase.ts` | CREATE | `detectSupabaseForSecret({ cwd, secretName, inferConfig })` + helper for loading the optional config + `SUPABASE_NAME_PREDICATE_RE` + `SUPABASE_OVERRIDE_NAME_RE` |
+| `src/cli/provision/infer-supabase.ts` | CREATE | `detectSupabaseForSecret({ cwd, secretName, inferConfig })` + additive `SupabaseDetectorIssue` (`{ kind; message }`) type + helper for loading the optional config + `SUPABASE_NAME_PREDICATE_RE` + `SUPABASE_OVERRIDE_NAME_RE`. Does NOT modify `infer-gate.ts`. |
 | `src/cli/provision/infer-supabase.test.ts` | CREATE | 7+ fixtures per spec §2.4 |
 | `demo/index.html` | MODIFY | Prepend Scene 0 markup + CSS layout; add `?scene=N` query-param parsing |
 | `docs/dogfood/burst6-template.md` | CREATE | Pre-populated friction-log skeleton for the post-burst user dogfood run |
@@ -457,7 +457,9 @@ EOF
 **Files:**
 - Modify: `README.md`
 
-Note: this task lands ALONGSIDE Task 3.1 (positioning section) in a single combined commit, because both touch `README.md` and changing them in two separate commits creates a flaky intermediate state. The wrap step also touches the version string in this banner (the `0.3.1 — beta` reference) — handle the banner-version coupling there.
+Note: this task lands ALONGSIDE Task 3.1 (positioning section) in a single combined commit, because both touch `README.md` and changing them in two separate commits creates a flaky intermediate state.
+
+**Version-string coupling (spec §1.6):** the README banner must NOT advertise `0.3.1` before `package.json` is bumped to `0.3.1`, or there is an intermediate commit range where the README claims a version `npm view` cannot resolve. So this task writes a **version-neutral** banner (no version number — just the "beta, six bursts of review" framing). The `0.3.1` version string is injected into the banner by Task W.2 (Step W.2.1b) in the SAME commit as the `package.json` bump, so README and package version flip together.
 
 - [ ] **Step 1.6.1: Locate the existing status banner**
 
@@ -465,15 +467,15 @@ Run: `grep -n "Status: 0.1.1\|early prototype" README.md`
 
 Expected: a line near the top reading `> **Status: 0.1.1 — early prototype. Do not trust this with real production secrets yet.**` followed by a longer paragraph.
 
-- [ ] **Step 1.6.2: Replace the banner**
+- [ ] **Step 1.6.2: Replace the banner (version-neutral)**
 
-Use Edit to replace the two-paragraph banner block. New content:
+Use Edit to replace the two-paragraph banner block. New content — NO version number (W.2 injects `0.3.1` in lockstep with the package bump):
 
 ```markdown
-> **Status: 0.3.1 — beta.** The architecture has been through six bursts of adversarial security review with fixes shipped at each gate. Not yet independently audited; recommend test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployments.
+> **Status: beta.** The architecture has been through six bursts of adversarial security review with fixes shipped at each gate. Not yet independently audited; recommend test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployments.
 ```
 
-(One-paragraph block, replacing the existing two-paragraph block. Keep the `>` blockquote prefix.)
+(One-paragraph block, replacing the existing two-paragraph block. Keep the `>` blockquote prefix. Deliberately omits the `0.3.1` version string — see the version-string-coupling note above; Task W.2 adds it.)
 
 - [ ] **Step 1.6.3: Verify**
 
@@ -481,8 +483,9 @@ Run:
 ```bash
 grep -n "Status:" README.md
 grep -n "early prototype" README.md
+grep -n "0\.3\.1" README.md
 ```
-Expected: the first grep matches `Status: 0.3.1 — beta.`; the second grep returns no matches.
+Expected: the first grep matches `Status: beta.`; the second grep returns no matches; the third grep returns NO matches yet (the version string lands in W.2 alongside the package bump).
 
 - [ ] **Step 1.6.4: Do NOT commit yet** — bundle with Task 3.1.
 
@@ -507,33 +510,42 @@ Create `src/e2e/docs-no-removed-verbs.test.ts`:
 // SKILL.md, all agents/*.example.md, the magic-path walkthrough, and the
 // README) must not silently regress to reference the removed verbs.
 //
-// Scoped allowlist: the walkthrough has an "Advanced: low-level mechanics"
-// section that intentionally preserves historical mechanics like
-// `blind start`, `capture`, `inject`, `template run`. Those remain canonical
-// escape-hatch verbs and are NOT removed — they're allowlisted in the
-// walkthrough below the section header. The removed verbs (`bootstrap`,
-// `generate`, the `daemon start && unlock` ritual) are NEVER allowlisted.
+// IMPORTANT — what is and is NOT allowlisted (spec §1.7):
+// The walkthrough's "Advanced: low-level mechanics" section intentionally
+// preserves the canonical *escape-hatch* verbs `blind start`, `capture`,
+// `inject`, `template run`. Those verbs are NOT in REMOVED_TOKENS below, so
+// they pass this guard everywhere by construction — no per-section allowlist
+// is needed for them. The REMOVED verbs (`generate`, `bootstrap`, the
+// `daemon start && unlock` ritual) must NEVER be allowlisted, including below
+// that header. Therefore this test scans every line of every doc with NO
+// section exemption: removed tokens are forbidden everywhere, escape-hatch
+// tokens are allowed everywhere. (An earlier draft skipped all scanning below
+// the "Advanced" header, which would have let a removed verb slip through in
+// exactly the section the burst is meant to keep honest — that exemption is
+// deliberately gone.)
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
-interface ScannedDoc {
-  path: string;
-  /** When set, lines AT OR BELOW this header (i.e., after a line that exactly
-   *  matches `^## <header>$`) are exempt from removed-verb scanning. Used to
-   *  preserve the walkthrough's intentional historical-mechanics section. */
-  allowlistBelowHeader?: string;
-}
+// Spec §1.7 freezes the contract as the *glob* `agents/*.example.md`, not a
+// frozen list. Enumerate the directory at collection time (readdirSync keeps
+// the `for`-loop test registration synchronous) so any NEW agent example added
+// later is covered by this drift guard automatically — a hardcoded list would
+// silently exempt future surfaces, defeating the guard. Matches both
+// `*.example.md` (e.g. codex-instructions.example.md) and the `AGENTS.md.example`
+// naming variant by requiring the `example` + `md` tokens in either order.
+const AGENT_DOCS: string[] = readdirSync(join(process.cwd(), "agents"))
+  .filter((f) => /\.example\.md$/.test(f) || /\.md\.example$/.test(f))
+  .sort()
+  .map((f) => join("agents", f));
 
-const DOCS: ScannedDoc[] = [
-  { path: "skills/secret-shuttle/SKILL.md" },
-  { path: "agents/AGENTS.md.example" },
-  { path: "agents/codex-instructions.example.md" },
-  { path: "agents/cursor-rules.example.md" },
-  { path: "README.md" },
-  // Walkthrough has the only allowlisted section.
-  { path: "examples/stripe-to-vercel/walkthrough.md", allowlistBelowHeader: "Advanced: low-level mechanics" },
+const DOCS: string[] = [
+  "skills/secret-shuttle/SKILL.md",
+  ...AGENT_DOCS,
+  "README.md",
+  "examples/stripe-to-vercel/walkthrough.md",
 ];
 
 const REMOVED_TOKENS: Array<{ token: RegExp; what: string }> = [
@@ -544,27 +556,17 @@ const REMOVED_TOKENS: Array<{ token: RegExp; what: string }> = [
   { token: /daemon\s+start\s*&&\s*(?!\s*[\r\n])/, what: "removed `daemon start && ...` ritual (use `npx secret-shuttle init`)" },
 ];
 
-for (const doc of DOCS) {
-  test(`drift-guard: ${doc.path} contains no removed-verb tokens`, async () => {
-    const fullText = await readFile(join(process.cwd(), doc.path), "utf8");
+for (const path of DOCS) {
+  test(`drift-guard: ${path} contains no removed-verb tokens`, async () => {
+    const fullText = await readFile(join(process.cwd(), path), "utf8");
     const lines = fullText.split("\n");
-    let inAllowlist = false;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] ?? "";
-      if (doc.allowlistBelowHeader !== undefined) {
-        // Trim trailing whitespace before comparing — markdown headers
-        // sometimes have stray spaces.
-        if (line.trim() === `## ${doc.allowlistBelowHeader}`) {
-          inAllowlist = true;
-          continue;
-        }
-      }
-      if (inAllowlist) continue;
       for (const { token, what } of REMOVED_TOKENS) {
         if (token.test(line)) {
           assert.fail(
-            `${doc.path}:${i + 1} contains ${what}\n  Line: ${line.trim()}\n  ` +
+            `${path}:${i + 1} contains ${what}\n  Line: ${line.trim()}\n  ` +
               `Burst 5/6 removed this verb. See docs/superpowers/specs/2026-05-29-burst6-vision-polish-design.md §1.`,
           );
         }
@@ -574,6 +576,8 @@ for (const doc of DOCS) {
 }
 ```
 
+> **Note on the escape-hatch verbs:** because `blind start`, `capture`, `inject`, and `template run` are deliberately absent from `REMOVED_TOKENS`, the walkthrough's "Advanced: low-level mechanics" section passes this guard without any section-scoped allowlist. The guard is strictly about the three *removed* surfaces. If a future change removes one of the escape-hatch verbs too, add it to `REMOVED_TOKENS` AND delete the corresponding references from the walkthrough — never re-introduce a below-header exemption.
+
 - [ ] **Step 1.7.2: Run the test, verify it PASSES**
 
 (It should pass because Tasks 1.2-1.5 already removed the offending tokens.)
@@ -581,7 +585,7 @@ for (const doc of DOCS) {
 ```bash
 npm test -- --test-name-pattern "drift-guard: " 2>&1 | tail -15
 ```
-Expected: 6 PASS (one per doc), 0 FAIL.
+Expected: one PASS per doc (6 today — the canonical SKILL.md, the README, the walkthrough, and the three current `agents/*.example.md`; the agent count tracks the directory, so adding a new example raises this number automatically), 0 FAIL.
 
 - [ ] **Step 1.7.3: Commit**
 
@@ -596,10 +600,13 @@ renamed the setup ritual from \`daemon start && unlock\` to
 agents/*.example.md, walkthrough, README) regressed at least once
 between bursts; this guard prevents silent re-introduction.
 
-Allowlist: \`examples/stripe-to-vercel/walkthrough.md\` below the
-"Advanced: low-level mechanics" header preserves canonical escape-hatch
-verbs (\`blind start\`, \`capture\`, \`inject\`, \`template run\`).
-Removed verbs are NEVER allowlisted.
+The guard scans every line of every doc with no section exemption:
+removed verbs are forbidden everywhere. The canonical escape-hatch
+verbs (\`blind start\`, \`capture\`, \`inject\`, \`template run\`) are
+simply absent from the removed-token list, so the walkthrough's
+"Advanced: low-level mechanics" section passes by construction — no
+below-header allowlist (which could have let a removed verb slip
+through that very section).
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -680,12 +687,12 @@ Burst 6 §1.6 + §3. Two changes to README.md that both shipped together
 because they share the file:
 
 - Banner: "Status: 0.1.1 — early prototype. Do not trust this with
-  real production secrets yet." → "Status: 0.3.1 — beta. ..." (honest
-  framing of where v0.3.1 actually is post-6-bursts of adversarial
-  review). The 0.3.1 version string here lands a release ahead of
-  the package.json bump in the wrap step — the wrap commit fixes the
-  same string in lockstep with the bump so the README never advertises
-  a version newer than npm view will resolve.
+  real production secrets yet." → "Status: beta. ..." (honest framing
+  of where the project actually is post-6-bursts of adversarial
+  review). Deliberately version-NEUTRAL here: the `0.3.1` version
+  string is injected by the wrap step (W.2) in the SAME commit as the
+  package.json bump, so the README never advertises a version newer
+  than npm view will resolve.
 - Positioning: "Why not Doppler / Infisical / 1Password CLI / Vercel
   envs?" 4-row comparison table inserted between the demo embed and
   the 30-Second Install section. Answers "what's different about
@@ -699,6 +706,16 @@ EOF
 ---
 
 ## §2 — `--infer` Supabase detector
+
+### Open-Question resolution: how config-level Supabase issues are represented
+
+Codex's plan-gate raised: *"Should config-level Supabase issues be represented as a synthetic `secret` issue, or should the infer issue type be intentionally extended?"* **Decision (frozen for implementation): neither — use a compatible additive contract.**
+
+- The existing `InferGateIssue` is `{ secret: string; issue: string }` (`infer-gate.ts:31-34`) and is consumed by `isInferYmlExecutable` plus the existing infer tests. It is **left unchanged** — no field additions, no `kind` union.
+- The Supabase detector defines its own additive `SupabaseDetectorIssue` type (`{ kind: string; message: string }`) in `infer-supabase.ts`. The `kind` gives the detector a machine-readable discriminant; the detector's override-validation issues are not naturally bound to a single secret, so the detector's own type fits them better than the gate's per-secret shape.
+- The Task 2.3 wiring **maps** each `SupabaseDetectorIssue` into the existing `{ secret, issue }` contract before merging into `InferResult.issues` — the originating secret name fills `secret`, and the `kind` is folded into the `issue` string as a `[kind]` prefix so nothing is lost. Override-validation issues (batch-wide) attach to the first secret that surfaced them, after dedupe.
+
+This keeps `InferResult.issues` a single homogeneous `InferGateIssue[]` for every existing consumer (no synthetic second issue type leaking out), while giving the detector a clean internal contract. It is the "explicitly design a compatible additive contract" path — chosen over extending `InferGateIssue` (would ripple into `isInferYmlExecutable` + its tests) and over a raw synthetic issue (would lose the machine-readable `kind`).
 
 ### Task 2.1: Scout existing infer module + write failing fixture (a)
 
@@ -718,7 +735,7 @@ Confirm what's documented in Code-Grounding fact #2: `detectDestinations(cwd)` r
 ```bash
 cat src/cli/provision/infer-gate.ts
 ```
-Note the exact shape of `InferGateIssue` — your new Supabase detector's `needs_edit` messages must conform.
+Confirm the existing `InferGateIssue` shape is `{ secret: string; issue: string }` (Code-Grounding fact #6). Your Supabase detector does NOT emit `InferGateIssue` directly — it emits its own `SupabaseDetectorIssue` (`{ kind; message }`), and the Task 2.3 wiring maps it into `{ secret, issue }` before merging into `InferResult.issues`. Do not modify `infer-gate.ts`.
 
 - [ ] **Step 2.1.3: Write the first failing test (fixture a)**
 
@@ -800,7 +817,26 @@ Create `src/cli/provision/infer-supabase.ts`:
  */
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { InferGateIssue } from "./infer-gate.js";
+
+/**
+ * Additive issue contract for the Supabase detector. This is DISTINCT from
+ * `InferGateIssue` (`{ secret; issue }` in infer-gate.ts) for two reasons:
+ *   1. Detector issues carry a machine-readable `kind` (the gate's issues
+ *      do not).
+ *   2. Override-validation issues are NOT bound to a single secret name —
+ *      they describe the whole `secret-shuttle.config.json` override — so
+ *      they don't fit the gate's per-secret `{ secret }` field.
+ * The wiring in runInfer (Task 2.3) maps each SupabaseDetectorIssue into the
+ * existing `{ secret, issue }` InferGateIssue shape before merging into
+ * `InferResult.issues`. `InferGateIssue` itself is left unchanged.
+ */
+export interface SupabaseDetectorIssue {
+  /** Machine-readable discriminant: "supabase_not_linked" |
+   *  "supabase_inferconfig_invalid". */
+  kind: string;
+  /** Human-readable needs_edit message. */
+  message: string;
+}
 
 /** Default name predicate — secret names matching this regex automatically
  *  route to Supabase when a Supabase project is detected on disk. */
@@ -829,8 +865,9 @@ export interface SupabaseDetectorResult {
    *  list. `<scope>` is the project_ref when one is known, else a sentinel
    *  the user must edit before running `provision`. */
   destinations: string[];
-  /** Zero or more needs_edit issues to surface in the assembled InferResult. */
-  issues: InferGateIssue[];
+  /** Zero or more needs_edit issues. The wiring maps these to the existing
+   *  `{ secret, issue }` InferGateIssue shape before surfacing in InferResult. */
+  issues: SupabaseDetectorIssue[];
 }
 
 interface SanitizedOverride {
@@ -838,10 +875,10 @@ interface SanitizedOverride {
   /** Issue to surface if any invalid entries were dropped. Null when the
    *  override was either absent, fully valid, or itself non-array (the
    *  non-array path emits a distinct whole-override-dropped issue). */
-  invalidEntriesIssue: InferGateIssue | null;
+  invalidEntriesIssue: SupabaseDetectorIssue | null;
   /** Issue to surface when the whole `infer.supabaseNames` value is not an
    *  array. Null otherwise. */
-  wholeOverrideDroppedIssue: InferGateIssue | null;
+  wholeOverrideDroppedIssue: SupabaseDetectorIssue | null;
 }
 
 /**
@@ -939,7 +976,7 @@ export async function detectSupabaseForSecret(
 ): Promise<SupabaseDetectorResult> {
   // 1. Sanitize the override list (emit issues for any invalid entries).
   const sanitized = sanitizeSupabaseOverride(ctx.inferConfig?.supabaseNames);
-  const overrideIssues: InferGateIssue[] = [];
+  const overrideIssues: SupabaseDetectorIssue[] = [];
   if (sanitized.wholeOverrideDroppedIssue !== null) {
     overrideIssues.push(sanitized.wholeOverrideDroppedIssue);
   }
@@ -987,18 +1024,18 @@ export async function detectSupabaseForSecret(
 }
 ```
 
-- [ ] **Step 2.2.2: Verify `InferGateIssue` shape matches**
+- [ ] **Step 2.2.2: Confirm the additive issue contract (do NOT touch `infer-gate.ts`)**
 
-If the actual `InferGateIssue` interface in `src/cli/provision/infer-gate.ts` uses different field names (e.g., `type` instead of `kind`, or `code` instead of `message`), update the detector's emitted issue objects to match. The two issue kinds introduced here (`supabase_inferconfig_invalid`, `supabase_not_linked`) may need to be added to a union type defined in `infer-gate.ts`. Read `infer-gate.ts` and reconcile.
+Code-Grounding fact #6 establishes the existing `InferGateIssue` shape is `{ secret: string; issue: string }` (confirmed at `src/cli/provision/infer-gate.ts:31-34`), and `isInferYmlExecutable` plus the existing infer tests depend on it. The Supabase detector therefore emits its own `SupabaseDetectorIssue` (`{ kind; message }`) — defined in `infer-supabase.ts` above — NOT `InferGateIssue`. The mapping from `SupabaseDetectorIssue` → `InferGateIssue` happens in the wiring (Task 2.3.2), not here.
 
-If the existing `InferGateIssue` uses a closed union of kinds and adding two new ones requires touching `infer-gate.ts`, do so as part of this step. The change is additive and minimal.
+`infer-gate.ts` is NOT modified by this burst. There is no closed union of "kinds" to extend (the gate's issues have no `kind` field). If `tsc` complains, the fix is in `infer-supabase.ts` or the Task-2.3 mapping — never in `infer-gate.ts`.
 
 - [ ] **Step 2.2.3: Build to verify TypeScript is clean**
 
 ```bash
 npx tsc --noEmit 2>&1 | head -20
 ```
-Expected: clean (no output). If the InferGateIssue reconciliation needed a tweak, this catches it.
+Expected: clean (no output). At this point the detector only references its own `SupabaseDetectorIssue` type — no `infer-gate.ts` import — so the only thing tsc validates here is the detector module's internal consistency (the `SupabaseDetectorIssue` ↔ `InferGateIssue` mapping is added later, in the Task 2.3 wiring).
 
 - [ ] **Step 2.2.4: Run the fixture (a) test, verify it PASSES**
 
@@ -1010,11 +1047,11 @@ Expected: fixture (a) passes.
 - [ ] **Step 2.2.5: Commit the detector (alone, before wiring)**
 
 ```bash
-git add src/cli/provision/infer-supabase.ts src/cli/provision/infer-gate.ts src/cli/provision/infer-supabase.test.ts
+git add src/cli/provision/infer-supabase.ts src/cli/provision/infer-supabase.test.ts
 git commit -m "feat(infer): detectSupabaseForSecret — per-secret name-predicate-gated detector"
 ```
 
-(If `infer-gate.ts` wasn't touched, drop it from the stage list.)
+(`infer-gate.ts` is intentionally NOT staged — the burst does not modify it; the Supabase detector uses its own additive `SupabaseDetectorIssue` type.)
 
 ---
 
@@ -1076,7 +1113,10 @@ Replace with (NOTE: the inner closure becomes async; switch `map` → an awaited
   const inferConfig = await loadInferConfig(opts.cwd);
 
   const entries: InferredPlanEntry[] = [];
-  const supabaseIssues: InferGateIssue[] = [];
+  // Collect detector-native issues ({ kind; message }) first, then map to the
+  // gate's { secret; issue } shape after the loop. We track the originating
+  // secret per issue so the mapping can fill InferGateIssue.secret.
+  const supabaseRaw: Array<{ secret: string; issue: SupabaseDetectorIssue }> = [];
 
   for (const name of names) {
     const source = inferSourceForName(name);
@@ -1090,13 +1130,14 @@ Replace with (NOTE: the inner closure becomes async; switch `map` → an awaited
     });
 
     // Dedupe issues: the same override-validation issue would otherwise
-    // surface once per secret. Compare by `kind + message`.
+    // surface once per secret. Compare by `kind + message` (override issues
+    // are batch-wide, not secret-specific, so identical text recurs).
     for (const issue of supa.issues) {
       const dedupeKey = `${issue.kind}::${issue.message}`;
-      const seen = supabaseIssues.some(
-        (i) => `${i.kind}::${i.message}` === dedupeKey,
+      const seen = supabaseRaw.some(
+        (r) => `${r.issue.kind}::${r.issue.message}` === dedupeKey,
       );
-      if (!seen) supabaseIssues.push(issue);
+      if (!seen) supabaseRaw.push({ secret: name, issue });
     }
 
     entries.push({
@@ -1109,6 +1150,15 @@ Replace with (NOTE: the inner closure becomes async; switch `map` → an awaited
       ],
     });
   }
+
+  // Map the detector-native SupabaseDetectorIssue[] to the existing
+  // InferGateIssue { secret; issue } contract. The detector's machine-readable
+  // `kind` is folded into the human-readable `issue` string so no information
+  // is lost while still conforming to the unchanged InferGateIssue shape.
+  const supabaseIssues: InferGateIssue[] = supabaseRaw.map((r) => ({
+    secret: r.secret,
+    issue: `[${r.issue.kind}] ${r.issue.message}`,
+  }));
 ```
 
 Then merge `supabaseIssues` into the existing gate-issues array that the function returns. The current shape:
@@ -1141,9 +1191,13 @@ Becomes:
 
 Imports at the top of `infer.ts` need extending:
 ```ts
-import { detectSupabaseForSecret, type InferConfig } from "./infer-supabase.js";
+import {
+  detectSupabaseForSecret,
+  type InferConfig,
+  type SupabaseDetectorIssue,
+} from "./infer-supabase.js";
 ```
-(The `InferGateIssue` import already exists from `./infer-gate.js`.)
+(The `InferGateIssue` import already exists from `./infer-gate.js` — it stays, since the mapped `supabaseIssues` are `InferGateIssue[]`. The `loadInferConfig` helper in Step 2.3.1 also imports `type InferConfig`; consolidate into a single import statement to avoid a duplicate.)
 
 - [ ] **Step 2.3.3: Type-check + run all infer tests**
 
@@ -1155,10 +1209,75 @@ Expected: typecheck clean; all existing `infer.test.ts` tests still pass; supaba
 
 **Watch for:** if existing infer tests assert against `result.destinations` order or count, the new Supabase appending may surface as a regression. Inspect each failure: if the test fixture happens to have a Supabase config + matching name, that's a new correct destination (update test expectations); otherwise it's a real regression.
 
-- [ ] **Step 2.3.4: Commit the wiring**
+- [ ] **Step 2.3.3b: Add the `runInfer` end-to-end integration test (spec §8 criterion 2)**
+
+The fixtures in Task 2.4 exercise `detectSupabaseForSecret` in isolation. Spec §8 criterion 2 is about the *wired* behavior — `provision --infer` on a mixed Vercel + Supabase project routes Supabase to matching names and Vercel to the others. Add ONE integration test to `src/cli/provision/infer.test.ts` (the existing `runInfer` test file) that proves the full pipeline end-to-end. Use the same `mkdtemp` + `writeFile` pattern as the existing tests:
+
+```ts
+test("runInfer: mixed Vercel + Supabase project routes Supabase to matching names, Vercel to all", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ss-infer-mixed-"));
+  try {
+    // Mixed signals: vercel.json (project-wide Vercel) + a linked Supabase project.
+    await writeFile(join(dir, "vercel.json"), "{}\n");
+    await mkdir(join(dir, "supabase"));
+    await writeFile(join(dir, "supabase/config.toml"), 'project_id = "local-dev"\n');
+    await mkdir(join(dir, ".supabase"));
+    await writeFile(
+      join(dir, ".supabase/project.json"),
+      JSON.stringify({ ref: "abcdefghijklmnopqrst" }),
+    );
+    // .env.example mixes a Supabase-predicate name with a non-matching one,
+    // plus a config-override name to prove the escape hatch end-to-end.
+    // NOTE: the override name must still infer a *known* source, or the gate
+    // marks the plan non-executable (`unknown` source → needs_edit issue).
+    // `DATABASE_SERVICE_SECRET` ends in `_SECRET` with no provider prefix, so
+    // the generic random rule (`infer-rules.ts`) gives it `random_32_bytes` —
+    // a known source — keeping `issues === []` / `executable === true` true.
+    await writeFile(
+      join(dir, ".env.example"),
+      "SUPABASE_SERVICE_ROLE_KEY=\nSTRIPE_WEBHOOK_SECRET=\nDATABASE_SERVICE_SECRET=\n",
+    );
+    await writeFile(
+      join(dir, "secret-shuttle.config.json"),
+      JSON.stringify({ infer: { supabaseNames: ["DATABASE_SERVICE_SECRET"] } }),
+    );
+
+    const result = await runInfer({ cwd: dir });
+
+    const bySecret = new Map(result.plan.map((e) => [e.secret, e.destinations]));
+    // Supabase name → both Vercel (project-wide) AND Supabase (per-secret, ref-stamped).
+    assert.deepEqual(bySecret.get("SUPABASE_SERVICE_ROLE_KEY"), [
+      "vercel:production",
+      "supabase:abcdefghijklmnopqrst",
+    ]);
+    // Non-matching name → Vercel only (predicate gates Supabase out).
+    assert.deepEqual(bySecret.get("STRIPE_WEBHOOK_SECRET"), ["vercel:production"]);
+    // Override name → Vercel + Supabase (escape hatch works through the wiring).
+    assert.deepEqual(bySecret.get("DATABASE_SERVICE_SECRET"), [
+      "vercel:production",
+      "supabase:abcdefghijklmnopqrst",
+    ]);
+    // No needs_edit issues (project is linked, override is valid).
+    assert.deepEqual(result.issues, []);
+    assert.equal(result.executable, true);
+    // The rendered yml carries the Supabase destination too.
+    assert.match(result.yml, /supabase:abcdefghijklmnopqrst/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+```
+
+Make sure `infer.test.ts` imports `mkdir` and `rm` from `node:fs/promises` (the existing test file may only import `writeFile` + `mkdtemp`) and `runInfer` from `./infer.js`. Run it:
+```bash
+npm test -- --test-name-pattern "mixed Vercel \+ Supabase" 2>&1 | tail -10
+```
+Expected: PASS. If `result.destinations` ordering differs (Supabase appended before/after the project-wide list), reconcile against the wiring in Step 2.3.2 — the wiring spreads project-wide `destinations` first, then `supa.destinations`, so Vercel precedes Supabase as asserted above.
+
+- [ ] **Step 2.3.4: Commit the wiring + integration test**
 
 ```bash
-git add src/cli/provision/infer.ts
+git add src/cli/provision/infer.ts src/cli/provision/infer.test.ts
 git commit -m "feat(infer): runInfer threads inferConfig + invokes detectSupabaseForSecret per-secret"
 ```
 
@@ -1592,26 +1711,31 @@ Locate the JS that decides which scene shows on page load (likely defaults to sc
 
 If `URLSearchParams` is not already used, add it near the scene-init function:
 ```js
+// Default to Scene 0 (the magic path) on a bare load — this is the
+// spec §8 success criterion: a direct demo visitor must see the magic
+// path as the opening scene (within 15s). `?scene=1..9` preserves deep
+// links into the "Advanced: low-level mechanics" scenes; an out-of-range
+// or non-numeric value also falls back to Scene 0.
 function getInitialScene() {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get('scene');
-  if (raw === null) return /* existing default */;
+  if (raw === null) return 0;
   const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n < 0 || n > 9) return /* existing default */;
+  if (!Number.isInteger(n) || n < 0 || n > 9) return 0;
   return n;
 }
 ```
 
-Replace the existing initial-scene constant/call with `getInitialScene()`. Ensure that when called without `?scene=`, behavior is identical to today (defaults to whatever scene currently shows on load — likely 1).
+Replace the existing initial-scene constant/call with `getInitialScene()`. **Behavior change (intentional, per spec §8 criterion 4 + the finding):** a bare `demo/index.html` load now opens on Scene 0, NOT the old default. Direct visitors (who never get the `?scene=0` README link) must still land on the magic path. Deep links `?scene=1..9` continue to resolve to their exact scene, so no in-flight link breaks.
 
 - [ ] **Step 4.2.3: Test the parsing**
 
 Open in browser:
-- `file:///.../demo/index.html` → expected default scene (likely 1)
+- `file:///.../demo/index.html` → Scene 0 (the new magic-path is now the default)
 - `file:///.../demo/index.html?scene=0` → Scene 0 (the new magic-path)
 - `file:///.../demo/index.html?scene=5` → existing Scene 5
-- `file:///.../demo/index.html?scene=99` → fallback to default
-- `file:///.../demo/index.html?scene=abc` → fallback to default
+- `file:///.../demo/index.html?scene=99` → fallback to Scene 0
+- `file:///.../demo/index.html?scene=abc` → fallback to Scene 0
 
 - [ ] **Step 4.2.4: Update README hero embed**
 
@@ -1827,11 +1951,11 @@ Above the existing `### Added (Burst 5 — Magic Polish)` line, insert:
 ### Changed (Burst 6 — Vision Polish)
 
 - **Documentation drift fixes (§1):** top-level `SKILL.md` deleted (canonical skill lives only at `skills/secret-shuttle/SKILL.md`); `package.json` `files` whitelist updated accordingly. Three `agents/*.example.md` files (`AGENTS.md.example`, `codex-instructions.example.md`, `cursor-rules.example.md`) refreshed to use the Burst 5 verb surface (`provision`, `secrets *`, `audit`, `init`). `examples/stripe-to-vercel/walkthrough.md` now leads with the "Magic path" section; existing low-level content (`blind start` / `capture` / `inject` / `template run`) preserved under an "Advanced: low-level mechanics" header as escape-hatch documentation. README banner rewritten from "0.1.1 — early prototype" to honest "0.3.1 — beta" framing.
-- **`runInfer` return shape extension:** `result.issues` now includes Supabase-derived `needs_edit` messages (when applicable); `result.executable` reflects them. Existing issue shape unchanged; consumers reading `result.issues` see the extended list naturally.
+- **`runInfer` return shape extension:** `result.issues` now includes Supabase-derived `needs_edit` messages (when applicable); `result.executable` reflects them. The existing `InferGateIssue` shape (`{ secret; issue }`) is unchanged — the Supabase detector's internal `{ kind; message }` issues are mapped into `{ secret, issue }` (the `kind` folded into the `issue` string as a `[kind]` prefix) before merging, so consumers reading `result.issues` see the extended list in the same shape they already parse.
 
 ### Added — Burst 6 drift-guard tests
 
-`src/e2e/skill-md-toplevel-absent.test.ts` (prevents accidental re-introduction of the top-level SKILL.md); `src/e2e/docs-no-removed-verbs.test.ts` (prevents the agent-facing docs from regressing to reference removed `bootstrap` / `generate` verbs or the legacy `daemon start && unlock` ritual; walkthrough's "Advanced: low-level mechanics" section is allowlisted for the canonical escape-hatch verbs).
+`src/e2e/skill-md-toplevel-absent.test.ts` (prevents accidental re-introduction of the top-level SKILL.md); `src/e2e/docs-no-removed-verbs.test.ts` (prevents the agent-facing docs from regressing to reference removed `bootstrap` / `generate` verbs or the legacy `daemon start && unlock` ritual — scanned everywhere with no section exemption; the canonical escape-hatch verbs `blind start` / `capture` / `inject` / `template run` are simply not in the removed-token list, so the walkthrough's "Advanced: low-level mechanics" section passes by construction).
 
 ### Known limitations — Burst 6
 
@@ -1850,10 +1974,11 @@ git commit -m "docs(CHANGELOG): Burst 6 — Vision Polish (Supabase --infer dete
 
 ---
 
-### Task W.2: Version bump 0.3.0 → 0.3.1
+### Task W.2: Version bump 0.3.0 → 0.3.1 (+ README banner version string, in lockstep)
 
 **Files:**
 - Modify: `package.json`
+- Modify: `README.md` (inject the `0.3.1` version into the banner left version-neutral by Task 1.6)
 
 - [ ] **Step W.2.1: Bump the version**
 
@@ -1865,6 +1990,25 @@ to:
 ```json
 "version": "0.3.1",
 ```
+
+- [ ] **Step W.2.1b: Inject the version into the README banner (SAME commit)**
+
+Task 1.6 left the banner version-neutral (`> **Status: beta.** ...`). Now that `package.json` reads `0.3.1`, add the matching version string so README and package version flip together (spec §1.6). Use Edit to change:
+```markdown
+> **Status: beta.**
+```
+to:
+```markdown
+> **Status: 0.3.1 — beta.**
+```
+(Only the leading `Status:` token changes; the rest of the banner sentence is untouched.)
+
+Verify:
+```bash
+grep -n "Status:" README.md
+grep -n '"version": "0.3.1"' package.json
+```
+Expected: README banner now reads `Status: 0.3.1 — beta.` AND `package.json` reads `0.3.1` — both in this one commit, so no intermediate state advertises a version `npm view` can't resolve.
 
 - [ ] **Step W.2.2: Verify check-pack still passes**
 
@@ -1883,9 +2027,11 @@ Expected: 1577+ pass / 0 fail / 18 skip.
 - [ ] **Step W.2.4: Commit**
 
 ```bash
-git add package.json
-git commit -m "chore: bump to 0.3.1 (Burst 6 — Vision Polish)"
+git add package.json README.md
+git commit -m "chore: bump to 0.3.1 + sync README banner version string (Burst 6 — Vision Polish)"
 ```
+
+(README is staged here so the banner's `0.3.1` version string lands in the SAME commit as the `package.json` bump — spec §1.6.)
 
 ---
 
@@ -2009,9 +2155,9 @@ All seven spec success criteria (spec §8) have a task that lands them.
 
 **Placeholder scan:** No "TBD" / "TODO" placeholders in steps. The TODO sentinel in Task 2.1 fixture is the literal string the detector emits (`"TODO_run_supabase_link_first"`), not a plan placeholder.
 
-**Type consistency:** `detectSupabaseForSecret`, `SupabaseDetectorContext`, `SupabaseDetectorResult`, `InferConfig`, `SUPABASE_NAME_PREDICATE_RE`, `SUPABASE_OVERRIDE_NAME_RE`, `sanitizeSupabaseOverride`, `readProjectRef`, `loadInferConfig` — names match across Tasks 2.1-2.4 and the wiring task 2.3. `InferGateIssue.kind` values (`supabase_not_linked`, `supabase_inferconfig_invalid`) consistent across detector + fixture tests.
+**Type consistency:** `detectSupabaseForSecret`, `SupabaseDetectorContext`, `SupabaseDetectorResult`, `SupabaseDetectorIssue`, `InferConfig`, `SUPABASE_NAME_PREDICATE_RE`, `SUPABASE_OVERRIDE_NAME_RE`, `sanitizeSupabaseOverride`, `readProjectRef`, `loadInferConfig` — names match across Tasks 2.1-2.4 and the wiring task 2.3. `SupabaseDetectorIssue.kind` values (`supabase_not_linked`, `supabase_inferconfig_invalid`) consistent across detector + fixture tests. The existing `InferGateIssue` (`{ secret; issue }`) is unchanged; the wiring (Task 2.3.2) maps `SupabaseDetectorIssue` → `InferGateIssue` before merging into `InferResult.issues`.
 
 **Execution risks (carry forward to the executor):**
-- The `infer-gate.ts` reconciliation in Task 2.2.2 is contingent — the executor must read the existing file before adding `kind` values. If the union is open / string-typed, no change. If closed, extend it.
+- The Supabase detector uses its own additive `SupabaseDetectorIssue` (`{ kind; message }`) and the Task 2.3 wiring maps it to the existing `InferGateIssue` (`{ secret; issue }`). `infer-gate.ts` is NOT modified — there is no union of "kinds" to extend (Code-Grounding fact #6; §2 Open-Question resolution). The executor should still read `infer-gate.ts` once to confirm the `{ secret; issue }` shape before writing the Task 2.3.2 mapping.
 - The walkthrough.md edit in Task 1.5 requires reading the current file to locate the exact insertion point; the plan describes the structure but the existing prose is unknown until read.
 - The demo HTML edit in Tasks 4.1-4.2 is the largest scope-of-unknown — the executor must spend ~15 min reading demo/index.html before editing.
