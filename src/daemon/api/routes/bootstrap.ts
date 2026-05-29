@@ -7,11 +7,11 @@ import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { parseBootstrapYml } from "../../../cli/bootstrap/yml.js";
 import { computeBootstrapPlan } from "../../bootstrap/plan.js";
-import { executeBatch, type ExecutorDeps } from "../../bootstrap/executor.js";
+import { executeBatch, type ExecuteResult, type ExecutorDeps } from "../../bootstrap/executor.js";
 import type { DaemonServer } from "../../server.js";
 import type { BootstrapBrowserLease, DaemonServices } from "../../services.js";
 import type { ApprovalBinding } from "../../approvals/store.js";
-import type { BatchState, PlanEntry } from "../../bootstrap/store.js";
+import type { BatchState, BootstrapStore, PlanEntry } from "../../bootstrap/store.js";
 
 // Cores from Task I:
 import { generateSecretCore } from "./secrets.js";
@@ -177,7 +177,12 @@ export function registerBootstrapRoutes(
         ok: true,
         ...(grant?.id !== undefined && grant.id !== "no-approval-required" ? { approval_id: grant.id } : {}),
       });
-      return { ok: true, batch_id: batchId, ...result };
+      // Burst 5 §4 Task 4.5 (P2-1 follow-up): inline-execute path must mirror
+      // /continue's batch_status + resume hint contract. Without this, agents
+      // hitting the dev/no-approval inline path on a failed_partial outcome
+      // would miss the agent-actionable `next_action` field they rely on.
+      const decorated = await decorateWithBatchStatus(result, services.bootstrapStore, batchId);
+      return { ok: true, batch_id: batchId, ...decorated };
     } catch (e) {
       if (e instanceof ShuttleError && e.code === "approval_required") {
         const details = e.details as { approvals: Array<{ approval_id: string; expires_at: number; action: string }> } | undefined;
@@ -193,9 +198,48 @@ export function registerBootstrapRoutes(
         await writeDaemonAudit({ action: "bootstrap_plan", ok: true, approval_id: approvalId });
 
         // Re-throw with batch_id added to details so the caller knows which
-        // batch to pass to /continue.
+        // batch to pass to /continue, AND surface the bootstrap-specific
+        // continue-command shape in details.continue_command_after_approval.
+        //
+        // CTO-review round-2 P1.1: next_action MUST be null for
+        // approval_required. The nextAction contract (src/shared/error-codes.ts:17)
+        // reserves that field for AUTOMATIC recovery — running it immediately
+        // while the approval is still pending fails with approval_not_granted
+        // at require-approvals.ts:188 (supplied IDs in pending state are
+        // rejected). approval_required is the canonical human-intervention
+        // error: the human must click Approve in the hub before any recovery
+        // command can succeed.
+        //
+        // Why we still surface the continue command: the registry-level hint
+        // at src/shared/error-codes.ts:238-244 only knows about the generic
+        // `--approval-id <id>` retry shape, which is correct for run / inject /
+        // inject-submit / reveal-capture / template run (where the original
+        // command + --approval-id retries the same command). For batch-style
+        // bootstrap flows (--yml / --secret / --infer), the recovery is NOT
+        // to re-run --yml with --approval-id; it's to call --continue against
+        // the already-minted batch. Agents read the recovery shape from
+        // details.continue_command_after_approval and run it AFTER the human
+        // approves.
+        //
+        // CTO-review round-4 P1.1: also override the wire `hint`. The registry
+        // hint at src/shared/error-codes.ts:238-244 instructs agents to "retry
+        // with --approval-id <id>" — correct for single-shot ops (run / inject
+        // / reveal-capture / template run) but WRONG for batch-style provision
+        // flows. Retrying `provision` with --approval-id would mint a new
+        // batch instead of continuing the existing one. The per-instance hint
+        // points agents at details.continue_command_after_approval, which
+        // carries the correct `--continue --batch X --approval-id Y` shape.
+        const continueCommandAfterApproval = approvalId !== ""
+          ? `secret-shuttle provision --continue --batch ${batchId} --approval-id ${approvalId}`
+          : null;
         throw new ShuttleError("approval_required", e.message, {
-          details: { ...details, batch_id: batchId },
+          hint: "Approve in the opened hub, then run the command in details.continue_command_after_approval.",
+          nextAction: null,
+          details: {
+            ...details,
+            batch_id: batchId,
+            continue_command_after_approval: continueCommandAfterApproval,
+          },
         });
       }
       throw e;
@@ -225,7 +269,7 @@ export function registerBootstrapRoutes(
       throw new ShuttleError("bootstrap_batch_not_found", `unknown batch_id: ${batchId}`);
     }
     if (state.status === "completed") {
-      return { ok: true, ...summarizeFromState(state) };
+      return { ok: true, batch_status: "completed", ...summarizeFromState(state) };
     }
 
     // C10: capture-conditional pre-flight blind guard. Runs AFTER owner check
@@ -355,7 +399,15 @@ export function registerBootstrapRoutes(
           daemonPortRef,
         };
         const result = await executeBatch(services.bootstrapStore, batchId, deps);
-        return { ok: true, ...result };
+        // Burst 5 §4 Task 4.5: surface batch_status + an agent-actionable
+        // resume hint when the batch ended failed_partial. The executor
+        // saved final state before returning (executor.ts:394) so re-read
+        // is consistent. Status "completed" and "abandoned" do NOT carry
+        // next_action — completed is terminal-success, abandoned is the
+        // user's explicit choice to walk away. Shared with the /plan
+        // inline-execute path via decorateWithBatchStatus.
+        const decorated = await decorateWithBatchStatus(result, services.bootstrapStore, batchId);
+        return { ok: true, ...decorated };
       } finally {
         // Capture-conditional teardown: ALWAYS runs before lock release. If a
         // bootstrap-owned Chrome was actually killed AND blind is still active
@@ -442,6 +494,37 @@ export function registerBootstrapRoutes(
       })),
     };
   });
+}
+
+/**
+ * Decorate an ExecuteResult with the post-execute batch_status and a
+ * conditional agent-actionable resume hint (next_action).
+ *
+ * Shared by both /plan inline-execute and /continue: the response shape MUST
+ * match across the two paths so agents can rely on `batch_status` to drive
+ * their next action — and a failed_partial outcome MUST carry the exact
+ * resume command, regardless of which entry point produced it.
+ *
+ * Re-reads state from the store because the executor mutates state on disk
+ * during the run (executor.ts:394 saves before returning) and we want the
+ * canonical final status. Status "completed" and "abandoned" do NOT carry
+ * next_action: completed is terminal-success and abandoned is the user's
+ * explicit choice to walk away.
+ */
+async function decorateWithBatchStatus(
+  result: ExecuteResult,
+  bootstrapStore: BootstrapStore,
+  batchId: string,
+): Promise<ExecuteResult & { batch_status: BatchState["status"]; next_action?: string }> {
+  const state = await bootstrapStore.get(batchId);
+  const status: BatchState["status"] = state?.status ?? "in_progress";
+  return {
+    ...result,
+    batch_status: status,
+    ...(status === "failed_partial"
+      ? { next_action: `secret-shuttle provision --continue --batch ${batchId}` }
+      : {}),
+  };
 }
 
 function buildPlanSummary(plan: PlanEntry[]): Array<{ name: string; source: string; destinations: string[] }> {

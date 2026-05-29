@@ -186,6 +186,86 @@ secrets:
   });
 });
 
+test("POST /v1/bootstrap/plan: approval_required response sets next_action=null and surfaces continue command in details", async () => {
+  // §1 CTO-review round-2 P1.1: the nextAction contract
+  // (src/shared/error-codes.ts:17) reserves next_action for AUTOMATIC
+  // recovery; approval_required is the canonical human-intervention error
+  // (the human must click Approve in the hub first). An agent that ran
+  // `provision --continue --batch X --approval-id Y` immediately while the
+  // approval is still pending would hit approval_not_granted at
+  // require-approvals.ts:188.
+  //
+  // Fix: next_action === null (or absent). The post-approval continue
+  // command shape moves to details.continue_command_after_approval where
+  // agents can read it after the human approves. The existing
+  // details.approvals[] shape (the registry hint's source of truth for
+  // --approval-id repeatable IDs) stays untouched.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  API_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:production"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", { plan_yml: yml });
+    assert.equal(r.status, 400, `expected 400, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as {
+      error: { code: string };
+      hint: string | null;
+      next_action: string | null;
+      details: {
+        approvals: Array<{ approval_id: string }>;
+        batch_id: string;
+        continue_command_after_approval: string | null;
+      };
+    };
+    assert.equal(body.error.code, "approval_required");
+
+    // next_action MUST be null — approval_required requires human action.
+    assert.equal(
+      body.next_action,
+      null,
+      `next_action must be null for approval_required (human must approve first); got: ${body.next_action}`,
+    );
+
+    // The continue command shape lives in details.continue_command_after_approval.
+    const batchId = body.details.batch_id;
+    const firstApprovalId = body.details.approvals[0]?.approval_id;
+    assert.ok(typeof batchId === "string" && batchId.startsWith("bootstrap-"), `expected bootstrap- batch_id, got: ${batchId}`);
+    assert.ok(typeof firstApprovalId === "string" && firstApprovalId.length > 0, `expected first approval_id, got: ${firstApprovalId}`);
+
+    const expectedContinue = `secret-shuttle provision --continue --batch ${batchId} --approval-id ${firstApprovalId}`;
+    assert.equal(
+      body.details.continue_command_after_approval,
+      expectedContinue,
+      `details.continue_command_after_approval must name the post-approval recovery command; got: ${body.details.continue_command_after_approval}`,
+    );
+
+    // CTO-review round-4 P1.1: the wire `hint` must be the per-instance
+    // override pointing at details.continue_command_after_approval — NOT the
+    // registry's generic "retry with --approval-id <id>" text, which is wrong
+    // for batch-style provision flows (retrying `provision` with --approval-id
+    // would mint a new batch instead of continuing the existing one).
+    assert.ok(
+      typeof body.hint === "string" && body.hint.length > 0,
+      `expected a non-empty hint string, got: ${body.hint}`,
+    );
+    assert.match(
+      body.hint!,
+      /details\.continue_command_after_approval/i,
+      `hint must point at details.continue_command_after_approval (per-instance override); got: ${body.hint}`,
+    );
+    assert.doesNotMatch(
+      body.hint!,
+      /retry with --approval-id/i,
+      `hint must NOT be the registry's generic --approval-id retry text (wrong for batch-style provision); got: ${body.hint}`,
+    );
+  });
+});
+
 test("POST /v1/bootstrap/continue: with approval_id executes plan", async () => {
   await withDaemon(async (ctx) => {
     await unlockVault(ctx);
@@ -431,6 +511,28 @@ test("POST /v1/bootstrap/continue: retry after failed_partial does NOT require f
       state!.status === "completed" || state!.status === "failed_partial",
       `unexpected batch status after retry: ${state!.status}`,
     );
+
+    // Burst 5 §4 Task 4.5: response carries batch_status + (when failed_partial)
+    // a copy-pasteable resume hint. The destination will fail again (no real
+    // binary), so we expect failed_partial here — but defensively the test
+    // assertion handles both terminal cases without relying on a specific
+    // failure cause.
+    const wireBody = r.body as { batch_status?: string; next_action?: string };
+    assert.equal(
+      wireBody.batch_status,
+      state!.status,
+      "response batch_status must mirror the on-disk state.status",
+    );
+    if (state!.status === "failed_partial") {
+      assert.equal(
+        wireBody.next_action,
+        `secret-shuttle provision --continue --batch ${batchId}`,
+        "failed_partial response must carry agent-actionable next_action",
+      );
+    } else {
+      // status === "completed" path: no next_action surfaced (terminal success).
+      assert.equal(wireBody.next_action, undefined, "completed batch must NOT carry next_action");
+    }
   });
 });
 
@@ -535,6 +637,55 @@ secrets:
     assert.ok(
       state!.status === "completed" || state!.status === "failed_partial",
       `expected terminal status (completed or failed_partial), got: ${state!.status}`,
+    );
+  });
+});
+
+test("POST /v1/bootstrap/plan: dev-env inline-execute on failed_partial surfaces batch_status + next_action", async () => {
+  // Burst 5 §4 Task 4.5 (P2-1 follow-up): the dev/no-approval inline-execute
+  // path at /v1/bootstrap/plan must carry the SAME batch_status + agent-actionable
+  // resume hint that /continue does. Before this fix the enrichment lived only on
+  // the /continue path, so agents hitting the inline path on a failed_partial
+  // outcome had no way to recover (no next_action), defeating the whole point
+  // of Task 4.5. The vercel CLI is not present in the test environment, so the
+  // single destination always fails → failed_partial.
+  await withDaemon(async (ctx) => {
+    await unlockVault(ctx);
+
+    const yml = `
+version: 1
+secrets:
+  INLINE_FAIL_KEY:
+    source: { kind: random_32_bytes }
+    destinations: ["vercel:development"]
+`;
+    const r = await call(ctx, "POST", "/v1/bootstrap/plan", {
+      plan_yml: yml,
+      environment: "development",
+    });
+
+    assert.equal(r.status, 200, `expected 200 inline-execute, got ${r.status} body=${JSON.stringify(r.body)}`);
+    const body = r.body as { ok: boolean; batch_id: string; batch_status?: string; next_action?: string; failed: number };
+    assert.equal(body.ok, true);
+    assert.ok(typeof body.batch_id === "string" && body.batch_id.startsWith("bootstrap-"), "batch_id required");
+
+    // Verify the disk state went to failed_partial so the assertion below is meaningful.
+    const state = await ctx.services.bootstrapStore.get(body.batch_id);
+    assert.ok(state !== null, "batch must be persisted");
+    assert.equal(state!.status, "failed_partial", `expected failed_partial (vercel CLI not present in test env), got: ${state!.status}`);
+
+    // The fix: response carries batch_status mirroring on-disk state.
+    assert.equal(
+      body.batch_status,
+      "failed_partial",
+      "inline-execute /plan response must carry batch_status (P2-1 fix)",
+    );
+
+    // The fix: failed_partial response carries the agent-actionable resume hint.
+    assert.equal(
+      body.next_action,
+      `secret-shuttle provision --continue --batch ${body.batch_id}`,
+      "failed_partial inline-execute MUST surface next_action for agent recovery (P2-1 fix)",
     );
   });
 });

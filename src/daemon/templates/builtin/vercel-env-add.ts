@@ -8,6 +8,7 @@ export const vercelEnvAdd: TemplateDefinition = {
   args: ["env", "add", "{{name}}", "{{environment}}"],
   secret_delivery: "stdin",
   required_params: ["name", "environment"],
+  sessionDefiningParams: ["name", "environment"] as const,
   requires_approval_when_production: true,
   destinationEnvironment: (p) => (p["environment"] === "production" ? "production" : (p["environment"] ?? "development")),
   validateParams: (params) => {

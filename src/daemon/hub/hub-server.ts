@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ShuttleError, errorToJson } from "../../shared/errors.js";
+import { readBoundedJson } from "../helpers/bounded-json.js";
 import type { DaemonServer } from "../server.js";
 import type { HubBroker } from "./hub-broker.js";
 
@@ -136,31 +137,6 @@ export function registerHubRoutes(server: DaemonServer, broker: HubBroker): void
     setHardeningHeaders(res);
     res.end(JSON.stringify({ ok: true }));
   });
-}
-
-async function readBoundedJson(
-  req: import("node:http").IncomingMessage,
-  maxBytes: number,
-): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    total += buf.length;
-    if (total > maxBytes) {
-      throw new ShuttleError("request_too_large", `Body exceeds ${maxBytes} bytes.`);
-    }
-    chunks.push(buf);
-  }
-  if (total === 0) {
-    throw new ShuttleError("bad_request", "Empty body.");
-  }
-  const text = Buffer.concat(chunks).toString("utf8");
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new ShuttleError("bad_request", "Malformed JSON body.");
-  }
 }
 
 function setHardeningHeaders(res: import("node:http").ServerResponse): void {

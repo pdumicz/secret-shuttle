@@ -229,6 +229,11 @@ export async function runTemplateCore(
       ...(destEnv !== undefined ? { destination_environment: destEnv } : {}),
       template_id: tpl.id,
       ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
+      // Burst 5 §4 Task 4.3: forward batch_id from bootstrapAuthority so
+      // audit consumers can group this row under its parent bootstrap_step.
+      // Standalone template_run calls (no authority) intentionally omit the
+      // field — conditional spread preserves exactOptionalPropertyTypes.
+      ...(opts.bootstrapAuthority !== undefined ? { batch_id: opts.bootstrapAuthority.batchId } : {}),
     });
     return {
       executed: result.exit_code === 0,
@@ -253,6 +258,8 @@ export async function runTemplateCore(
       // session_id).  Otherwise grant.session_id is the source session iff
       // the binding matched the session pattern.
       ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
+      // Burst 5 §4 Task 4.3: same batch_id forwarding as the success path.
+      ...(opts.bootstrapAuthority !== undefined ? { batch_id: opts.bootstrapAuthority.batchId } : {}),
     });
     throw err;
   }

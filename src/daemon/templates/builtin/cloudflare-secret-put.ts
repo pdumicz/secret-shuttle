@@ -17,6 +17,7 @@ export const cloudflareSecretPut: TemplateDefinition = {
   args: ["secret", "put", "{{name}}"],
   secret_delivery: "stdin",
   required_params: ["name"],
+  sessionDefiningParams: ["name", "env"] as const,
   requires_approval_when_production: true,
   additionalArgs: (params) => {
     const env = (params["env"] ?? "").trim();

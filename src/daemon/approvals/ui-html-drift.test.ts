@@ -113,3 +113,29 @@ test("ui.html: renders bootstrap action with plan_summary parse", async () => {
     "ui.html must call renderBootstrap(g) when action === 'bootstrap'",
   );
 });
+
+test("ui.html: contains the session-affordance placeholder + renderer + ttl_minutes wiring", async () => {
+  const html = await loadHtml();
+  // Placeholder div the renderer fills in or hides.
+  assert.match(html, /id="session-affordance"/, "ui.html must include the #session-affordance placeholder");
+  // Renderer function is invoked from load().
+  assert.match(html, /renderSessionAffordance\s*\(/, "ui.html must call renderSessionAffordance() in load()");
+  // Approve POST body carries ttl_minutes when checkbox is checked.
+  assert.match(html, /ttl_minutes/, "ui.html must reference ttl_minutes in approve POST body");
+});
+
+test("ui.html: TTL dropdown offers exactly the values the server's TTL_MINUTES_ALLOWED whitelist permits", async () => {
+  // Anti-drift: if the server-side whitelist at ui-server.ts changes
+  // (TTL_MINUTES_ALLOWED) without the dropdown's <option value="…">, the
+  // user picks a now-invalid value and the POST fails bad_request. Lock
+  // the four expected values here. To add/remove a TTL, update both files
+  // AND this test.
+  const html = await loadHtml();
+  for (const v of [5, 15, 30, 60]) {
+    assert.match(
+      html,
+      new RegExp(`value="${v}"`),
+      `ui.html dropdown must offer TTL option value="${v}" (server TTL_MINUTES_ALLOWED)`,
+    );
+  }
+});

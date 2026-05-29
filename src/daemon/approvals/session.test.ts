@@ -117,10 +117,10 @@ test("assertSessionPatternValid: ttl < 1s throws", () => {
   );
 });
 
-test("assertSessionPatternValid: ttl > 15min throws", () => {
+test("assertSessionPatternValid: ttl > 60min throws session_ttl_exceeds_cap", () => {
   assert.throws(
-    () => assertSessionPatternValid(makePattern({ ttl_ms: 16 * 60 * 1000 })),
-    (err: Error & { code?: string }) => err.code === "bad_request",
+    () => assertSessionPatternValid(makePattern({ ttl_ms: 61 * 60 * 1000 })),
+    (err: Error & { code?: string }) => err.code === "session_ttl_exceeds_cap",
   );
 });
 

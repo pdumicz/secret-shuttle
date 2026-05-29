@@ -32,6 +32,18 @@ export interface TemplateDefinition {
    * diverge from what the child process actually writes to.
    */
   additionalArgs?: (params: Readonly<Record<string, string>>) => string[];
+  /**
+   * Burst 5 §2: keys of `template_params` whose values determine WHERE
+   * the secret is pushed. Provision-derived sessions stamp these onto
+   * SessionPattern.required_params so the matcher cannot widen consent
+   * to a different destination. `name` is universally destination-
+   * defining (the env-var / secret name set at the provider).
+   *
+   * Templates without this field are excluded from provision-derived
+   * sessions (fail-closed) and produce a startup-time warning. See
+   * src/daemon/templates/destination-defining-params.ts.
+   */
+  sessionDefiningParams?: readonly string[];
 }
 
 export class TemplateRegistry {

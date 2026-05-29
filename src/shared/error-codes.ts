@@ -108,21 +108,27 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   bootstrap_plan_invalid: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => "Edit secret-shuttle.yml to fix the schema error, then re-run.",
-    nextAction: () => "secret-shuttle bootstrap",
+    // No nextAction: the recovery command depends on which provision mode was
+    // running (--yml <path>, --infer, --secret), and the registry has no way
+    // to know which one. The human-readable message at the throw-site names
+    // the relevant file/mode; the agent reads that and retries with the
+    // right command.
+    nextAction: () => null,
   },
   bootstrap_capture_url_invalid: {
     exitCode: EXIT_CODE_USAGE,
     hint: () =>
       "source.url for kind=capture must be https, must not embed credentials, must not be an IP literal or localhost. Edit secret-shuttle.yml and re-run.",
-    nextAction: () => "secret-shuttle bootstrap",
+    // No nextAction: see bootstrap_plan_invalid above — mode-dependent.
+    nextAction: () => null,
   },
   bootstrap_capture_skipped: {
     exitCode: EXIT_CODE_TRANSIENT,
-    hint: () => "Re-run bootstrap to retry the skipped secret.",
+    hint: () => "Re-run `secret-shuttle provision --continue --batch <id>` to retry the skipped secret.",
   },
   bootstrap_capture_timeout: {
     exitCode: EXIT_CODE_TRANSIENT,
-    hint: () => "5 minutes elapsed without a capture. Re-run bootstrap and click Capture promptly.",
+    hint: () => "5 minutes elapsed without a capture. Re-run `secret-shuttle provision --continue --batch <id>` and click Capture promptly.",
   },
   bootstrap_capture_aborted: {
     exitCode: EXIT_CODE_TRANSIENT,
@@ -131,7 +137,8 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   bootstrap_destination_unknown: {
     exitCode: EXIT_CODE_USAGE,
     hint: () => "Edit secret-shuttle.yml: replace the unknown destination shorthand with one of: vercel:<env>, github-actions:owner/repo, cloudflare:<env>, supabase:<projectref>.",
-    nextAction: () => "secret-shuttle bootstrap",
+    // No nextAction: see bootstrap_plan_invalid above — mode-dependent.
+    nextAction: () => null,
   },
   agent_id_namespace_violation: {
     exitCode: EXIT_CODE_USAGE,
@@ -139,6 +146,27 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
       "Non-root callers can only mint children under their own agent_id prefix (e.g., caller \"claude-7f2a\" can mint \"claude-7f2a.helper-3a1b\"). Re-run with --child-id starting with your own agent_id followed by a dot.",
   },
   agent_id_invalid: { exitCode: EXIT_CODE_USAGE, hint: () => null },
+  command_renamed: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => null,
+    // No nextAction: a bare `secret-shuttle provision` would itself fail
+    // with provision_no_mode, so chaining it as a "recovery" command would
+    // produce a second error. The bootstrap-stub throw-site (Task 1.6)
+    // names the replacement verb in the human-readable message; the agent
+    // reads that and picks the correct mode flag.
+  },
+  provision_mode_conflict: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Pass exactly one of: --infer, --yml, --secret, --continue, --list, --abandon.",
+  },
+  provision_no_mode: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Pass --infer, --yml, --secret, --continue, --list, or --abandon.",
+  },
+  session_ttl_exceeds_cap: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Reduce ttl_minutes (max 60).",
+  },
 
   // ── Not found ──────────────────────────────────────────────────────────────
   not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
@@ -175,8 +203,12 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   session_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   bootstrap_batch_not_found: {
     exitCode: EXIT_CODE_NOT_FOUND,
-    hint: () => "The batch was pruned or never existed. Generate a fresh batch:",
-    nextAction: () => "secret-shuttle bootstrap",
+    hint: () => "The batch was pruned or never existed. The right recovery depends on context — generate a fresh plan, or look up the batch first.",
+    nextAction: () => null,
+  },
+  infer_no_env_example: {
+    exitCode: EXIT_CODE_NOT_FOUND,
+    hint: () => "Create a .env.example listing your secret names, then re-run.",
   },
 
   // ── Permission ─────────────────────────────────────────────────────────────
@@ -279,7 +311,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   },
   bootstrap_batch_abandoned: {
     exitCode: EXIT_CODE_CONFLICT,
-    hint: () => "This batch was abandoned. Start a new one with `secret-shuttle bootstrap`.",
+    hint: () => "This batch was abandoned. Start a new one with `secret-shuttle provision --yml ./secret-shuttle.yml` (or `--infer`).",
     nextAction: () => null,
   },
   bootstrap_browser_busy: {
@@ -325,6 +357,28 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   root_token_malformed: {
     exitCode: EXIT_CODE_CONFLICT,
     hint: () => "<SHUTTLE_HOME>/root-token content is not a 43-char base64url-no-pad string. Delete it to regenerate (note: this also invalidates all derived agent tokens).",
+  },
+  infer_yml_exists: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "Re-run with --force to overwrite, or --dry-run to stdout only.",
+    // No nextAction in the registry: the correct recovery command depends
+    // on whether the user originally passed --environment <env>. The static
+    // registry function has no access to runtime opts, so the recovery
+    // string is constructed at the throw-site in runInferMode (src/cli/
+    // commands/provision.ts) where opts.environment is in scope. Matches
+    // the P1.1 round-19 precedent (bootstrap_plan_invalid,
+    // bootstrap_capture_url_invalid, bootstrap_destination_unknown).
+    nextAction: () => null,
+  },
+
+  // ── Audit-route codes ──────────────────────────────────────────────────────
+  audit_window_invalid: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Pass --since with format Ns/Nm/Nh/Nd (e.g., 5m, 1h, 1d).",
+  },
+  audit_batch_not_found: {
+    exitCode: EXIT_CODE_NOT_FOUND,
+    hint: () => null,
   },
 
   // ── Keychain (Part B; full implementations come in Plan 5a) ────────────────

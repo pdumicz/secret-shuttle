@@ -166,12 +166,15 @@ test("registry total entry count (sanity check)", () => {
   // Burst 4 Tier 2 review fix adds 1 more (daemon_rotate_in_progress —
   // emitted by /v1/daemon/rotate when a concurrent rotate is already
   // mid-flight) = 142 total.
+  // Burst 5 Task 1.1 adds 8 more (command_renamed, provision_mode_conflict,
+  // provision_no_mode, session_ttl_exceeds_cap, infer_no_env_example,
+  // infer_yml_exists, audit_window_invalid, audit_batch_not_found) = 150 total.
   // Note: daemon_start_failed was removed (P3.1) — it was registered but never
   // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 142, `expected 142 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 150, `expected 150 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -213,18 +216,26 @@ test("error-codes: keychain_key_invalid registered with PERMISSION exit code + n
   assert.strictEqual(entry.nextAction!(""), "secret-shuttle unlock");
 });
 
-test("error-codes: bootstrap_plan_invalid registered with USAGE exit code + nextAction", () => {
+test("error-codes: bootstrap_plan_invalid registered with USAGE exit code + null nextAction (mode-dependent)", () => {
+  // Burst 5 §1 closeout: nextAction is null because the recovery command
+  // depends on which provision mode is in play (--yml <path>, --infer,
+  // --secret). The registry has no context to produce the right verb, so
+  // the human-readable message at the throw-site carries the recovery
+  // guidance and the agent picks the correct retry command.
   const entry = lookupErrorCode("bootstrap_plan_invalid");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_USAGE);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle bootstrap");
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — recovery command is mode-dependent");
 });
 
-test("error-codes: bootstrap_capture_url_invalid registered with USAGE exit code + nextAction + hint", () => {
+test("error-codes: bootstrap_capture_url_invalid registered with USAGE exit code + null nextAction + hint", () => {
+  // Burst 5 §1 closeout: see bootstrap_plan_invalid above — mode-dependent recovery.
   const entry = lookupErrorCode("bootstrap_capture_url_invalid");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_USAGE);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle bootstrap");
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — recovery command is mode-dependent");
   assert.match(
     entry.hint("") ?? "",
     /https/,
@@ -294,13 +305,16 @@ test("error-codes: bootstrap_batch_abandoned registered with CONFLICT + null nex
 });
 
 test("error-codes: bootstrap_capture_skipped → TRANSIENT exit + retry hint (C16)", () => {
+  // Burst 5 §1 P1.2 remediation: the hint now points at `provision --continue
+  // --batch <id>` (the new resume verb) rather than the removed `bootstrap`
+  // verb. Per-secret retry on a partial-failure batch is the resume path.
   const entry = lookupErrorCode("bootstrap_capture_skipped");
   assert.ok(entry, "bootstrap_capture_skipped must be registered");
   assert.strictEqual(entry.exitCode, EXIT_CODE_TRANSIENT);
-  assert.match(entry.hint("") ?? "", /Re-run bootstrap/);
-  // No nextAction: re-running bootstrap is the same command the user just
-  // invoked, so a literal recovery command would be redundant; the hint
-  // already names it.
+  assert.match(entry.hint("") ?? "", /provision --continue/);
+  // No nextAction: the recovery command needs a batch_id that the registry
+  // doesn't know, so it stays in the hint string for the agent to template
+  // from context (e.g. the calling /continue response's batch_id).
   const next = entry.nextAction ? entry.nextAction("") : null;
   assert.strictEqual(next, null);
 });
@@ -333,18 +347,43 @@ test("error-codes: bootstrap_capture_cleanup_failed → CONFLICT exit + nextActi
   assert.strictEqual(entry.nextAction!(""), "secret-shuttle blind end");
 });
 
-test("error-codes: bootstrap_batch_not_found registered with NOT_FOUND exit code + nextAction", () => {
+test("error-codes: bootstrap_batch_not_found registered with NOT_FOUND exit code + nextAction null (ambiguous context)", () => {
+  // Burst 5 §1 P1.2 remediation: nextAction is null because the recovery is
+  // context-dependent — the batch may have been pruned (start a fresh plan),
+  // or the agent may have looked up the wrong batch_id (re-check via --list).
+  // Either way, the agent should ask the user rather than autorun a recovery.
   const entry = lookupErrorCode("bootstrap_batch_not_found");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_NOT_FOUND);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle bootstrap");
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — recovery context is ambiguous");
 });
 
-test("error-codes: bootstrap_destination_unknown registered with USAGE exit code + nextAction", () => {
+test("error-codes: bootstrap_destination_unknown registered with USAGE exit code + null nextAction (mode-dependent)", () => {
+  // Burst 5 §1 closeout: see bootstrap_plan_invalid above — mode-dependent recovery.
   const entry = lookupErrorCode("bootstrap_destination_unknown");
   assert.ok(entry);
   assert.strictEqual(entry.exitCode, EXIT_CODE_USAGE);
-  assert.strictEqual(entry.nextAction!(""), "secret-shuttle bootstrap");
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — recovery command is mode-dependent");
+});
+
+test("error-codes: infer_yml_exists nextAction is null (context-dependent — opts-aware throw-site builds recovery)", () => {
+  // §1 CTO-review P2b: the previous registry value
+  // "secret-shuttle provision --infer --force" silently dropped
+  // --environment when the user's original invocation passed it.
+  // The static registry function has no access to runtime opts, so the
+  // recovery string is now constructed at the throw-site in runInferMode
+  // (src/cli/commands/provision.ts) where opts.environment is in scope.
+  // The registry's nextAction returns null to surrender that decision to
+  // the throw-site — same precedent as P1.1 round-19
+  // (bootstrap_plan_invalid, bootstrap_capture_url_invalid,
+  // bootstrap_destination_unknown).
+  const entry = lookupErrorCode("infer_yml_exists");
+  assert.ok(entry);
+  assert.strictEqual(entry.exitCode, EXIT_CODE_CONFLICT);
+  const next = entry.nextAction ? entry.nextAction("") : undefined;
+  assert.strictEqual(next, null, "no automatic recovery — opts-aware throw-site builds recovery");
 });
 
 test("error-codes: daemon_not_running has nextAction (mechanical recovery)", () => {

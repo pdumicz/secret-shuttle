@@ -190,6 +190,11 @@ export async function executeBatch(
           action: "bootstrap_step",
           ok: false,
           ref: entry.ref,
+          batch_id: state.batch_id,
+          source_kind: entry.source.kind,
+          destination_shorthands: entry.destinations.map((d) => d.shorthand),
+          destinations_ok_count: 0,
+          destinations_failed_count: entry.destinations.length,
           error_code: errorCode,
         });
         await store.save(state);
@@ -225,7 +230,16 @@ export async function executeBatch(
             destinations_pushed: merged,
             ...(anyDestFailed ? { error_code: "destination_partial_failure" } : {}),
           };
-          await writeDaemonAudit({ action: "bootstrap_step", ok: !anyDestFailed, ref });
+          await writeDaemonAudit({
+            action: "bootstrap_step",
+            ok: !anyDestFailed,
+            ref,
+            batch_id: state.batch_id,
+            source_kind: entry.source.kind,
+            destination_shorthands: entry.destinations.map((d) => d.shorthand),
+            destinations_ok_count: merged.filter((d) => d.ok).length,
+            destinations_failed_count: merged.filter((d) => !d.ok).length,
+          });
         } catch (e) {
           // A destination failure here is recorded the same way the legacy
           // path's catch block did. The ref is preserved so the R5 retry
@@ -242,6 +256,11 @@ export async function executeBatch(
             action: "bootstrap_step",
             ok: false,
             ref: outcome.ref,
+            batch_id: state.batch_id,
+            source_kind: entry.source.kind,
+            destination_shorthands: entry.destinations.map((d) => d.shorthand),
+            destinations_ok_count: 0,
+            destinations_failed_count: entry.destinations.length,
             error_code: errorCode,
           });
         }
@@ -259,6 +278,11 @@ export async function executeBatch(
         action: "bootstrap_step",
         ok: false,
         ref: entry.ref,
+        batch_id: state.batch_id,
+        source_kind: entry.source.kind,
+        destination_shorthands: entry.destinations.map((d) => d.shorthand),
+        destinations_ok_count: 0,
+        destinations_failed_count: entry.destinations.length,
         error_code: outcome.stepResult.error_code ?? "unexpected_error",
       });
       await store.save(state);
@@ -321,7 +345,16 @@ export async function executeBatch(
         destinations_pushed: merged,
         ...(anyDestFailed ? { error_code: "destination_partial_failure" } : {}),
       };
-      await writeDaemonAudit({ action: "bootstrap_step", ok: !anyDestFailed, ref });
+      await writeDaemonAudit({
+        action: "bootstrap_step",
+        ok: !anyDestFailed,
+        ref,
+        batch_id: state.batch_id,
+        source_kind: entry.source.kind,
+        destination_shorthands: entry.destinations.map((d) => d.shorthand),
+        destinations_ok_count: merged.filter((d) => d.ok).length,
+        destinations_failed_count: merged.filter((d) => !d.ok).length,
+      });
     } catch (e) {
       const errorCode = e instanceof ShuttleError ? e.code : "unexpected_error";
       const message = e instanceof Error ? e.message : String(e);
@@ -338,6 +371,11 @@ export async function executeBatch(
         action: "bootstrap_step",
         ok: false,
         ref: prior?.ref ?? entry.ref,
+        batch_id: state.batch_id,
+        source_kind: entry.source.kind,
+        destination_shorthands: entry.destinations.map((d) => d.shorthand),
+        destinations_ok_count: 0,
+        destinations_failed_count: entry.destinations.length,
         error_code: errorCode,
       });
     }

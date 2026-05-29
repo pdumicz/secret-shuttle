@@ -74,46 +74,14 @@ function parseSource(secretName: string, raw: unknown): BootstrapSource {
     // (not the generic bootstrap_plan_invalid) so the CLI can surface a
     // targeted hint ("fix the capture URL in your bootstrap yml") without
     // re-classifying the basic-shape failure above.
-    let u: URL;
-    try {
-      u = new URL(s.url);
-    } catch {
+    const result = validateCaptureUrl(s.url);
+    if (!result.ok) {
       throw new ShuttleError(
         "bootstrap_capture_url_invalid",
-        `secrets.${secretName}.source.url is not a valid URL: ${JSON.stringify(s.url)}`,
+        `secrets.${secretName}.source.url ${result.reason}`,
       );
     }
-    if (u.protocol !== "https:") {
-      throw new ShuttleError(
-        "bootstrap_capture_url_invalid",
-        `secrets.${secretName}.source.url must be https`,
-      );
-    }
-    if (u.username !== "" || u.password !== "") {
-      throw new ShuttleError(
-        "bootstrap_capture_url_invalid",
-        `secrets.${secretName}.source.url must not embed credentials`,
-      );
-    }
-    // Canonicalize the host: lowercase + strip trailing dot. For IPv6 the
-    // URL parser keeps the square brackets in hostname; strip them only for
-    // the isIP check (the bracketed form isn't a valid IP literal).
-    const hostRaw = u.hostname.toLowerCase();
-    const host = hostRaw.endsWith(".") ? hostRaw.slice(0, -1) : hostRaw;
-    const hostForIp = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
-    if (isIP(hostForIp) !== 0) {
-      throw new ShuttleError(
-        "bootstrap_capture_url_invalid",
-        `secrets.${secretName}.source.url must not target an IP literal`,
-      );
-    }
-    if (host === "localhost" || host.endsWith(".localhost")) {
-      throw new ShuttleError(
-        "bootstrap_capture_url_invalid",
-        `secrets.${secretName}.source.url must not target localhost`,
-      );
-    }
-    return { kind: "capture", url: s.url, expected_host: host };
+    return { kind: "capture", url: s.url, expected_host: result.host };
   }
   if (kind === "random_32_bytes") return { kind: "random_32_bytes" };
   if (kind === "random_64_bytes") return { kind: "random_64_bytes" };
@@ -163,4 +131,44 @@ function parseDestinations(secretName: string, raw: unknown): string[] {
     out.push(d);
   }
   return out;
+}
+
+/**
+ * Pure URL validator for capture sources. Mirrors every check the
+ * executor (parseSource above) applies. Used by parseSource (which
+ * converts a failure to a thrown ShuttleError) AND by
+ * src/cli/provision/infer-gate.ts (which converts a failure to an
+ * InferGateIssue). Shared logic = no drift between gate and executor.
+ *
+ * Returns the same checks in the same order as parseSource so
+ * error messages stay aligned. On success, returns the canonicalized
+ * host (lowercased + trailing-dot stripped) so callers don't need to
+ * re-parse the URL.
+ */
+export function validateCaptureUrl(
+  url: string,
+): { ok: true; host: string } | { ok: false; reason: string } {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return { ok: false, reason: `is not a valid URL: ${JSON.stringify(url)}` };
+  }
+  if (u.protocol !== "https:") return { ok: false, reason: "must be https" };
+  if (u.username !== "" || u.password !== "") {
+    return { ok: false, reason: "must not embed credentials" };
+  }
+  // Canonicalize the host: lowercase + strip trailing dot. For IPv6 the
+  // URL parser keeps the square brackets in hostname; strip them only for
+  // the isIP check (the bracketed form isn't a valid IP literal).
+  const hostRaw = u.hostname.toLowerCase();
+  const host = hostRaw.endsWith(".") ? hostRaw.slice(0, -1) : hostRaw;
+  const hostForIp = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  if (isIP(hostForIp) !== 0) {
+    return { ok: false, reason: "must not target an IP literal" };
+  }
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return { ok: false, reason: "must not target localhost" };
+  }
+  return { ok: true, host };
 }

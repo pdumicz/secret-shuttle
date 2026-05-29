@@ -63,13 +63,19 @@ export interface SessionPattern {
   destination_domains: string[];   // REQUIRED non-empty when actions include inject-submit/reveal-capture/secrets-set
   template_ids?: string[];         // REQUIRED non-empty when actions includes template-run
   allowed_actions?: string[];      // REQUIRED non-empty when actions includes secrets-set; entries validated against ALL_SECRET_ACTIONS
-  ttl_ms: number;                  // 1_000 ≤ ttl_ms ≤ 900_000 (15 min)
+  ttl_ms: number;                  // 1_000 ≤ ttl_ms ≤ 3_600_000 (60 min)
   max_uses?: number;               // 1 ≤ max_uses ≤ 1000
+  required_params?: Record<string, string>;
+  // Applies ONLY to the template-run matcher branch. When present and
+  // non-empty, the template-run matcher requires the binding's
+  // template_params to contain every key here with strict-equal
+  // value. When absent/empty, today's matcher behavior is preserved.
+  // See Burst 5 spec §2 "Template-param constraint primitive".
 }
 
 export const PENDING_TTL_MS = 2 * 60 * 1000; // 2 minutes for human to approve
 export const TTL_MIN_MS = 1_000;
-export const TTL_MAX_MS = 15 * 60 * 1000;
+export const TTL_MAX_MS = 60 * 60 * 1000;
 export const MAX_USES_MAX = 1000;
 
 export type SessionStatus = "pending" | "granted" | "denied" | "expired" | "revoked";
@@ -250,7 +256,10 @@ export function assertSessionPatternValid(pattern: SessionPattern): void {
     throw new ShuttleError("bad_request", `ttl_ms must be at least ${TTL_MIN_MS}ms.`);
   }
   if (pattern.ttl_ms > TTL_MAX_MS) {
-    throw new ShuttleError("bad_request", `ttl_ms cannot exceed ${TTL_MAX_MS}ms (15 minutes).`);
+    throw new ShuttleError(
+      "session_ttl_exceeds_cap",
+      `ttl_ms cannot exceed ${TTL_MAX_MS}ms (${Math.round(TTL_MAX_MS / 60_000)} minutes).`,
+    );
   }
 
   // ── 8. max_uses bounds (optional) ───────────────────────────────────────────
@@ -263,6 +272,26 @@ export function assertSessionPatternValid(pattern: SessionPattern): void {
     }
     if (pattern.max_uses > MAX_USES_MAX) {
       throw new ShuttleError("bad_request", `max_uses cannot exceed ${MAX_USES_MAX}.`);
+    }
+  }
+
+  // ── 9. required_params shape (optional) ──────────────────────────────────────
+  if (pattern.required_params !== undefined) {
+    if (
+      pattern.required_params === null ||
+      typeof pattern.required_params !== "object" ||
+      Array.isArray(pattern.required_params)
+    ) {
+      throw new ShuttleError("bad_request", "required_params must be an object (Record<string,string>).");
+    }
+    const KEY_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+    for (const [key, value] of Object.entries(pattern.required_params)) {
+      if (!KEY_RE.test(key)) {
+        throw new ShuttleError("bad_request", `required_params key '${key}' must match ${KEY_RE}.`);
+      }
+      if (typeof value !== "string") {
+        throw new ShuttleError("bad_request", `required_params value for key '${key}' must be a string.`);
+      }
     }
   }
 }

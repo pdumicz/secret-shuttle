@@ -14,7 +14,8 @@ import { registerRevealCapture } from "./routes/reveal-capture.js";
 import { registerApprovals } from "./routes/approvals.js";
 import { registerApprovalsSessionRoutes } from "./routes/approvals-session.js";
 import { registerBrowser } from "./routes/browser.js";
-import { registerTemplates } from "./routes/templates.js";
+import { registerTemplates, registry as templateRegistry } from "./routes/templates.js";
+import { validateDestinationDefiningParamsCoverage } from "../templates/destination-defining-params.js";
 import { registerUnlockSession } from "./routes/unlock-session.js";
 import { registerHealth } from "./routes/health.js";
 import { registerRunResolveRoute } from "./routes/run-resolve.js";
@@ -27,13 +28,18 @@ import { registerBootstrapCaptureUi } from "./routes/bootstrap-capture-ui.js";
 import { registerTokens } from "./routes/tokens.js";
 import { registerWhoami } from "./routes/whoami.js";
 import { registerDaemonAdmin } from "./routes/daemon-admin.js";
+import { registerAuditSummaryRoute } from "./routes/audit-summary.js";
 
 export function registerRoutes(
   server: DaemonServer,
   services: DaemonServices,
   daemonPortRef: () => number,
 ): void {
-  registerUiRoutes(server, services.approvals);
+  registerUiRoutes(server, {
+    approvals: services.approvals,
+    sessions: services.sessionStore,
+    bootstrap: services.bootstrapStore,
+  });
   registerSessionUiRoutes(server, services.sessionStore);
   registerHubRoutes(server, services.hubBroker);
   registerStatus(server, services);
@@ -50,6 +56,11 @@ export function registerRoutes(
   registerApprovalsSessionRoutes(server, services, daemonPortRef);
   registerBrowser(server, services);
   registerTemplates(server, services, daemonPortRef);
+  // Burst 5 §2 (Task 2a.6): emit a startup warning for any shipped
+  // template that lacks `sessionDefiningParams`. Provision-derived
+  // sessions exclude such templates (fail-closed); the warning makes
+  // the misconfiguration visible.
+  validateDestinationDefiningParamsCoverage(templateRegistry);
   registerRunResolveRoute(server, services, daemonPortRef);
   registerInjectRenderRoute(server, services, daemonPortRef);
   registerSecretsImportRoute(server, services, daemonPortRef);
@@ -62,4 +73,7 @@ export function registerRoutes(
   registerTokens(server, () => server.getRootToken());
   registerWhoami(server);
   registerDaemonAdmin(server, daemonPortRef);
+  // Burst 5 §4 Task 4.6: owner-scoped audit summary + batch lookup with
+  // BootstrapStore-first / audit-log fallback for pruned batches.
+  registerAuditSummaryRoute(server, { bootstrapStore: services.bootstrapStore });
 }

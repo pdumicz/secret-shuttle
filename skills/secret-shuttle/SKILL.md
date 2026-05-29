@@ -1,16 +1,80 @@
-# Secret Shuttle — Agent Operating Manual
+# Secret Shuttle
 
-You are an agent. This is your operating manual for using Secret Shuttle. The
-human will not see these directives unless they read this file. Read top to
-bottom; the order matters.
+Local-daemon CLI that lets AI coding agents provision and use secrets without ever seeing them.
+You work with refs (`ss://stripe/prod/STRIPE_WEBHOOK_SECRET`); the daemon resolves them at the last possible moment.
+
+## 30-second quickstart
+
+```bash
+# One-time per project:
+npx secret-shuttle init
+
+# Provision an entire project's secrets in one approval:
+secret-shuttle provision --infer
+# → If the inferred yml is fully executable: returns approval_required with details.batch_id + details.approvals[].
+#   If not: returns { needs_edit: true, yml_path, issues[] } — show the user the issues and ask for edits.
+# Once approved, continue with the ids the prior step returned:
+secret-shuttle provision --continue \
+  --batch <batch_id_from_prior_step> \
+  --approval-id <approval_id_from_prior_step>
+
+# Use a secret in a child process (value never enters your context):
+secret-shuttle run --env-file .env -- npm start
+
+# Push a single secret on demand:
+secret-shuttle provision --secret STRIPE_WEBHOOK_SECRET --from capture \
+  --url https://dashboard.stripe.com/apikeys --to vercel:production
+```
+
+## Core verbs
+
+- `provision --infer|--yml|--secret|--continue` — make secrets exist in vault + destinations (one approval per batch)
+- `run --env-file <f> -- <cmd>` — spawn a child with refs resolved into env / stdin
+- `secrets list | get-ref <ref> | set <name> ... | delete <ref> | rotate <ref>` — discover and manage refs
+- `status [--json]` — daemon + vault + browser + session state (carries `ready: bool` + `next_action`)
+- `init` — one-shot setup (daemon, vault, agent skill install)
+- `audit --since <duration> | --batch <id>` — what was just done (use this to deliver proof to the user)
+- `template list | template run <id>` — vetted CLI integrations (Vercel, GitHub Actions, Cloudflare, Supabase)
+- `inject -i <tpl> -o <out>` — render a template file with `ss://` refs into a real file
+- `internal session create|list|revoke` — pre-approved batch sessions
+- `daemon start|stop|status` — daemon lifecycle
+
+## What you see vs never see
+
+- **You see**: refs, fingerprints, metadata, batch ids, exit codes, error codes, audit summaries.
+- **You never see**: raw secret values, vault keys, browser CDP URLs, OS credentials.
+- **Every prod-touching op requires human approval.** One click per batch via a browser popup the daemon opens.
+
+## Error recovery
+
+Every error JSON includes `error_code` + `next_action`. When `next_action` is a non-null string, run it. **Trust `next_action` over error_code recognition.**
+
+| error_code | next_action | Cause |
+|---|---|---|
+| `daemon_not_running` | `secret-shuttle daemon start` | Daemon isn't running. |
+| `vault_not_initialized` | `secret-shuttle init` | No vault exists. |
+| `vault_locked` | `secret-shuttle unlock` | Vault is locked. |
+| `approval_required` | null (human required) | Approval popup opens. Wait, or pass `--approval-id` to retry. |
+| `secret_not_found` | null | Use `secrets list` to see what's available. |
+| `infer_no_env_example` | null (human required) | Create a `.env.example` listing your secret names. |
+| `infer_yml_exists` | `secret-shuttle provision --infer --force` (or `--dry-run`) | Generated yml would overwrite an existing file. |
+| `command_renamed` | (printed in error) | A verb was renamed; the error names the replacement. |
+
+A `failed_partial` provision batch carries `next_action: secret-shuttle provision --continue --batch <id>` — run it to resume. For less common codes call `secret-shuttle status --json` or read the Reference section below.
+
+---
+
+## Reference (read when an error or edge case sends you here)
+
+You are an agent. The sections above are the day-to-day operating surface. The sections below cover safety discipline, low-level mechanics, and edge cases the daily-flow agent rarely hits.
 
 ## Before any secret operation
 
-1. Run `secret-shuttle doctor --json` first. If `daemon_reachable` is `false`,
+1. Run `secret-shuttle status --json` first. If `daemon_reachable` is `false`,
    run `secret-shuttle daemon start`. If `unlocked` is `false`, run
    `secret-shuttle unlock` (the human enters the passphrase in the browser
    window; the CLI never reads it). If `agentic_browser.available` is `false`,
-   run `secret-shuttle browser start`. Re-check `doctor --json` after each
+   run `secret-shuttle browser start`. Re-check `status --json` after each
    action — do not proceed until every prerequisite is `true`.
 
 ## Prefer `template run` over generic browser ops
