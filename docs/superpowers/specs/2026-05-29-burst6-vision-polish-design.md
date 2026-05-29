@@ -35,10 +35,10 @@ This burst closes those gaps. **It is what unblocks W.3 — npm publish 0.3.x.**
 - `SKILL.md` (top-level) is **deleted**; `package.json` `files` whitelist updates accordingly. The canonical agent skill lives only at `skills/secret-shuttle/SKILL.md`. Drift-guard test asserts the top-level file is absent.
 - Three `agents/*.example.md` files are refreshed to use the Burst 5 verb surface.
 - `examples/stripe-to-vercel/walkthrough.md` gains a top-of-file "Magic path" section using `provision --secret … --from capture --url … --to vercel:production`. The existing low-level content moves below under "Advanced: low-level mechanics" — preserved as escape-hatch documentation.
-- README header banner is rewritten to honest-but-not-scary v0.3.0 framing.
+- README header banner is rewritten to honest-but-not-scary v0.3.1 framing.
 - README gains a positioning section ("Why not Doppler / Infisical / 1Password CLI / Vercel envs?") between the hero and the Quickstart, with a 4-row comparison table.
 - `demo/index.html` gains a new **Scene 0** at the front showing the `provision --infer → approve → audit` flow. Existing scenes renumber (or remain numbered with a section divider labeling them "Advanced: low-level mechanics"). The README hero embed updates to point at the demo URL with Scene 0 as the entry point.
-- `--infer` gains a Supabase detector: signal `supabase/config.toml`, project_ref read from `.supabase/project.json` (`"ref"` field), graceful fallback to a needs_edit message when project hasn't been `supabase link`-ed yet.
+- `--infer` gains a Supabase detector: signal `supabase/config.toml`, project_ref read from `.supabase/project.json` (`"ref"` field), graceful fallback to a needs_edit message when project hasn't been `supabase link`-ed yet. The detector routes **per-secret**, gated by a name predicate (`SUPABASE_*` regex + opt-in `infer.supabaseNames` override), so unrelated secrets like Stripe webhooks don't get over-routed to Supabase when both detectors fire.
 
 ### Trust model — unchanged
 
@@ -123,17 +123,22 @@ Audit for any other stale flag references while in the file. Cross-check against
 
 A reader landing on the README sees that line BEFORE they see the "Let AI agents use secrets without seeing them" hero. The "do not trust" framing kills the page.
 
-**Fix:** rewrite to honest-but-confident v0.3.0 framing:
+**Fix:** rewrite to honest-but-confident v0.3.1 framing:
 
-> **Status: 0.3.0 — beta.** The architecture has been through five bursts of adversarial security review with fixes shipped. Not yet independently audited; use test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployment.
+> **Status: 0.3.1 — beta.** The architecture has been through six bursts of adversarial security review with fixes shipped. Not yet independently audited; use test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployment.
 
-(Exact wording to be polished during implementation — the spec freezes the intent: confident-but-honest, not "early prototype.")
+(Exact wording to be polished during implementation — the spec freezes the intent: confident-but-honest, not "early prototype." The version-string portion of the banner should land in the same commit as the `package.json` 0.3.1 bump (§6 wrap step) so the README never advertises a version newer than what `npm view` will resolve.)
 
 ### §1.7 — Tests
 
 - Drift-guard for `SKILL.md` non-existence (§1.1).
 - Existing `agent-install-no-leak.test.ts` already covers the canonical SKILL content shape — extend if necessary to assert the in-skills/ copy is what gets installed via `secret-shuttle agent install <runtime>`.
-- The README/walkthrough/agents-examples changes are text edits and don't need automated tests, but visual review during the codex gate covers them.
+- **Removed-verb drift-guard test (new).** The discovery-surface stale-verb leakage that motivated this burst (`bootstrap` in top-level SKILL.md, `generate` in agent examples, `daemon start && unlock` ritual in AGENTS.md) must not silently regress. Add a `tests/docs-no-removed-verbs.test.ts` that:
+  - Scans `skills/secret-shuttle/SKILL.md`, `agents/*.example.md`, `examples/stripe-to-vercel/walkthrough.md`, and `README.md`.
+  - Asserts none of them contain the removed Burst 5 surface: the literal tokens `secret-shuttle generate`, `secret-shuttle bootstrap`, and `daemon start && secret-shuttle unlock` (and the `daemon start &&` prefix more broadly).
+  - Has an allowlist for the *advanced/low-level* sections that intentionally preserve historical mechanics: `examples/stripe-to-vercel/walkthrough.md` below the `## Advanced: low-level mechanics` header may reference `secret-shuttle blind start`, `secret-shuttle capture`, `secret-shuttle inject`, `secret-shuttle template run` — those are the escape-hatch verbs and they remain canonical. The allowlist is scoped to that file/section only.
+  - When the test fails, the error message names the offending file + line + token so the failure is self-explanatory.
+- The README/walkthrough/agents-examples changes are text edits beyond the removed-verb drift-guard; visual review during the codex gate covers wording quality.
 
 ---
 
@@ -141,7 +146,22 @@ A reader landing on the README sees that line BEFORE they see the "Let AI agents
 
 ### Goal
 
-When `provision --infer` runs in a directory containing `supabase/config.toml`, the generated yml gains a `supabase:production` (or appropriate environment) destination, with `template_params.project_ref` resolved to the linked cloud project ref if `.supabase/project.json` is present.
+When `provision --infer` runs in a directory containing `supabase/config.toml`, the generated yml gains a `supabase:production` (or appropriate environment) destination **only for secrets that belong on Supabase**, with `template_params.project_ref` resolved to the linked cloud project ref if `.supabase/project.json` is present.
+
+### Routing model (per-secret, not project-wide)
+
+`--infer` produces a per-secret destination list, not a project-wide one — each secret in the generated yml gets its own `destinations:` array assembled by running every detector against that secret's name. The Supabase detector therefore needs an explicit name-matching predicate so it doesn't over-route unrelated secrets (Stripe webhook keys, cron tokens, etc.) onto Supabase.
+
+**Name predicate (default):** the Supabase destination is attached to a secret if either:
+
+1. The secret name matches the regex `^SUPABASE_[A-Z0-9_]+$` (e.g. `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`), OR
+2. The secret name appears in an optional `infer.supabaseNames: string[]` field of `secret-shuttle.config.json` (escape hatch for projects that ship non-standard names like `DATABASE_SERVICE_KEY` to Supabase).
+
+For any secret that doesn't match the predicate, the detector emits **no** Supabase destination for that secret, even when `supabase/config.toml` is present — the secret routes to whatever other detectors match (Vercel, Cloudflare, etc.). This avoids the "Supabase project exists, therefore every secret goes to Supabase" failure mode.
+
+**`infer.supabaseNames` validation:** a config-supplied override entry is *accepted* only if it is a string that matches the regex `^[A-Z_][A-Z0-9_]*$` (uppercase letters, digits, and underscores, with a non-digit first character — the same env-var-safe shape secret names normally take). Any entry that fails this check — whether because it is not a string, or because it contains whitespace, control characters, lowercase letters, dots, dashes, a leading digit, or any other character outside the grammar — is rejected **per-entry**: the offending entry is dropped from the override list while valid entries in the same array still take effect. The detector emits a single `needs_edit` issue naming all offending entries (or their array indices, if non-string) and the config key so the user knows which overrides were ignored. The only case that drops the *whole* override is when the entire `infer.supabaseNames` value is not an array (e.g., a string or object at that key) — then the override is unusable as a whole, and a single `needs_edit` issue names the offending config key. This policy preserves valid overrides whenever possible (easier for users to recover from a typo in one entry) while still blocking malformed/dangerous secret names from silently slipping into routing decisions.
+
+**Candidate vs final destinations:** the emitted Supabase destination is still considered a *candidate* — the generated yml is human-editable, and the README/walkthrough wording for `--infer` continues to say "review the generated yml before running `provision`". The detector's job is to populate the obvious case correctly, not to be infallible.
 
 ### Verified facts (from Supabase CLI docs, queried via context7)
 
@@ -160,7 +180,11 @@ When `provision --infer` runs in a directory containing `supabase/config.toml`, 
 
 ### Detector behavior
 
-| State on disk | Detector output |
+The detector is evaluated **per-secret**. For each secret in the inference batch, the detector first runs the name predicate (see "Routing model" above). If the predicate doesn't match, the detector returns no destination for that secret regardless of on-disk state.
+
+When the name predicate matches, the on-disk state determines the output:
+
+| State on disk | Detector output (for a name-matching secret) |
 |---|---|
 | `supabase/config.toml` exists, `.supabase/project.json` exists with valid string `ref` of plausible shape | Emit `supabase:production` destination, `template_params: { name: "<secret_name>", project_ref: "<ref from project.json>" }` |
 | `supabase/config.toml` exists, `.supabase/project.json` absent OR malformed JSON OR missing `ref` field OR `ref` is not a string | Emit destination with `template_params.project_ref: "TODO_run_supabase_link_first"` + add a `needs_edit` issue: *"Supabase target detected (`supabase/config.toml` present) but project not linked. Run `supabase link --project-ref <ref>` first, then re-run `provision --infer`."* |
@@ -173,9 +197,9 @@ The `ref` field's "plausible shape" check: at minimum `typeof === "string"` and 
 | # | Task |
 |---|---|
 | 2.1 | Locate the existing inference module (`src/cli/bootstrap/infer.ts` or wherever §1 placed it) and read its current detector shape. Each detector contributes `InferredDestination[]` to the assembled yml. |
-| 2.2 | Implement `detectSupabase(cwd)`: returns inferred destinations + any `needs_edit` issues. Safe file reads (existsSync → readFile → JSON.parse with try/catch). |
+| 2.2 | Implement `detectSupabase({ cwd, secretName, inferConfig })` per the routing model above. The detector evaluates the name predicate first (regex `^SUPABASE_[A-Z0-9_]+$` OR `secretName ∈ inferConfig.supabaseNames`) and returns `{ destinations: [], issues: [] }` (no Supabase destination) when the predicate fails — even if `supabase/config.toml` is present. When the predicate matches, the detector returns inferred destinations + any `needs_edit` issues based on the on-disk state table above. Safe file reads (existsSync → readFile → JSON.parse with try/catch). Sanitize the override list per the "Validation" rule above: drop each individual entry that is non-string OR fails the `^[A-Z_][A-Z0-9_]*$` grammar (i.e., contains whitespace, control characters, lowercase letters, dots, dashes, a leading digit, or other non-grammar characters); valid entries in the same array still take effect. Emit a single `needs_edit` issue naming all offending entries (or their indices, if non-string) + config key so the user knows which overrides were ignored. Only if the entire `infer.supabaseNames` value is not an array, drop the whole override and emit a single `needs_edit` issue naming the config key. |
 | 2.3 | Integrate into the inference pipeline. Same call shape as the existing Vercel / Cloudflare detectors. |
-| 2.4 | Tests: four fixtures — (a) linked project with valid `ref`, (b) project with `config.toml` but no `project.json`, (c) project with `config.toml` and malformed `project.json`, (d) project without `config.toml`. Assert correct output shape including needs_edit issues. |
+| 2.4 | Tests: seven fixtures — (a) linked project with valid `ref` + secret named `SUPABASE_SERVICE_ROLE_KEY` (emits Supabase destination), (b) project with `config.toml` but no `project.json` + matching secret name (emits destination with `TODO_run_supabase_link_first` + needs_edit), (c) project with `config.toml` and malformed `project.json` + matching name (same as b), (d) project without `config.toml` (no destination emitted), (e) linked project + non-matching secret name like `STRIPE_WEBHOOK_SECRET` (no Supabase destination emitted — confirms name predicate gates routing), (f) linked project + non-matching secret name listed in `infer.supabaseNames` config override (emits destination — confirms escape hatch works), (g) linked project + invalid `infer.supabaseNames` config with three sub-cases: (g.1) array mixing a valid entry (`"MY_VALID_NAME"`) with entries containing whitespace/control chars/lowercase/dots/dashes AND an entry with a leading digit (e.g., `"1BAD_SECRET"`) — assert only offending entries are dropped (including the leading-digit entry), the valid entry still routes, and one `needs_edit` issue names all offending entries + config key; (g.2) array mixing a valid string entry with a non-string entry (e.g., `123` or `null`) — assert non-string entry is dropped, valid entry still routes, one `needs_edit` issue names the offending index + config key; (g.3) entire `infer.supabaseNames` value is not an array (e.g., a string `"FOO"`) — assert the whole override is dropped and one `needs_edit` issue names the config key. Assert correct output shape including needs_edit issues across all fixtures. |
 
 ### Out of scope (deferred)
 
@@ -252,7 +276,7 @@ The new Scene 0 follows the same pattern — adds:
 - `.scene-meta` block with the Scene 0 caption text
 - HTML markup for the new terminal pane + approval card
 
-Existing scenes 1-9 either stay numbered (with a section divider in the scene-meta listing labeling them "Advanced: low-level mechanics") OR renumber 0-9 → 1-10. The cleaner choice (preserve existing scene numbers, add Scene 0 as a prepended entry) avoids breaking external `?scene=N` deep links.
+Existing scenes 1-9 **must stay numbered as 1-9** — Scene 0 is prepended as a new entry, not renumbered into the sequence. This preserves every external `?scene=N` deep link to scenes 1-9 (the demo is publicly linked from the README and may be linked from elsewhere). A section divider in the scene-meta listing labels scenes 1-9 as "Advanced: low-level mechanics" to make the magic-path (Scene 0) versus advanced split visually clear. Renumbering 0-9 → 1-10 is explicitly NOT permitted — it would silently break any in-flight deep link.
 
 ### README hero embed update
 
@@ -300,16 +324,35 @@ Validate that a fresh agent session, pointed at a real-world Next.js + Stripe + 
 
 ### Burst 6 deliverable: a template file ready to fill in
 
-`docs/dogfood/burst6-template.md` ships in this burst pre-populated with the four section headers and a quick-reference card for the user. Filling it in is the user's actual dogfood step.
+`docs/dogfood/burst6-template.md` ships in this burst pre-populated with the four section headers and a quick-reference card for the user. **That template file IS the Burst 6 deliverable.** Filling it in is the user's actual dogfood step, which happens AFTER Burst 6 lands and BEFORE the 0.3.1 `npm publish`.
 
-### Pass criteria
+### Pass criteria (for the human release gate, not for Burst 6 itself)
 
-The dogfood passes if:
-- The agent gets to a successful `audit --since 5m` showing both Stripe + Supabase secrets pushed, with **at most one human approval click** (the single batch approval).
-- No friction point requires the agent to read a manual or ask the human "how do I do X" beyond the initial single prompt.
-- Total wall-clock time from "first prompt" to "audit success" is under 5 minutes (excluding the human's approval-click decision time).
+The dogfood run is a separate human release gate — its outcome gates 0.3.1 publish but does NOT gate Burst 6 completion or merge. The Burst 6 implementation is "done" when the template ships, the code changes land, and the codex impl-stage gate is clean. The dogfood run is the *next* step after that, owned by the user.
 
-If the dogfood fails (an agent gets stuck, has to ask follow-up questions, hits an unexpected error), Burst 6 isn't done — we patch and re-run.
+Two distinct buckets apply to the dogfood run: a **release-blocker gate** (the only thing that decides whether 0.3.1 ships) and **UX target metrics** (informational — they track polish quality but do not block publish on their own).
+
+**Release-blocker gate (the actual publish gate — ALL must hold):**
+
+If every bullet below holds, `npm publish 0.3.1` is unblocked. If *any* bullet fails, publish is blocked until the underlying issue is fixed and the dogfood run is repeated.
+
+- The agent reaches a successful `audit --since 5m` showing both Stripe + Supabase secrets pushed end-to-end, with **at most one human approval click** (the single batch approval).
+- The single-batch-approval invariant holds — more than one approval click would block; the approval UI rendered correctly.
+- No secret value is exposed in any log, audit row, or UI surface visible to the agent.
+- The audit log shows correct attribution (correct agent_id, correct batch_id, all required fields present).
+- The agent did not need to read source code or internal docs to recover from a failure (i.e., no hard error or hang that required user spelunking).
+
+If any of the above fails, the user does NOT publish 0.3.1. The fix lands as a Burst 6 follow-up commit (or a Burst 7 task if it's architectural), and the dogfood run is repeated until the release-blocker gate is clean.
+
+**UX target metrics (tracked, NOT release-blocking):**
+
+These are the polish goals — they tell us how close the magic-path actually is to the Burst 5/6 vision. Missing a target logs an item to the v0.3.2 backlog but does *not* block 0.3.1 publish on its own:
+
+- **Zero clarifying questions:** the agent reached `audit --since 5m` without asking the human "how do I do X" beyond the initial single prompt. A clarifying question the human can answer in one sentence is a polish miss, not a publish blocker.
+- **Under 5 minutes wall-clock:** total time from "first prompt" to "audit success" is under 5 minutes (excluding the human's approval-click decision time). Going over the target is a polish miss, not a publish blocker.
+- **No polish gaps surfaced:** wording, demo presentation, README phrasing all read clean during the run. Polish gaps that don't affect correctness are polish misses, not publish blockers.
+
+UX target misses are filed as v0.3.2 backlog items in `docs/dogfood/2026-06-XX-burst6-notes.md`'s "Polish backlog" section. They do not gate the release — the discovery-surface fixes are what gates 0.3.1, and the release-blocker gate above is the only thing that decides "ship vs hold."
 
 ---
 
@@ -326,8 +369,8 @@ Sequential primary path, with parallelization opportunities flagged:
 | 5 | §1.5 — `walkthrough.md` magic-path rewrite | Larger doc rewrite. Sequential after §1.2-1.4 so the verb-name canonicalization is stable. |
 | 6 | §2 — Supabase detector | TDD: fixtures first, then `detectSupabase`, then integration. |
 | 7 | §4 — Demo Scene 0 | **Can parallelize with §2** — HTML/CSS work is touch-independent. |
-| 8 | §5 — Dogfood pass | Runs AFTER 1-7 land. Validates the surface. User-driven. |
-| 9 | Wrap — CHANGELOG entry, `0.3.1` version bump, codex review gate (impl stage), `npm publish`, `git tag v0.3.1`, `git push --tags` | Mirrors Burst 5 W.2/W.3 exactly. Codex gate covers the §1-§4 diff. |
+| 8 | §5 — Dogfood template file | Ship `docs/dogfood/burst6-template.md` with the four section headers + quick-reference card. The actual dogfood RUN is a post-burst human release gate (see §5 pass criteria), not a burst step. |
+| 9 | Wrap — CHANGELOG entry, `0.3.1` version bump, codex review gate (impl stage). Leaves repo in publish-ready state; `npm publish` + `git tag v0.3.1` + `git push --tags` happen after the user's dogfood run passes. | Mirrors Burst 5 W.2; defers W.3 (publish/tag/push) to the post-burst release gate. |
 
 ### Parallelization summary
 
@@ -397,12 +440,12 @@ These items are scoped here so the reader knows what's coming next, but their de
 
 This burst is successful if all of the following are true:
 
-1. **Dogfood passes (§5):** a fresh Claude Code session pointed at a Next.js + Stripe + Supabase project completes `provision → continue → audit` with at most one human approval click, no manual lookups, under 5 minutes wall-clock.
-2. **Supabase detector works (§2):** `secret-shuttle provision --infer` on that same project emits a yml containing BOTH `vercel:production` AND `supabase:production` destinations. `project_ref` populated correctly when the project is `supabase link`-ed; `needs_edit` message correct when not.
+1. **Dogfood template ships (§5):** `docs/dogfood/burst6-template.md` exists with the four section headers + quick-reference card, ready for the user to fill in during the post-burst release gate. (The actual dogfood run is a separate human gate that blocks `npm publish 0.3.1`, NOT Burst 6 merge.)
+2. **Supabase detector works (§2):** `secret-shuttle provision --infer` on a Next.js + Supabase project emits a yml that attaches `supabase:production` destinations only to secrets matching the Supabase name predicate (`SUPABASE_*` or configured names), and attaches `vercel:production` to the others. `project_ref` populated correctly when the project is `supabase link`-ed; `needs_edit` message correct when not. Unit tests cover the seven fixtures from §2.4 (linked + matching name; linked + non-matching name; unlinked + matching name; malformed JSON + matching name; no config.toml; configured-names override; invalid-config override).
 3. **Positioning section lands (§3):** the README's "Why not Doppler / 1Password / etc." section answers the question in a way the user can paste verbatim to a vibe coder without further explanation.
 4. **Demo Scene 0 lands (§4):** the demo's opening scene shows the magic-path within 15 seconds of opening the demo URL.
-5. **Documentation drift is gone (§1):** top-level `SKILL.md` deleted; all `agents/*.example.md` use the Burst 5 verb surface; walkthrough leads with the magic path.
-6. **v0.3.1 is published:** `npm publish` succeeded; `npx secret-shuttle@0.3.1 --help` from a clean machine returns the agent-quickstart line + verb list including `provision` and `audit`.
+5. **Documentation drift is gone (§1):** top-level `SKILL.md` deleted; all `agents/*.example.md` use the Burst 5 verb surface; walkthrough leads with the magic path. The removed-verb drift-guard test (§1.7) passes.
+6. **v0.3.1 is ready to publish:** `package.json` version bumped to `0.3.1`, CHANGELOG entry written. The actual `npm publish` is gated on the dogfood run (criterion 1's release gate) and is therefore out of Burst-6-completion scope — but the burst leaves the repo in a publishable state.
 7. **Codex review gate passes:** the impl-stage codex gate over the Burst 6 diff returns clean (or with only acknowledged P3 findings).
 
 ---
@@ -413,9 +456,9 @@ This burst is successful if all of the following are true:
 |---|---|
 | README rewrite changes break existing external links pointing at section anchors | Search GitHub for inbound links via `link:github.com/pdumicz/secret-shuttle` (web search); preserve any in-use anchors during the rewrite. If anchors must change, redirect via the existing top of file. |
 | Supabase `.supabase/project.json` schema drift over time (new fields, removed fields) | Read defensively — extract `ref` field only, ignore everything else. Test the malformed-JSON path. |
-| Demo Scene 0 breaks existing `?scene=N` deep links by renumbering | Preserve existing scene numbers; add Scene 0 as a prepended entry. Deep links to scenes 1-9 keep working. |
-| Dogfood pass reveals a real bug that isn't a quick patch | If a bug is small, fix and re-run. If it's an architectural issue, document as a v0.3.2 backlog item and let 0.3.1 ship without it (the discovery-surface fixes are the gating value). |
-| `--infer` Supabase detector misfires on a project that has `supabase/config.toml` but isn't ACTUALLY a Supabase Edge Functions consumer | The needs_edit message handles the unlinked case. For the case where a user has supabase locally but doesn't want a destination, they can edit the generated yml — same as today's vercel.json false-positives. |
+| Demo Scene 0 breaks existing `?scene=N` deep links by renumbering | §4 mandates "preserve existing scene numbers; prepend Scene 0" — renumbering 0-9 → 1-10 is explicitly disallowed. Deep links to scenes 1-9 keep working by construction. |
+| Dogfood pass reveals a real bug that isn't a quick patch | Classify by the §5 release-blocker gate: failing any release-blocker bullet (cannot reach `audit --since 5m`, single-approval invariant violated, secret value leaked, audit attribution wrong, agent had to spelunk source/docs to recover) blocks 0.3.1 publish until fixed — patch as a Burst 6 follow-up commit (or escalate to Burst 7 if architectural) and re-run dogfood. UX target misses (clarifying questions, time over 5 min, polish gaps) are logged as v0.3.2 backlog and 0.3.1 ships anyway. The user does not decide "blocker vs polish" by feel — the §5 release-blocker gate decides. |
+| `--infer` Supabase detector misfires on a project that has `supabase/config.toml` but isn't ACTUALLY a Supabase Edge Functions consumer | The name-predicate (`SUPABASE_*` regex + opt-in `infer.supabaseNames` override) gates routing per-secret: only secrets whose names match get a Supabase destination, so Stripe/cron/other secrets stay routed to Vercel even when `config.toml` is present. The needs_edit message handles the unlinked case. For the residual case where a user has supabase locally + a matching name but doesn't want a destination, they can edit the generated yml — same as today's vercel.json false-positives. |
 | npm publish gates on credentials we don't have | Already on the user's plate per Burst 5 W.3. This burst doesn't change the publish ritual. |
 
 ---
@@ -433,6 +476,6 @@ This spec covers:
 - §8 — 7 testable success criteria ✓
 - §9 — 6 risks with mitigations ✓
 
-No placeholders. No internal contradictions. Scope appropriate for a single execution plan. Ambiguity in the README banner text intentionally left to implementation (intent is frozen, wording is flexible).
+No placeholders. No internal contradictions: dogfood-run is a post-burst human release gate (not a Burst 6 deliverable); only the template file ships in this burst. Supabase detector routing is explicitly per-secret via a name predicate, not project-wide. README banner version is `0.3.1` to match the publish target, landed alongside the `package.json` bump. Scope appropriate for a single execution plan. Wording of the README banner sentence intentionally left to implementation (intent + version-string are frozen, prose is flexible).
 
 This spec is the input to the next-stage writing-plans skill invocation.
