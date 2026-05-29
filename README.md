@@ -4,9 +4,9 @@
 
 Let AI agents use secrets without seeing them.
 
-[**▶ Walk through the demo →**](https://pdumicz.github.io/secret-shuttle/demo/)  ·  9-scene click-through of a dev shipping a Stripe webhook secret to Vercel prod without ever seeing the value.
+[**▶ Walk through the demo →**](https://pdumicz.github.io/secret-shuttle/demo/?scene=0)  ·  opens on the one-approval `provision` flow, then a 9-scene click-through of the low-level mechanics — a dev shipping a Stripe webhook secret to Vercel prod without ever seeing the value.
 
-[![Secret Shuttle demo — reveal-capture scene](demo/preview.png)](https://pdumicz.github.io/secret-shuttle/demo/)
+[![Secret Shuttle demo — reveal-capture scene](demo/preview.png)](https://pdumicz.github.io/secret-shuttle/demo/?scene=0)
 
 > **Status: beta.** The architecture has been through six bursts of adversarial security review with fixes shipped at each gate. Not yet independently audited; recommend test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployments.
 
