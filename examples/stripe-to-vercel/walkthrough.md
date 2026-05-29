@@ -167,7 +167,6 @@ Expected output shape:
 
 ```json
 {
-  "injected": true,
   "submitted": true,
   "secret_ref": "ss://stripe/prod/STRIPE_WEBHOOK_SECRET",
   "value_visible_to_agent": false

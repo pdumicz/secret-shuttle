@@ -6,17 +6,30 @@
 // SKILL.md, all agents/*.example.md, the magic-path walkthrough, and the
 // README) must not silently regress to reference the removed verbs.
 //
-// IMPORTANT — what is and is NOT allowlisted (spec §1.7):
-// The walkthrough's "Advanced: low-level mechanics" section intentionally
-// preserves the canonical *escape-hatch* verbs `blind start`, `capture`,
-// `inject`, `template run`. Those verbs are NOT in REMOVED_TOKENS below, so
-// they pass this guard everywhere by construction — no per-section allowlist
-// is needed for them. The REMOVED verbs (`generate`, `bootstrap`, the
-// `daemon start && unlock` ritual) must NEVER be allowlisted, including below
-// that header. Therefore this test scans every line of every doc with NO
-// section exemption: removed tokens are forbidden everywhere, escape-hatch
-// tokens are allowed everywhere. (An earlier draft skipped all scanning below
-// the "Advanced" header, which would have let a removed verb slip through in
+// IMPORTANT — two token categories, NO section exemption:
+//
+//   REMOVED_TOKENS — verbs Burst 5 hard-removed (`generate`, `bootstrap`, the
+//   `daemon start && unlock` ritual). These no longer exist anywhere and must
+//   never appear in any agent-facing doc.
+//
+//   MOVED_TOKENS — verbs Burst 6 §1.8 found had relocated to the hidden
+//   `internal` namespace (`capture`, `blind`, `compare`). A BARE
+//   `secret-shuttle capture` / `blind` / `compare` no longer resolves at the
+//   top level, so it's forbidden — but the `internal`-prefixed form
+//   (`secret-shuttle internal blind end`) and `reveal-capture` are fine, and
+//   the regexes are adjacency-based so they pass those by construction (the
+//   intervening `internal ` / `reveal-` token breaks the match). The modern
+//   agentic verbs (`inject-submit`, `reveal-capture`, `browser mark`,
+//   `provision`) are the surface agents should actually use; the docs were
+//   rewritten in §1.8 to teach those.
+//
+// The escape-hatch low-level mechanics in the walkthrough's "Advanced" section
+// (`browser start`, `browser mark`, `inject-submit`, `reveal-capture`,
+// `template run`) are NOT in either token list, so they pass everywhere by
+// construction. This test scans every line of every doc with NO section
+// exemption — removed AND bare-moved tokens are forbidden everywhere,
+// including below the "Advanced" header. (An earlier draft skipped scanning
+// below that header, which would have let a forbidden verb slip through in
 // exactly the section the burst is meant to keep honest — that exemption is
 // deliberately gone.)
 import test from "node:test";
@@ -91,14 +104,17 @@ for (const path of DOCS) {
 test("MOVED_TOKENS regex matches bare but not internal-prefixed or reveal-capture", () => {
   const captureRe = MOVED_TOKENS.find((t) => t.what.startsWith("`capture`"))!.token;
   const blindRe = MOVED_TOKENS.find((t) => t.what.startsWith("`blind`"))!.token;
+  const compareRe = MOVED_TOKENS.find((t) => t.what.startsWith("`compare`"))!.token;
 
   // Bare top-level invocations MATCH (these are the drift we forbid).
   assert.ok(captureRe.test("secret-shuttle capture --name X"), "bare `capture` should match");
   assert.ok(blindRe.test("secret-shuttle blind end"), "bare `blind end` should match");
+  assert.ok(compareRe.test("secret-shuttle compare --ref ss://x"), "bare `compare` should match");
 
   // `internal`-prefixed forms do NOT match (`internal` breaks adjacency).
   assert.ok(!captureRe.test("secret-shuttle internal capture --name X"), "`internal capture` should NOT match");
   assert.ok(!blindRe.test("secret-shuttle internal blind end"), "`internal blind end` should NOT match");
+  assert.ok(!compareRe.test("secret-shuttle internal compare --ref ss://x"), "`internal compare` should NOT match");
 
   // `reveal-capture` does NOT match (the `reveal-` prefix breaks adjacency).
   assert.ok(!captureRe.test("secret-shuttle reveal-capture --name X"), "`reveal-capture` should NOT match");
