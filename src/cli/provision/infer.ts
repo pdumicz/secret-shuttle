@@ -18,10 +18,16 @@ import { isInferYmlExecutable, type InferredPlanEntry, type InferGateIssue } fro
 // Burst 6 §2: per-secret Supabase routing. The detector emits its own
 // additive SupabaseDetectorIssue ({ kind; message }); the wiring below maps
 // each into the existing InferGateIssue ({ secret; issue }) contract.
+// resolveSupabaseProject + sanitizeSupabaseOverride do all the cwd-invariant
+// work ONCE before the per-secret loop; detectSupabaseForSecret is then a
+// pure sync predicate over that pre-resolved state. fileExists is shared
+// here too (one definition, not a per-file duplicate).
 import {
   detectSupabaseForSecret,
+  fileExists,
+  resolveSupabaseProject,
+  sanitizeSupabaseOverride,
   type InferConfig,
-  type SupabaseDetectorIssue,
 } from "./infer-supabase.js";
 
 const execp = promisify(exec);
@@ -59,32 +65,59 @@ export async function runInfer(opts: InferOptions): Promise<InferResult> {
   const destinations = await detectDestinations(opts.cwd);
   const inferConfig = await loadInferConfig(opts.cwd);
 
+  // Burst 6 §2: resolve all cwd-invariant Supabase state ONCE, before the
+  // per-secret loop (mirroring detectDestinations' single filesystem probe).
+  // - resolveSupabaseProject: the supabase/config.toml stat + project.json read.
+  // - sanitizeSupabaseOverride: validates secret-shuttle.config.json's
+  //   infer.supabaseNames. Its issues are batch-wide (they describe the whole
+  //   override, not one secret), so they're surfaced ONCE here rather than
+  //   re-derived inside every per-secret call.
+  const supabaseProject = await resolveSupabaseProject(opts.cwd);
+  const supabaseOverride = sanitizeSupabaseOverride(inferConfig?.supabaseNames);
+
   const entries: InferredPlanEntry[] = [];
-  // Collect detector-native issues ({ kind; message }) first, then map to the
-  // gate's { secret; issue } shape after the loop. We track the originating
-  // secret per issue so the mapping can fill InferGateIssue.secret.
-  const supabaseRaw: Array<{ secret: string; issue: SupabaseDetectorIssue }> = [];
+  // Per-secret Supabase issues (only ever `supabase_not_linked`). On an
+  // unlinked project every matching secret emits the SAME message, which is
+  // noise — dedupe by `kind::message` via an O(1) Set lookup (not the old
+  // O(n²) .some() scan). Batch-wide override issues are added once below and
+  // bypass this dedupe.
+  const supabaseIssues: InferGateIssue[] = [];
+  const seenIssueKeys = new Set<string>();
+
+  // Batch-wide override-validation issues, surfaced once.
+  for (const issue of [
+    supabaseOverride.wholeOverrideDroppedIssue,
+    supabaseOverride.invalidEntriesIssue,
+  ]) {
+    if (issue === null) continue;
+    // No secret owns a whole-override issue; attribute it to the config file.
+    supabaseIssues.push({
+      secret: "secret-shuttle.config.json",
+      issue: `[${issue.kind}] ${issue.message}`,
+    });
+  }
 
   for (const name of names) {
     const source = inferSourceForName(name);
     // Burst 6 §2: per-secret Supabase routing. The project-wide detectors
     // above contribute their string[] uniformly; Supabase appends per-secret
-    // only when the name predicate matches.
-    const supa = await detectSupabaseForSecret({
-      cwd: opts.cwd,
+    // only when the name predicate matches. Pure sync call over pre-resolved
+    // state — no filesystem I/O per secret.
+    const supa = detectSupabaseForSecret({
       secretName: name,
-      inferConfig,
+      project: supabaseProject,
+      validOverrideNames: supabaseOverride.validNames,
     });
 
-    // Dedupe issues: the same override-validation issue would otherwise
-    // surface once per secret. Compare by `kind + message` (override issues
-    // are batch-wide, not secret-specific, so identical text recurs).
+    // Map the detector-native SupabaseDetectorIssue to the existing
+    // InferGateIssue { secret; issue } contract, folding `kind` into the
+    // human-readable string so no information is lost. Dedupe identical
+    // per-secret messages.
     for (const issue of supa.issues) {
-      const dedupeKey = `${issue.kind}::${issue.message}`;
-      const seen = supabaseRaw.some(
-        (r) => `${r.issue.kind}::${r.issue.message}` === dedupeKey,
-      );
-      if (!seen) supabaseRaw.push({ secret: name, issue });
+      const key = `${issue.kind}::${issue.message}`;
+      if (seenIssueKeys.has(key)) continue;
+      seenIssueKeys.add(key);
+      supabaseIssues.push({ secret: name, issue: `[${issue.kind}] ${issue.message}` });
     }
 
     entries.push({
@@ -97,15 +130,6 @@ export async function runInfer(opts: InferOptions): Promise<InferResult> {
       ],
     });
   }
-
-  // Map the detector-native SupabaseDetectorIssue[] to the existing
-  // InferGateIssue { secret; issue } contract. The detector's machine-readable
-  // `kind` is folded into the human-readable `issue` string so no information
-  // is lost while still conforming to the unchanged InferGateIssue shape.
-  const supabaseIssues: InferGateIssue[] = supabaseRaw.map((r) => ({
-    secret: r.secret,
-    issue: `[${r.issue.kind}] ${r.issue.message}`,
-  }));
 
   const gate = isInferYmlExecutable(entries);
   const yml = renderYml(entries);
@@ -185,15 +209,6 @@ async function detectDestinations(cwd: string): Promise<string[]> {
     out.push(repo ? `github-actions:${repo}` : "github-actions:OWNER/REPO");
   }
   return out;
-}
-
-async function fileExists(p: string): Promise<boolean> {
-  try {
-    const s = await stat(p);
-    return s.isFile();
-  } catch {
-    return false;
-  }
 }
 
 async function dirExists(p: string): Promise<boolean> {

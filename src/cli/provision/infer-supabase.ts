@@ -30,9 +30,9 @@ import { join } from "node:path";
  * `InferResult.issues`. `InferGateIssue` itself is left unchanged.
  */
 export interface SupabaseDetectorIssue {
-  /** Machine-readable discriminant: "supabase_not_linked" |
-   *  "supabase_inferconfig_invalid". */
-  kind: string;
+  /** Machine-readable discriminant. Closed union so typo'd kinds fail to
+   *  compile and construction sites get exhaustiveness checking. */
+  kind: "supabase_not_linked" | "supabase_inferconfig_invalid";
   /** Human-readable needs_edit message. */
   message: string;
 }
@@ -52,10 +52,25 @@ export interface InferConfig {
   supabaseNames?: unknown; // validated dynamically — see sanitizeSupabaseOverride
 }
 
+/** cwd-invariant Supabase project state, resolved ONCE per `runInfer`
+ *  (matching `detectDestinations`' single filesystem probe). Reused for
+ *  every secret so an N-secret `.env.example` does not trigger N×
+ *  stat/readFile/JSON.parse of the same two files. */
+export interface SupabaseProjectState {
+  /** `supabase/config.toml` exists. */
+  hasConfig: boolean;
+  /** `.supabase/project.json`'s `ref`, or null when the file is absent,
+   *  malformed, or missing a usable string `ref`. */
+  ref: string | null;
+}
+
 export interface SupabaseDetectorContext {
-  cwd: string;
   secretName: string;
-  inferConfig: InferConfig | null;
+  /** Pre-resolved once via {@link resolveSupabaseProject}. */
+  project: SupabaseProjectState;
+  /** Pre-sanitized once via {@link sanitizeSupabaseOverride}. Names here
+   *  route to Supabase even when they don't match the default predicate. */
+  validOverrideNames: ReadonlySet<string>;
 }
 
 export interface SupabaseDetectorResult {
@@ -64,12 +79,15 @@ export interface SupabaseDetectorResult {
    *  list. `<scope>` is the project_ref when one is known, else a sentinel
    *  the user must edit before running `provision`. */
   destinations: string[];
-  /** Zero or more needs_edit issues. The wiring maps these to the existing
-   *  `{ secret, issue }` InferGateIssue shape before surfacing in InferResult. */
+  /** Zero or more needs_edit issues. Post-refactor this only ever contains
+   *  the per-secret `supabase_not_linked` issue — the batch-wide override
+   *  validation issues are produced once by {@link sanitizeSupabaseOverride}
+   *  in the wiring, not per-secret here. */
   issues: SupabaseDetectorIssue[];
 }
 
-interface SanitizedOverride {
+export interface SanitizedOverride {
+  /** Names that passed grammar validation — pass as `validOverrideNames`. */
   validNames: Set<string>;
   /** Issue to surface if any invalid entries were dropped. Null when the
    *  override was either absent, fully valid, or itself non-array (the
@@ -85,8 +103,12 @@ interface SanitizedOverride {
  * issue naming any rejected entries. Per spec §2 "infer.supabaseNames
  * validation": individual bad entries drop but valid siblings still take
  * effect; only a non-array `supabaseNames` value drops the whole override.
+ *
+ * Batch-wide: called ONCE per `runInfer` (the override describes the whole
+ * `secret-shuttle.config.json`, not a single secret), so its issues are
+ * surfaced once rather than per-secret.
  */
-function sanitizeSupabaseOverride(raw: unknown): SanitizedOverride {
+export function sanitizeSupabaseOverride(raw: unknown): SanitizedOverride {
   const validNames = new Set<string>();
 
   if (raw === undefined || raw === null) {
@@ -141,7 +163,10 @@ function sanitizeSupabaseOverride(raw: unknown): SanitizedOverride {
   return { validNames, invalidEntriesIssue: null, wholeOverrideDroppedIssue: null };
 }
 
-async function fileExists(p: string): Promise<boolean> {
+/** Shared filesystem helper — does the path exist and is it a regular file?
+ *  Exported so `infer.ts` (which also probes framework signal files) uses
+ *  one definition rather than a byte-identical duplicate. */
+export async function fileExists(p: string): Promise<boolean> {
   try {
     const s = await stat(p);
     return s.isFile();
@@ -170,42 +195,53 @@ async function readProjectRef(cwd: string): Promise<string | null> {
   }
 }
 
-export async function detectSupabaseForSecret(
-  ctx: SupabaseDetectorContext,
-): Promise<SupabaseDetectorResult> {
-  // 1. Sanitize the override list (emit issues for any invalid entries).
-  const sanitized = sanitizeSupabaseOverride(ctx.inferConfig?.supabaseNames);
-  const overrideIssues: SupabaseDetectorIssue[] = [];
-  if (sanitized.wholeOverrideDroppedIssue !== null) {
-    overrideIssues.push(sanitized.wholeOverrideDroppedIssue);
-  }
-  if (sanitized.invalidEntriesIssue !== null) {
-    overrideIssues.push(sanitized.invalidEntriesIssue);
-  }
+/**
+ * Resolve the cwd-invariant Supabase project state ONCE per `runInfer`.
+ * Performs all the filesystem I/O the per-secret predicate used to repeat:
+ * the `supabase/config.toml` stat and the `.supabase/project.json` read.
+ * The result feeds every {@link detectSupabaseForSecret} call as
+ * {@link SupabaseDetectorContext.project}.
+ */
+export async function resolveSupabaseProject(cwd: string): Promise<SupabaseProjectState> {
+  const hasConfig = await fileExists(join(cwd, "supabase/config.toml"));
+  const ref = hasConfig ? await readProjectRef(cwd) : null;
+  return { hasConfig, ref };
+}
 
-  // 2. Apply the name predicate. If predicate fails, emit no destination
-  //    (but still surface override-validation issues so the user sees them).
+/**
+ * Pure per-secret predicate over PRE-RESOLVED Supabase state — no filesystem
+ * I/O, no override sanitization (both hoisted into the once-per-`runInfer`
+ * {@link resolveSupabaseProject} / {@link sanitizeSupabaseOverride} calls).
+ *
+ * Applies the name predicate (default `SUPABASE_*` regex OR a pre-validated
+ * override name), then decides the destination from the on-disk project
+ * state. The only issue it can emit is the per-secret `supabase_not_linked`
+ * needs_edit message; override-validation issues live in the sanitizer.
+ */
+export function detectSupabaseForSecret(
+  ctx: SupabaseDetectorContext,
+): SupabaseDetectorResult {
+  // 1. Apply the name predicate. If it fails, this secret isn't a Supabase
+  //    target — emit nothing.
   const predicateMatches =
     SUPABASE_NAME_PREDICATE_RE.test(ctx.secretName) ||
-    sanitized.validNames.has(ctx.secretName);
+    ctx.validOverrideNames.has(ctx.secretName);
   if (!predicateMatches) {
-    return { destinations: [], issues: overrideIssues };
+    return { destinations: [], issues: [] };
   }
 
-  // 3. Predicate matched. Check for Supabase project on disk.
-  const hasConfig = await fileExists(join(ctx.cwd, "supabase/config.toml"));
-  if (!hasConfig) {
-    // No Supabase project — name matched but no signal. Emit nothing.
-    return { destinations: [], issues: overrideIssues };
+  // 2. Predicate matched but there's no Supabase project on disk — name
+  //    matched yet no signal. Emit nothing.
+  if (!ctx.project.hasConfig) {
+    return { destinations: [], issues: [] };
   }
 
-  // 4. Resolve project_ref. When absent/malformed, emit needs_edit + sentinel.
-  const ref = await readProjectRef(ctx.cwd);
-  if (ref === null) {
+  // 3. Project present but not linked (no usable project_ref) — emit
+  //    needs_edit + sentinel destination the user must resolve.
+  if (ctx.project.ref === null) {
     return {
       destinations: ["supabase:TODO_run_supabase_link_first"],
       issues: [
-        ...overrideIssues,
         {
           kind: "supabase_not_linked",
           message:
@@ -216,8 +252,9 @@ export async function detectSupabaseForSecret(
     };
   }
 
+  // 4. Linked — stamp the resolved project_ref.
   return {
-    destinations: [`supabase:${ref}`],
-    issues: overrideIssues,
+    destinations: [`supabase:${ctx.project.ref}`],
+    issues: [],
   };
 }
