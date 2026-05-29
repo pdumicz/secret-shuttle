@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Added (Burst 6 — Vision Polish)
+
+- **`provision --infer` Supabase detector (§2):** per-secret name-predicate-gated detector. Default predicate is `^SUPABASE_[A-Z0-9_]+$`. Optional `infer.supabaseNames` override in `secret-shuttle.config.json` extends the predicate (per-entry grammar `^[A-Z_][A-Z0-9_]*$`; invalid entries drop individually with a `needs_edit` issue naming the offending value; whole `supabaseNames` non-array drops the whole override with one `needs_edit`). When the predicate matches and `supabase/config.toml` is present, the detector reads `.supabase/project.json`'s `ref` field for the cloud project_ref. Missing / malformed `project.json` → emits `supabase:TODO_run_supabase_link_first` + a `needs_edit` instructing the user to run `supabase link --project-ref <ref>` first. Project-state + override sanitization are resolved once per `provision --infer` (not per-secret).
+- **README positioning section (§3):** new "Why not Doppler / Infisical / 1Password CLI / Vercel envs?" section between the hero and Quickstart. 4-row comparison table answers "what's different about this?" in 30 seconds.
+- **Demo Scene 0 (§4):** new opening scene shows the `provision --infer → approve → audit` magic path. Existing scenes 1-9 preserved verbatim under a new "Advanced: low-level mechanics" framing (deep links to `?scene=N` keep working). Demo gains `?scene=N` query-param navigation, defaulting to Scene 0. README hero link updates to `?scene=0`.
+- **Burst-6 friction-log template (§5):** `docs/dogfood/burst6-template.md` pre-populated with setup recipe + release-blocker gate + UX target metrics + four-bucket note structure. The actual dogfood RUN is a post-burst human release gate that blocks `npm publish 0.3.1`, not Burst 6 merge.
+
+### Changed (Burst 6 — Vision Polish)
+
+- **Documentation drift fixes (§1):** top-level `SKILL.md` deleted (canonical skill lives only at `skills/secret-shuttle/SKILL.md`); `package.json` `files` whitelist updated accordingly. Three `agents/*.example.md` files (`AGENTS.md.example`, `codex-instructions.example.md`, `cursor-rules.example.md`) refreshed to use the Burst 5 verb surface (`provision`, `secrets *`, `audit`, `init`). `examples/stripe-to-vercel/walkthrough.md` now leads with the "Magic path" section; existing low-level content preserved under an "Advanced: low-level mechanics" header as escape-hatch documentation. README banner rewritten from "0.1.1 — early prototype" to honest "0.3.1 — beta" framing.
+- **Moved-verb doc rewrite (§1.8):** agent-facing escape-hatch docs no longer teach bare `secret-shuttle capture` / `blind` / `compare` (those verbs now live only under the hidden `internal` namespace). The docs were rewritten around the supported modern surface (`provision`, `inject-submit`, `reveal-capture`, `browser mark`); the one legitimate manual-recovery reference uses the correct `secret-shuttle internal blind end` form.
+- **`runInfer` return shape extension:** `result.issues` now includes Supabase-derived `needs_edit` messages (when applicable); `result.executable` reflects them. The existing `InferGateIssue` shape (`{ secret; issue }`) is unchanged — the Supabase detector's internal `{ kind; message }` issues are mapped into `{ secret, issue }` (the `kind` folded into the `issue` string as a `[kind]` prefix) before merging, so consumers reading `result.issues` see the extended list in the same shape they already parse.
+
+### Added — Burst 6 drift-guard tests
+
+`src/e2e/skill-md-toplevel-absent.test.ts` (prevents accidental re-introduction of the top-level SKILL.md); `src/e2e/docs-no-removed-verbs.test.ts` (prevents the agent-facing docs from regressing to reference removed `bootstrap` / `generate` verbs or the legacy `daemon start && unlock` ritual — REMOVED_TOKENS — AND from teaching bare `capture` / `blind` / `compare` that moved under `internal` — MOVED_TOKENS; scanned everywhere with no section exemption; the supported modern verbs and `internal`-prefixed / `reveal-capture` forms pass by construction via adjacency-based regexes).
+
+### Known limitations — Burst 6
+
+- The dogfood pass (per spec §5) is a post-burst human release gate; until it runs successfully, the `npm publish 0.3.1` step is blocked. Burst 6 itself merges as soon as the codex impl-stage gate is clean.
+- `--infer` detectors for Render / Netlify / Railway / Fly / Firebase still deferred — each requires building a corresponding template first. Tracked in spec §7.E.
+- Plan 5a (native keychain adapter), Plan 5s (per-project agent IDs), Plan 5q (Buffer refactor for plaintext-in-memory hygiene), and the CI/CD story are all forward-referenced in spec §7 but not implemented in this burst.
+
 ### Added (Burst 5 — Magic Polish)
 
 - **`provision` verb (§1, Items A + B):** unified entry point for "make these secrets exist in the vault and at the named destinations." Six modes via mutually exclusive flags: `--infer` (read `.env.example` + framework signals → generated yml), `--yml <file>`, `--secret NAME --from KIND --to DEST` (single-intent shortcut), `--continue --batch <id>`, `--list`, `--abandon`. `--infer` writes `secret-shuttle.yml` (or prints under `--dry-run`); when the generated yml needs an edit (no destinations detected, capture URL placeholder, etc.) `needs_edit: true` surfaces in the success payload. New `--environment` flag flows through to the daemon for non-prod ref creation; validated against the canonical `assertEnvironmentValid()` grammar in `src/shared/refs.ts` (shell-metacharacter-safe).
