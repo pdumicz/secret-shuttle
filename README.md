@@ -8,7 +8,7 @@ Let AI agents use secrets without seeing them.
 
 [![Secret Shuttle demo — reveal-capture scene](demo/preview.png)](https://pdumicz.github.io/secret-shuttle/demo/?scene=0)
 
-> **Status: beta.** The architecture has been through six bursts of adversarial security review with fixes shipped at each gate. Not yet independently audited; recommend test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployments.
+> **Status: 0.3.1 — beta.** The architecture has been through six bursts of adversarial security review with fixes shipped at each gate. Not yet independently audited; recommend test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployments.
 
 Secret Shuttle is a local bridge that lets coding agents — Claude Code, Codex, Cursor, browser-using agents — capture, generate, store, compare, and inject secrets through browser and CLI workflows. The agent sees only refs like `ss://stripe/prod/STRIPE_WEBHOOK_SECRET`, fingerprints, field metadata, and status — never the raw value.
 
@@ -103,7 +103,7 @@ secret-shuttle template run vercel-env-add \
 
 Templates run vetted binaries with `shell: false`, absolute paths only, and never echo stdout/stderr back to the agent.
 
-## What Works Today (0.1.1)
+## What Works Today (0.3.1)
 
 - TypeScript CLI distributed as `secret-shuttle`
 - Local daemon with bearer-authenticated HTTP API on 127.0.0.1
