@@ -4,13 +4,61 @@ Goal:
 
 > Capture a Stripe webhook signing secret and inject it into Vercel production env vars without exposing the raw `whsec_...` value to the agent.
 
+## Magic path
+
+The fastest way to ship a Stripe webhook secret to Vercel production:
+
+```bash
+secret-shuttle provision \
+  --secret STRIPE_WEBHOOK_SECRET \
+  --from capture --url https://dashboard.stripe.com/webhooks \
+  --to vercel:production
+```
+
+Secret Shuttle responds with `approval_required` — the local hub opens
+showing one approval card. Click **Approve** (optionally check "Also
+approve any matching shape for the next 15 min" if you'll be re-pushing
+soon). Then the agent runs the continue step:
+
+```bash
+secret-shuttle provision --continue \
+  --batch <batch_id_from_prior_step> \
+  --approval-id <approval_id_from_prior_step>
+```
+
+The CLI navigates to Stripe in a daemon-owned browser, asks you to
+reveal the webhook signing secret, captures the bytes into the vault
+without exposing them to the agent, and pushes them to Vercel via the
+`vercel-env-add` template. Final output:
+
+```json
+{
+  "ok": true,
+  "batch_status": "completed",
+  "completed": 1,
+  "refs": ["ss://stripe/prod/STRIPE_WEBHOOK_SECRET"]
+}
+```
+
+Then the agent runs `secret-shuttle audit --since 1m --json` and pastes
+the result to the user as proof.
+
+---
+
+## Advanced: low-level mechanics
+
+The rest of this walkthrough covers the underlying primitives —
+`browser start`, `blind start`, `capture`, `inject`, `template run`.
+You don't need them for the magic path above; they're the escape hatch
+when you need to debug a capture flow step-by-step.
+
 ## Prerequisites
 
 ```bash
 npm install
 npm run build
 npm link
-secret-shuttle daemon start && secret-shuttle unlock
+npx secret-shuttle init
 secret-shuttle browser start --profile prod-config
 ```
 
