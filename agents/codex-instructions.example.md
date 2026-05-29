@@ -5,7 +5,7 @@ When handling secrets, route the secret moment through Secret Shuttle.
 Setup before the first secret operation:
 
 ```bash
-secret-shuttle daemon start && secret-shuttle unlock
+npx secret-shuttle init
 ```
 
 Do:
@@ -27,8 +27,11 @@ Do not:
 Use:
 
 ```bash
-secret-shuttle generate --name INTERNAL_CRON_SECRET --env production --kind random_32_bytes --allow-domain vercel.com
-secret-shuttle capture --name STRIPE_WEBHOOK_SECRET --env production --source stripe --from focused-field --allow-domain dashboard.stripe.com --allow-domain vercel.com
+secret-shuttle provision --secret INTERNAL_CRON_SECRET \
+  --from random_32_bytes \
+  --environment production \
+  --to vercel:production
+secret-shuttle capture --name STRIPE_WEBHOOK_SECRET --env production --source stripe --from focused-field
 secret-shuttle inject --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET --to focused-field --domain vercel.com
 secret-shuttle compare --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET --with focused-field
 ```
