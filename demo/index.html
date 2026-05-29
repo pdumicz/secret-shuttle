@@ -1164,10 +1164,22 @@
 
       <div class="progress">
         <div class="progress-meta">
-          <span>Scene <b id="scene-num">01</b> / 09</span>
-          <span id="scene-name">The pain</span>
+          <span>Scene <b id="scene-num">00</b> / 09</span>
+          <span id="scene-name">Magic path</span>
         </div>
         <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      </div>
+
+      <!-- Scene 00 — the magic path (Burst 6 §4) -->
+      <div class="scene-meta" data-scene="0">
+        <span class="tag">magic path</span>
+        <h1 class="title">One verb. <em>One approval.</em> Done.</h1>
+        <p class="copy"><code>provision --infer</code> reads <code>.env.example</code> + your framework configs (Vercel, Supabase, GitHub Actions) and writes a plan. <code>provision</code> mints one batch approval. You click <b>Approve</b> once in the hub. <code>provision --continue</code> ships every secret to every destination — and <code>audit</code> hands you the receipt.</p>
+        <div class="watch"><b>Watch for →</b> The agent never sees a value. One human click covers the whole batch. The session checkbox lets the next matching push skip the popup for 15 minutes.</div>
+        <div class="gap">
+          <div class="gap-label">The 30-second loop</div>
+          <div class="gap-body">This is the day-to-day path. The nine scenes that follow are the <i>advanced low-level mechanics</i> — browser marks, blind-mode reveal-capture, inject-submit — the escape hatch for non-templated providers. Most provisioning never leaves this scene.</div>
+        </div>
       </div>
 
       <!-- Scene 01 -->
@@ -1291,8 +1303,48 @@
     <!-- ────────────────────────── STAGE ─────────────────────────────── -->
     <section class="stage">
 
+      <!-- Scene 0: the magic path — provision --infer → one approval → continue → audit -->
+      <div class="scene-stage active" data-scene="0" data-layout="center">
+        <div class="scene-caption">scene 00 — claude code · ~/projects/myapp</div>
+        <div class="win term" style="width:720px">
+          <div class="win-bar">
+            <div class="tl"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+            <div class="win-title">~/projects/myapp — claude</div>
+          </div>
+          <div class="term-body">
+            <div class="group">
+              <div class="line user-msg"><span class="marker">&gt;</span><span>set up all my prod secrets — stripe webhook, supabase service-role key, an internal cron secret</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">provision</span><span class="args">--infer</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  Wrote secret-shuttle.yml — 3 secrets · vercel:production, supabase:&lt;ref&gt;</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">provision</span><span class="args"></span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  approval_required · batch b_8f3a… · 1 approval · </span><span class="em">opening hub →</span></div>
+            </div>
+            <div class="group">
+              <div class="line assistant"><span><span class="warn">Approve in the window your browser just opened.</span> One card covers the whole batch:</span></div>
+              <div class="line assistant" style="margin-top:6px"><span>  ☑ Also approve any matching shape for the next <span class="em">15 min</span></span></div>
+              <div class="line assistant" style="margin-top:4px"><span class="dim">  (you click Approve — the agent never sees a value)</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">provision</span><span class="args">--continue --batch b_8f3a… --approval-id ag_2c1…</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  ✓ batch_status: completed · 3 pushed → vercel:production, supabase:&lt;ref&gt;</span></div>
+            </div>
+            <div class="group">
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">audit</span><span class="args">--since 1m --json</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  { batches: [ b_8f3a… → 3 steps ok ] }  — proof, by </span><span class="em">ss://</span><span class="dim"> ref + fingerprint</span></div>
+            </div>
+            <div class="group">
+              <div class="line assistant"><span>Done. Three secrets live in prod. Nobody pasted anything; I never saw a value.<span class="cursor"></span></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Scene 1: terminal solo — the pain -->
-      <div class="scene-stage active" data-scene="1" data-layout="center">
+      <div class="scene-stage" data-scene="1" data-layout="center">
         <div class="scene-caption">scene 01 — claude code · ~/projects/myapp</div>
         <div class="win term" style="width:680px">
           <div class="win-bar">
@@ -1792,8 +1844,14 @@
 
   <script>
     (function () {
+      // TOTAL is the highest scene NUMBER (scenes run 0..TOTAL). Scene 0 is the
+      // Burst 6 magic-path opener; scenes 1-9 are the advanced low-level walk.
+      // Numbers 1-9 are preserved verbatim so external ?scene=N deep links keep
+      // working — Scene 0 was prepended, NOT a renumber.
       const TOTAL = 9;
+      // Indexed by scene number directly (NAMES[scene]), so NAMES[0] is Scene 0.
       const NAMES = [
+        "Magic path",
         "The pain",
         "Discovery",
         "Install + unlock",
@@ -1805,7 +1863,17 @@
         "Doctor + done",
       ];
 
-      let scene = 1;
+      // Default to the magic path (Scene 0). ?scene=N (0..TOTAL) deep-links a
+      // specific scene; out-of-range or non-integer falls back to Scene 0.
+      function getInitialScene() {
+        const raw = new URLSearchParams(window.location.search).get("scene");
+        if (raw === null) return 0;
+        const n = Number.parseInt(raw, 10);
+        if (!Number.isInteger(n) || n < 0 || n > TOTAL) return 0;
+        return n;
+      }
+
+      let scene = getInitialScene();
 
       const $sceneNum  = document.getElementById("scene-num");
       const $sceneName = document.getElementById("scene-name");
@@ -1817,19 +1885,19 @@
 
       function render() {
         $sceneNum.textContent  = String(scene).padStart(2, "0");
-        $sceneName.textContent = NAMES[scene - 1];
+        $sceneName.textContent = NAMES[scene];
         $fill.style.width = (scene / TOTAL * 100) + "%";
 
         $metas.forEach(el => el.classList.toggle("active", Number(el.dataset.scene) === scene));
         $stages.forEach(el => el.classList.toggle("active", Number(el.dataset.scene) === scene));
 
-        $back.disabled = scene === 1;
+        $back.disabled = scene === 0;
         $next.disabled = scene === TOTAL;
         $next.textContent = scene === TOTAL ? "End" : "Next →";
       }
 
       function go(delta) {
-        const target = Math.min(Math.max(scene + delta, 1), TOTAL);
+        const target = Math.min(Math.max(scene + delta, 0), TOTAL);
         if (target === scene) return;
         scene = target;
         render();
@@ -1845,9 +1913,9 @@
         if (e.metaKey || e.ctrlKey || e.altKey) return;
         if (e.key === "ArrowRight" || e.key === " " || e.key === "PageDown") { e.preventDefault(); go(+1); }
         else if (e.key === "ArrowLeft" || e.key === "PageUp")                { e.preventDefault(); go(-1); }
-        else if (e.key === "Home")                                            { e.preventDefault(); scene = 1; render(); }
+        else if (e.key === "Home")                                            { e.preventDefault(); scene = 0; render(); }
         else if (e.key === "End")                                             { e.preventDefault(); scene = TOTAL; render(); }
-        else if (/^[1-9]$/.test(e.key))                                       { e.preventDefault(); scene = Number(e.key); render(); }
+        else if (/^[0-9]$/.test(e.key))                                       { e.preventDefault(); scene = Number(e.key); render(); }
       }
       document.addEventListener("keydown", handleKey);
       window.addEventListener("keydown", handleKey);
