@@ -8,11 +8,27 @@ Let AI agents use secrets without seeing them.
 
 [![Secret Shuttle demo — reveal-capture scene](demo/preview.png)](https://pdumicz.github.io/secret-shuttle/demo/)
 
-> **Status: 0.1.1 — early prototype. Do not trust this with real production secrets yet.**
->
-> Secure Mode V2 (daemon-owned vault, CDP proxy, approval UI) has landed on `main`. It has been through several rounds of adversarial security review with fixes, but it has **not** been independently audited or released as a versioned package. Treat it as an early prototype: use only with test accounts and throwaway secrets.
+> **Status: beta.** The architecture has been through six bursts of adversarial security review with fixes shipped at each gate. Not yet independently audited; recommend test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployments.
 
 Secret Shuttle is a local bridge that lets coding agents — Claude Code, Codex, Cursor, browser-using agents — capture, generate, store, compare, and inject secrets through browser and CLI workflows. The agent sees only refs like `ss://stripe/prod/STRIPE_WEBHOOK_SECRET`, fingerprints, field metadata, and status — never the raw value.
+
+## Why not Doppler / Infisical / 1Password CLI / Vercel envs?
+
+Those tools sync secrets across environments — they assume a human or a CI runner is
+the consumer. Secret Shuttle assumes an AI coding agent is the consumer, and treats
+every plaintext touch as a leak vector.
+
+| Tool                  | Where secrets live    | Who sees plaintext                                | Agent-aware?           |
+|---                    |---                    |---                                                |---                     |
+| Doppler / Infisical   | Cloud vault           | Anyone with read access (incl. agents querying it)| No — sync model        |
+| 1Password CLI         | OS keychain           | Caller process; `op read` writes to stdout        | No                     |
+| Vercel envs (et al.)  | Vendor backend        | Engineers via dashboard; build runners via env    | No                     |
+| **Secret Shuttle**    | Local daemon vault    | Only the daemon's child processes (templates)     | **Yes** — agent sees only refs |
+
+If your secrets already live in a sync tool and an agent never touches them, you don't
+need Secret Shuttle. If you have an agent writing code that needs to ship secrets to
+Vercel/GitHub/etc, and you want the agent to do that without the bytes entering its
+context — that's the gap this closes.
 
 ## 30-Second Install
 
