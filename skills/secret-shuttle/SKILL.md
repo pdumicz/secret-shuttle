@@ -144,9 +144,9 @@ You are an agent. The sections above are the day-to-day operating surface. The s
      snippet
    - on `next: "manual_recovery_required"`: **do not** attempt to resume
      observation yourself. Surface this to the human (the human-approved
-     `secret-shuttle blind end` is the only recovery). Auto-resume bypassed
-     because the daemon could not prove the secret is gone; the human owns
-     the recovery decision.
+     `secret-shuttle internal blind end` is the only recovery). Auto-resume
+     bypassed because the daemon could not prove the secret is gone; the human
+     owns the recovery decision.
    - on success: the daemon has already auto-resumed observation. You may
      continue normally — but still never report the raw value (you never had
      access to it).

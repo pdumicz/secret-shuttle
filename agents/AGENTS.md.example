@@ -18,32 +18,49 @@ Rules:
 - Use normal browser tooling only for navigation.
 - When a secret is visible or about to be entered, stop observing the page.
 - While blind mode is active, do not use screenshots, DOM inspection, accessibility-tree reads, console reads, network-body reads, or clipboard reads.
-- Use `secret-shuttle capture` for visible generated secrets.
+- Prefer `secret-shuttle provision` (the magic path) — it provisions a whole project's secrets, or a single `--secret`, in one approval and drives any needed capture/inject internally.
 - Use `secret-shuttle provision --secret <NAME> --from random_32_bytes` for new local secrets.
-- Use `secret-shuttle inject` for focused-field secret entry.
-- Use `secret-shuttle compare` for verification without reading values.
-- Verify production setup using non-secret UI signals only.
+- For a secret revealed on a page, mark the controls with `secret-shuttle browser mark focused --as <label>` / `browser mark pick --as <label>`, then run `secret-shuttle reveal-capture` (it manages blind mode, captures the value, and hides it — you never see it).
+- To write a secret into a focused field and submit, mark the field and submit control, then run `secret-shuttle inject-submit` (it injects, clicks submit, verifies a success marker, and auto-resumes only if the secret is proven gone).
+- Verify production setup using non-secret UI signals only (success text, audit summaries via `secret-shuttle audit`, ref fingerprints via `secret-shuttle secrets get-ref`).
 - Approve production actions in the Secret Shuttle window your browser opens — there is no CLI flag that bypasses approval.
 
-Common flow:
+Common flow (the magic path — one approval, capture + inject handled for you):
 
 ```bash
-secret-shuttle blind start \
-  --domain dashboard.stripe.com \
-  --reason "capture Stripe webhook signing secret"
+secret-shuttle provision \
+  --secret STRIPE_WEBHOOK_SECRET \
+  --from capture --url https://dashboard.stripe.com/webhooks \
+  --to vercel:production
+```
 
-secret-shuttle capture \
+Lower-level transactions, when you need to drive capture/inject yourself.
+First start the daemon-controlled browser and mark the relevant controls:
+
+```bash
+secret-shuttle browser start
+
+# Reveal a secret on a page: mark the reveal control + the revealed field,
+# then capture (blind mode is managed inside reveal-capture — no manual blind start):
+secret-shuttle browser mark pick --as reveal-btn
+secret-shuttle browser mark focused --as revealed-field
+secret-shuttle reveal-capture \
   --name STRIPE_WEBHOOK_SECRET \
   --env production \
   --source stripe \
-  --from focused-field \
-  --allow-domain dashboard.stripe.com \
-  --allow-domain vercel.com
+  --reveal-handle reveal-btn \
+  --field-handle revealed-field \
+  --allow-domain dashboard.stripe.com
 
-secret-shuttle inject \
+# Write a secret into a field and submit: mark the field + submit control,
+# then inject-submit (verifies a success marker, auto-resumes only if proven gone):
+secret-shuttle browser mark focused --as api-key-field
+secret-shuttle browser mark pick --as save-button
+secret-shuttle inject-submit \
   --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET \
-  --to focused-field \
-  --domain vercel.com
+  --field-handle api-key-field \
+  --submit-handle save-button \
+  --success-text "Saved"
 ```
 
 To hand a secret to an external binary, use a template instead of arbitrary commands:

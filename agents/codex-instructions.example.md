@@ -27,13 +27,25 @@ Do not:
 Use:
 
 ```bash
+# Provision a new local secret straight into a destination (one approval):
 secret-shuttle provision --secret INTERNAL_CRON_SECRET \
   --from random_32_bytes \
   --environment production \
   --to vercel:production
-secret-shuttle capture --name STRIPE_WEBHOOK_SECRET --env production --source stripe --from focused-field
-secret-shuttle inject --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET --to focused-field --domain vercel.com
-secret-shuttle compare --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET --with focused-field
+
+# Capture a secret revealed on a page — mark the controls, then reveal-capture
+# (blind mode is daemon-managed inside the transaction; you never see the value):
+secret-shuttle browser mark pick --as reveal-btn
+secret-shuttle browser mark focused --as revealed-field
+secret-shuttle reveal-capture --name STRIPE_WEBHOOK_SECRET --env production \
+  --source stripe --reveal-handle reveal-btn --field-handle revealed-field \
+  --allow-domain dashboard.stripe.com
+
+# Write a secret into a focused field and submit, verifying a success marker:
+secret-shuttle browser mark focused --as value-field
+secret-shuttle browser mark pick --as save-button
+secret-shuttle inject-submit --ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET \
+  --field-handle value-field --submit-handle save-button --success-text "Saved"
 ```
 
 To hand a secret to an external binary, use a template:
