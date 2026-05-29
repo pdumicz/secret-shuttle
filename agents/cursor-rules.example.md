@@ -4,8 +4,8 @@ When working with production credentials, webhook signing secrets, API keys, or 
 
 - never put raw values in chat, files, logs, or screenshots
 - use Secret Shuttle refs instead of raw values
-- run `secret-shuttle daemon start && secret-shuttle unlock` before the first secret operation
-- use `secret-shuttle generate` for new secrets
+- run `npx secret-shuttle init` once per project before the first secret operation
+- use `secret-shuttle provision --secret <NAME> --from random_32_bytes` for new secrets
 - use `secret-shuttle capture` after stopping page observation
 - use `secret-shuttle inject` into a focused field
 - use `secret-shuttle compare` to verify without revealing the value
