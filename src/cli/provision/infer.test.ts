@@ -168,3 +168,56 @@ test("env.example with duplicate names dedupes first-wins (does not emit a yml t
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("runInfer: mixed Vercel + Supabase project routes Supabase to matching names, Vercel to all", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ss-infer-mixed-"));
+  try {
+    // Mixed signals: vercel.json (project-wide Vercel) + a linked Supabase project.
+    await writeFile(join(dir, "vercel.json"), "{}\n");
+    await mkdir(join(dir, "supabase"));
+    await writeFile(join(dir, "supabase/config.toml"), 'project_id = "local-dev"\n');
+    await mkdir(join(dir, ".supabase"));
+    await writeFile(
+      join(dir, ".supabase/project.json"),
+      JSON.stringify({ ref: "abcdefghijklmnopqrst" }),
+    );
+    // .env.example mixes a Supabase-predicate name with a non-matching one,
+    // plus a config-override name to prove the escape hatch end-to-end.
+    // NOTE: the override name must still infer a *known* source, or the gate
+    // marks the plan non-executable (`unknown` source → needs_edit issue).
+    // `DATABASE_SERVICE_SECRET` ends in `_SECRET` with no provider prefix, so
+    // the generic random rule (`infer-rules.ts`) gives it `random_32_bytes` —
+    // a known source — keeping `issues === []` / `executable === true` true.
+    await writeFile(
+      join(dir, ".env.example"),
+      "SUPABASE_SERVICE_ROLE_KEY=\nSTRIPE_WEBHOOK_SECRET=\nDATABASE_SERVICE_SECRET=\n",
+    );
+    await writeFile(
+      join(dir, "secret-shuttle.config.json"),
+      JSON.stringify({ infer: { supabaseNames: ["DATABASE_SERVICE_SECRET"] } }),
+    );
+
+    const result = await runInfer({ cwd: dir });
+
+    const bySecret = new Map(result.plan.map((e) => [e.secret, e.destinations]));
+    // Supabase name → both Vercel (project-wide) AND Supabase (per-secret, ref-stamped).
+    assert.deepEqual(bySecret.get("SUPABASE_SERVICE_ROLE_KEY"), [
+      "vercel:production",
+      "supabase:abcdefghijklmnopqrst",
+    ]);
+    // Non-matching name → Vercel only (predicate gates Supabase out).
+    assert.deepEqual(bySecret.get("STRIPE_WEBHOOK_SECRET"), ["vercel:production"]);
+    // Override name → Vercel + Supabase (escape hatch works through the wiring).
+    assert.deepEqual(bySecret.get("DATABASE_SERVICE_SECRET"), [
+      "vercel:production",
+      "supabase:abcdefghijklmnopqrst",
+    ]);
+    // No needs_edit issues (project is linked, override is valid).
+    assert.deepEqual(result.issues, []);
+    assert.equal(result.executable, true);
+    // The rendered yml carries the Supabase destination too.
+    assert.match(result.yml, /supabase:abcdefghijklmnopqrst/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

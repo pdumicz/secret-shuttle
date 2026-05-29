@@ -15,6 +15,14 @@ import { promisify } from "node:util";
 import { ShuttleError } from "../../shared/errors.js";
 import { inferSourceForName, type InferredSource } from "./infer-rules.js";
 import { isInferYmlExecutable, type InferredPlanEntry, type InferGateIssue } from "./infer-gate.js";
+// Burst 6 §2: per-secret Supabase routing. The detector emits its own
+// additive SupabaseDetectorIssue ({ kind; message }); the wiring below maps
+// each into the existing InferGateIssue ({ secret; issue }) contract.
+import {
+  detectSupabaseForSecret,
+  type InferConfig,
+  type SupabaseDetectorIssue,
+} from "./infer-supabase.js";
 
 const execp = promisify(exec);
 
@@ -49,24 +57,65 @@ export async function runInfer(opts: InferOptions): Promise<InferResult> {
     );
   }
   const destinations = await detectDestinations(opts.cwd);
+  const inferConfig = await loadInferConfig(opts.cwd);
 
-  const entries: InferredPlanEntry[] = names.map((name) => {
+  const entries: InferredPlanEntry[] = [];
+  // Collect detector-native issues ({ kind; message }) first, then map to the
+  // gate's { secret; issue } shape after the loop. We track the originating
+  // secret per issue so the mapping can fill InferGateIssue.secret.
+  const supabaseRaw: Array<{ secret: string; issue: SupabaseDetectorIssue }> = [];
+
+  for (const name of names) {
     const source = inferSourceForName(name);
-    return {
+    // Burst 6 §2: per-secret Supabase routing. The project-wide detectors
+    // above contribute their string[] uniformly; Supabase appends per-secret
+    // only when the name predicate matches.
+    const supa = await detectSupabaseForSecret({
+      cwd: opts.cwd,
+      secretName: name,
+      inferConfig,
+    });
+
+    // Dedupe issues: the same override-validation issue would otherwise
+    // surface once per secret. Compare by `kind + message` (override issues
+    // are batch-wide, not secret-specific, so identical text recurs).
+    for (const issue of supa.issues) {
+      const dedupeKey = `${issue.kind}::${issue.message}`;
+      const seen = supabaseRaw.some(
+        (r) => `${r.issue.kind}::${r.issue.message}` === dedupeKey,
+      );
+      if (!seen) supabaseRaw.push({ secret: name, issue });
+    }
+
+    entries.push({
       secret: name,
       ref: refFor(name, source),
       source: source as InferredPlanEntry["source"], // existing source pushes placeholder
-      destinations: destinations.length > 0 ? [...destinations] : [],
-    };
-  });
+      destinations: [
+        ...(destinations.length > 0 ? destinations : []),
+        ...supa.destinations,
+      ],
+    });
+  }
+
+  // Map the detector-native SupabaseDetectorIssue[] to the existing
+  // InferGateIssue { secret; issue } contract. The detector's machine-readable
+  // `kind` is folded into the human-readable `issue` string so no information
+  // is lost while still conforming to the unchanged InferGateIssue shape.
+  const supabaseIssues: InferGateIssue[] = supabaseRaw.map((r) => ({
+    secret: r.secret,
+    issue: `[${r.issue.kind}] ${r.issue.message}`,
+  }));
 
   const gate = isInferYmlExecutable(entries);
   const yml = renderYml(entries);
 
   return {
     yml,
-    executable: gate.ok,
-    issues: gate.issues,
+    // If supabase-derived needs_edit issues exist, the yml isn't fully
+    // executable until the user resolves them (e.g., runs `supabase link`).
+    executable: gate.ok && supabaseIssues.length === 0,
+    issues: [...gate.issues, ...supabaseIssues],
     plan: entries,
   };
 }
@@ -100,6 +149,27 @@ function parseEnvExampleNames(content: string): string[] {
     names.push(name);
   }
   return names;
+}
+
+// Burst 6 §2: optional opt-in override for Supabase routing.
+async function loadInferConfig(cwd: string): Promise<InferConfig | null> {
+  try {
+    const raw = await readFile(join(cwd, "secret-shuttle.config.json"), "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const root = parsed as Record<string, unknown>;
+    const infer = root["infer"];
+    if (infer === undefined || infer === null || typeof infer !== "object" || Array.isArray(infer)) {
+      return null;
+    }
+    // Pass through whatever shape is at `infer` — detectSupabaseForSecret
+    // sanitizes inside (and emits needs_edit issues for invalid entries).
+    return infer as InferConfig;
+  } catch {
+    return null;
+  }
 }
 
 async function detectDestinations(cwd: string): Promise<string[]> {
