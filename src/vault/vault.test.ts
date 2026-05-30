@@ -99,7 +99,7 @@ test("legacy sha256 fingerprint is transparently migrated to hmac-sha256 on firs
 
     // The re-keyed fingerprint must validate against the vault's per-vault key.
     const fpKey = await vault.fingerprintKey();
-    assert.equal(fingerprintMatches(secretValue, metadata.fingerprint, fpKey), true);
+    assert.equal(fingerprintMatches(Buffer.from(secretValue, "utf8"), metadata.fingerprint, fpKey), true);
 
     // Idempotence: a second read must NOT rewrite the vault file.
     const statAfterFirstRead = await stat(paths.vaultPath);

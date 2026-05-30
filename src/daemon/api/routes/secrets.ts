@@ -512,7 +512,7 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       });
 
       const fpKey = await services.vault.fingerprintKey();
-      const matches = fingerprintMatches(capture.value, secret.fingerprint, fpKey);
+      const matches = fingerprintMatches(Buffer.from(capture.value, "utf8"), secret.fingerprint, fpKey);
       await writeDaemonAudit({ action: "compare", ok: true, ref: secret.ref, environment: secret.environment, domain: capture.domain });
       return {
         matches,

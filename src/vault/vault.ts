@@ -80,7 +80,7 @@ export class Vault {
       created_at: existing?.created_at ?? now,
       updated_at: now,
       last_used_at: existing?.last_used_at ?? null,
-      fingerprint: fingerprintSecret(input.value, Buffer.from(plaintext.fingerprint_key as string, "base64")),
+      fingerprint: fingerprintSecret(Buffer.from(input.value, "utf8"), Buffer.from(plaintext.fingerprint_key as string, "base64")),
       allowed_domains: normalizeDomains(input.allowedDomains),
       // Explicit caller-supplied actions win. Otherwise: a brand-new record gets
       // the extended default set; an OVERWRITE preserves the prior record's
@@ -246,7 +246,7 @@ export class Vault {
     const fpKey = Buffer.from(pt.fingerprint_key, "base64");
     for (const s of pt.secrets) {
       if (isLegacyFingerprint(s.fingerprint)) {
-        s.fingerprint = fingerprintSecret(s.value, fpKey);
+        s.fingerprint = fingerprintSecret(Buffer.from(s.value, "utf8"), fpKey);
         dirty = true;
       }
     }
