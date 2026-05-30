@@ -6,11 +6,19 @@ import { assertSafeExecutable } from "../safe-executable.js";
 import type { TemplateDefinition } from "./registry.js";
 import { assertNoPaddedParams } from "./registry.js";
 import { writeSecretEnvFile, unlinkSecretEnvFile } from "./tmp-env-file.js";
+import type { SecretValue } from "../../vault/secret-value.js";
 
 export interface TemplateRunInput {
   template: TemplateDefinition;
   params: Record<string, string>;
-  secret: string;
+  /**
+   * Burst 7 §2 (5q): the resolved secret as a disposable SecretValue. The route
+   * OWNS and disposes it (its finally). runTemplate makes its OWN
+   * `Buffer.from(input.secret.bytes())` copy for the stdin / env-file write so
+   * its existing zero-after-write (.fill(0)) scrub never clobbers the route's
+   * SecretValue bytes.
+   */
+  secret: SecretValue;
   /** When provided, the binary's SHA-256 is re-verified before exec (TOCTOU defense). */
   expectedSha256?: string;
   /**
@@ -97,17 +105,16 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
       child.on("error", (err) => reject(new ShuttleError("template_spawn_failed", err.message)));
       child.on("close", (code) => resolve({ template_id: input.template.id, exit_code: code ?? 1 }));
 
-      // Hold the bytes-to-write in a local Buffer so they're zeroable. (input.secret
-      // is a string today — the immutable plaintext copy lingers until GC; the
-      // Buffer-throughout refactor is Phase 5q. Until then, zeroing the Buffer that
-      // child.stdin actually flushes is the best we can do here.)
+      // Burst 7 §2 (5q): make our OWN zeroable copy of the resolved bytes. The
+      // route owns input.secret (a SecretValue) and disposes it in its finally;
+      // we must NOT scrub the route's bytes, so copy them here.
       //
       // The PRIMARY scrub is the .end(buf, cb) callback: Node may retain the same
       // Buffer reference until the write completes, so zeroing BEFORE the callback
       // could clobber not-yet-flushed bytes. error/close fallbacks handle abnormal
       // termination (child crashes pre-write, stdin pipe errors). The scrub helper
       // is idempotent so triple-fire (error + close + cb) is safe.
-      const secretBuf = Buffer.from(input.secret, "utf8");
+      const secretBuf = Buffer.from(input.secret.bytes());
       let scrubbed = false;
       const scrub = (): void => {
         if (scrubbed) return;
@@ -151,7 +158,10 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
 
   const { path: envFilePath } = writeSecretEnvFile({
     name: envVarName,
-    value: input.secret,
+    // Burst 7 §2 (5q): own copy of the resolved bytes for the env-file write;
+    // writeSecretEnvFile zeroes the buffer it builds, so the route's
+    // SecretValue is untouched.
+    value: Buffer.from(input.secret.bytes()),
     tmpDir: input.tmpDir,
   });
 

@@ -6,8 +6,12 @@ import { ShuttleError } from "../../shared/errors.js";
 export interface WriteSecretEnvFileInput {
   /** Env-var name (e.g. "STRIPE_SECRET_KEY"). Must not contain '=' or newline. */
   name: string;
-  /** The secret value. Held in a local Buffer that is zeroed after write. */
-  value: string;
+  /**
+   * The secret value as raw bytes (Burst 7 §2 / 5q — Buffer-native sink so the
+   * value never becomes a JS string here). Held in a local Buffer that is
+   * zeroed after write. The caller owns the passed-in Buffer.
+   */
+  value: Buffer;
   /** Daemon-owned tmp dir (mode 0700) — see services.tmpDir. */
   tmpDir: string;
 }
@@ -45,8 +49,15 @@ export function writeSecretEnvFile(input: WriteSecretEnvFileInput): WriteSecretE
  * Test-internal variant that writes to a fixed path. Production code calls
  * writeSecretEnvFile, which generates a random path.
  */
-export function writeSecretEnvFileAt(input: { name: string; value: string; path: string }): WriteSecretEnvFileResult {
-  const buf = Buffer.from(`${input.name}=${input.value}\n`, "utf8");
+export function writeSecretEnvFileAt(input: { name: string; value: Buffer; path: string }): WriteSecretEnvFileResult {
+  // Build the "NAME=VALUE\n" line as BYTES so the secret value never becomes a
+  // JS string (Burst 7 §2 / 5q). The NAME is non-secret. `buf` is zeroed after
+  // the write; the caller-owned input.value is left intact.
+  const buf = Buffer.concat([
+    Buffer.from(`${input.name}=`, "utf8"),
+    input.value,
+    Buffer.from("\n", "utf8"),
+  ]);
   let fd: number;
   try {
     fd = openSync(

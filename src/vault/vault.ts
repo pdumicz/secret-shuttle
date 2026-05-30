@@ -5,9 +5,11 @@ import { buildSecretRef, canonicalEnvironment } from "../shared/refs.js";
 import { generateSecretValue } from "../daemon/helpers/generate-value.js";
 import { decryptVault, encryptVault } from "./crypto.js";
 import { fingerprintSecret, isLegacyFingerprint } from "./fingerprints.js";
+import { SecretValue } from "./secret-value.js";
 import type {
   AgentSecretMetadata,
   EncryptedVaultFile,
+  ResolvedSecret,
   SecretAction,
   SecretRecord,
   UpsertSecretInput,
@@ -138,6 +140,29 @@ export class Vault {
     return secret;
   }
 
+  /** Wrap a stored record into a ResolvedSecret: strip the stored string and
+   *  attach a disposable SecretValue created from it. Used by the plaintext-
+   *  resolving accessors only. The caller OWNS and must dispose() resolved.value. */
+  private toResolvedSecret(record: SecretRecord): ResolvedSecret {
+    const { value, ...meta } = record;
+    return { ...meta, value: SecretValue.fromUtf8(value) };
+  }
+
+  /**
+   * Resolve a single ref to a ResolvedSecret (metadata + a disposable
+   * SecretValue). Throws secret_not_found for missing or soft-deleted refs.
+   * The caller OWNS the returned SecretValue and MUST dispose() it after the
+   * sink resolves (Burst 7 §2 two-phase late-resolve discipline).
+   */
+  async resolveSecret(ref: string): Promise<ResolvedSecret> {
+    const plaintext = await this.read();
+    const secret = plaintext.secrets.find((candidate) => candidate.ref === ref);
+    if (secret === undefined || secret.deleted_at !== undefined) {
+      throw new ShuttleError("secret_not_found", `Secret ${ref} was not found.`);
+    }
+    return this.toResolvedSecret(secret);
+  }
+
   async softDelete(ref: string): Promise<{ ref: string; deleted_at: string }> {
     const plaintext = await this.read();
     const idx = plaintext.secrets.findIndex((s) => s.ref === ref);
@@ -254,18 +279,17 @@ export class Vault {
   }
 
   /**
-   * Resolve a list of ss:// refs to a Map<ref, SecretRecord>. Uses the
-   * deleted-aware getSecret() so refs that have been soft-deleted throw
-   * secret_not_found. Single-pass — fails fast on the first missing ref.
-   * Dedupes input. Callers should do assertSecretActionAllowed + markUsed
-   * on each returned record.
+   * Resolve a list of ss:// refs to a Map<ref, ResolvedSecret>. Uses the
+   * deleted-aware lookup so soft-deleted refs throw secret_not_found.
+   * Single-pass — fails fast on the first missing ref. Dedupes input. The
+   * caller OWNS every returned SecretValue and MUST dispose() each.
    */
-  async resolveRefs(refs: readonly string[]): Promise<Map<string, SecretRecord>> {
-    const result = new Map<string, SecretRecord>();
+  async resolveRefs(refs: readonly string[]): Promise<Map<string, ResolvedSecret>> {
+    const result = new Map<string, ResolvedSecret>();
     for (const ref of refs) {
       if (result.has(ref)) continue; // dedupe
       const record = await this.getSecret(ref);
-      result.set(ref, record);
+      result.set(ref, this.toResolvedSecret(record));
     }
     return result;
   }

@@ -100,7 +100,10 @@ export function registerSecretsImportRoute(
         const candidateRef = buildSecretRef(source, environment, entry.key);
         let existingRef: string | undefined;
         try {
-          const existing = await services.vault.getSecret(candidateRef);
+          // Burst 7 §2 (5q): existence check reads only .ref (metadata) — route
+          // to the no-value inspect(). It throws secret_not_found for missing /
+          // soft-deleted refs, same as before.
+          const existing = await services.vault.inspect(candidateRef);
           existingRef = existing.ref;
         } catch {
           // Does not exist — proceed with upsert

@@ -9,6 +9,8 @@ import { getShuttlePaths, writeJsonFileAtomic } from "../shared/config.js";
 import { encryptVault } from "./crypto.js";
 import { fingerprintMatches } from "./fingerprints.js";
 import { Vault } from "./vault.js";
+import { SecretValue } from "./secret-value.js";
+import { assertSecretActionAllowed } from "../policy/policy.js";
 
 test("vault stores encrypted secrets and returns metadata only", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "secret-shuttle-test-"));
@@ -372,8 +374,11 @@ test("Vault.resolveRefs returns map of ref→record for active secrets", async (
     const result = await vault.resolveRefs(refs);
     assert.equal(result.size, 2);
     assert.equal(result.get("ss://x/dev/A")!.ref, "ss://x/dev/A");
-    assert.equal(typeof result.get("ss://x/dev/A")!.value, "string");
+    // Burst 7 §2 (5q): resolveRefs now returns ResolvedSecret — `.value` is a
+    // disposable SecretValue carrying the plaintext bytes (no stored string).
+    assert.equal(result.get("ss://x/dev/A")!.value.bytes().toString("utf8"), "val-A");
     assert.ok(Array.isArray(result.get("ss://x/dev/A")!.allowed_actions));
+    for (const r of result.values()) r.value.dispose();
   } finally {
     await cleanup();
   }
@@ -419,6 +424,92 @@ test("Vault.resolveRefs empty input returns empty map", async () => {
   try {
     const result = await vault.resolveRefs([]);
     assert.equal(result.size, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Burst 7 §2 (5q): the plaintext-resolving accessor returns a ResolvedSecret
+// whose `value` is a disposable SecretValue; the no-value metadata accessor
+// (inspect) returns AgentSecretMetadata with no `value`; the stored record
+// still round-trips its string on disk. (Spec §2 type-split + Tests.)
+// ---------------------------------------------------------------------------
+
+/** Create a fresh ephemeral vault seeded with a single secret. Returns the
+ *  Vault + a cleanup() the caller must invoke in finally. (Burst 7 §2.4.) */
+async function freshVaultWithSecret(s: {
+  name: string;
+  environment: string;
+  source: string;
+  value: string;
+}): Promise<{ vault: Vault; cleanup: () => Promise<void> }> {
+  const home = await mkdtemp(path.join(os.tmpdir(), "secret-shuttle-resolve-"));
+  const originalHome = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  const key = randomBytes(32);
+  const vault = new Vault(() => Buffer.from(key));
+  await vault.ensureInitialized();
+  await vault.upsertSecret({ ...s, allowedDomains: ["example.com"] });
+  return {
+    vault,
+    cleanup: async () => {
+      if (originalHome === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+      else process.env.SECRET_SHUTTLE_HOME = originalHome;
+      await rm(home, { recursive: true, force: true });
+    },
+  };
+}
+
+test("resolveSecret returns a ResolvedSecret with a SecretValue carrying the plaintext bytes", async () => {
+  const { vault, cleanup } = await freshVaultWithSecret({ name: "TOK", environment: "development", source: "local", value: "plaintext-bytes" });
+  try {
+    const resolved = await vault.resolveSecret("ss://local/dev/TOK");
+    assert.ok(resolved.value instanceof SecretValue);
+    assert.equal(resolved.value.bytes().toString("utf8"), "plaintext-bytes");
+    assert.equal(resolved.ref, "ss://local/dev/TOK");
+    // Metadata fields are present on the resolved shape.
+    assert.equal(resolved.environment, "development");
+    resolved.value.dispose();
+  } finally {
+    await cleanup();
+  }
+});
+
+test("resolveRefs returns a Map<ref, ResolvedSecret> with SecretValue values", async () => {
+  const { vault, cleanup } = await freshVaultWithSecret({ name: "TOK", environment: "development", source: "local", value: "abc" });
+  try {
+    const map = await vault.resolveRefs(["ss://local/dev/TOK"]);
+    const r = map.get("ss://local/dev/TOK");
+    assert.ok(r !== undefined);
+    assert.ok(r.value instanceof SecretValue);
+    assert.equal(r.value.bytes().toString("utf8"), "abc");
+    r.value.dispose();
+  } finally {
+    await cleanup();
+  }
+});
+
+test("inspect returns AgentSecretMetadata with no value field (metadata-only accessor)", async () => {
+  const { vault, cleanup } = await freshVaultWithSecret({ name: "TOK", environment: "development", source: "local", value: "abc" });
+  try {
+    const meta = await vault.inspect("ss://local/dev/TOK");
+    assert.equal((meta as unknown as Record<string, unknown>)["value"], undefined, "no plaintext on the metadata shape");
+    assert.equal(meta.value_visible_to_agent, false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("assertSecretActionAllowed accepts both a ResolvedSecret and AgentSecretMetadata (widened param)", async () => {
+  const { vault, cleanup } = await freshVaultWithSecret({ name: "TOK", environment: "development", source: "local", value: "abc" });
+  try {
+    const meta = await vault.inspect("ss://local/dev/TOK");
+    const resolved = await vault.resolveSecret("ss://local/dev/TOK");
+    // Both satisfy Pick<SecretRecord, "ref" | "allowed_actions"> — compiles + runs.
+    assert.doesNotThrow(() => assertSecretActionAllowed(meta, "inject_into_field"));
+    assert.doesNotThrow(() => assertSecretActionAllowed(resolved, "inject_into_field"));
+    resolved.value.dispose();
   } finally {
     await cleanup();
   }

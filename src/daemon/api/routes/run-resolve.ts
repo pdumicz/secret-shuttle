@@ -12,6 +12,7 @@ import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { asObject, optApprovalIds, optBool, optString, reqString } from "../validate.js";
 import { parseSecretRef } from "../../../shared/refs.js";
+import type { AgentSecretMetadata } from "../../../vault/types.js";
 import path from "node:path";
 
 interface RunResolveBody {
@@ -215,9 +216,18 @@ export function registerRunResolveRoute(
     // it. The duplicate-ref guard above guarantees stdin_ref ∉ body.refs, so
     // the two are disjoint within the resolved map.
     const allRefs = body.stdin_ref !== undefined ? [body.stdin_ref, ...body.refs] : body.refs;
-    let resolved: Awaited<ReturnType<typeof services.vault.resolveRefs>>;
+    // Burst 7 §2 (5q): the PRE-APPROVAL preflight resolves METADATA ONLY (no
+    // SecretValue, no plaintext string) so nothing is held across the
+    // conditional approval gate. The plaintext resolveRefs (which allocates
+    // SecretValues) runs AFTER the gate, immediately before the env/masker/stdin
+    // sinks. Deleted refs throw secret_not_found here.
+    let metaByRef: Map<string, AgentSecretMetadata>;
     try {
-      resolved = await services.vault.resolveRefs(allRefs);
+      metaByRef = new Map();
+      for (const ref of allRefs) {
+        if (metaByRef.has(ref)) continue; // dedupe
+        metaByRef.set(ref, await services.vault.inspect(ref));
+      }
     } catch (e) {
       const code = e instanceof ShuttleError ? e.code : "unexpected_error";
       await auditPerRequestedRef(allRefs, body.stdin_ref, false, code, grant?.session_id);
@@ -230,13 +240,13 @@ export function registerRunResolveRoute(
     // ("use_as_stdin") — the daemon writes the resolved bytes into the child's
     // environment or stdin, and either path lets the child observe the value.
     try {
-      for (const record of resolved.values()) {
+      for (const record of metaByRef.values()) {
         assertSecretActionAllowed(record, "use_as_stdin");
       }
     } catch (e) {
       const code = e instanceof ShuttleError ? e.code : "unexpected_error";
-      // We have full records here, so audit with environment populated.
-      await auditPerRef(allRefs, body.stdin_ref, resolved, false, code, grant?.session_id);
+      // We have full metadata here, so audit with environment populated.
+      await auditPerRef(allRefs, body.stdin_ref, metaByRef, false, code, grant?.session_id);
       writeJsonError(res, 400, e);
       return;
     }
@@ -249,7 +259,7 @@ export function registerRunResolveRoute(
     // with both IDs. The legacy single requireApprovals pattern with envApprovalRan
     // flag bookkeeping is no longer needed.
     const envProductionRefs = body.refs.filter(
-      (r) => resolved.get(r)!.environment === "production",
+      (r) => metaByRef.get(r)!.environment === "production",
     );
 
     const bindings: ApprovalBinding[] = [];
@@ -277,7 +287,7 @@ export function registerRunResolveRoute(
       bindings.push(envBinding);
     }
 
-    if (body.stdin_ref !== undefined && resolved.get(body.stdin_ref)!.environment === "production") {
+    if (body.stdin_ref !== undefined && metaByRef.get(body.stdin_ref)!.environment === "production") {
       const stdinBinding: ApprovalBinding = {
         action: "run_stdin",
         ref: body.stdin_ref,
@@ -317,11 +327,19 @@ export function registerRunResolveRoute(
         // is `string | undefined` (store.ts:56).
         grant = grants.find((g) => g.session_id !== undefined) ?? grants[0];
       } catch (e) {
-        await auditPerRef(allRefs, body.stdin_ref, resolved, false, e instanceof ShuttleError ? e.code : "unexpected_error", grant?.session_id);
+        await auditPerRef(allRefs, body.stdin_ref, metaByRef, false, e instanceof ShuttleError ? e.code : "unexpected_error", grant?.session_id);
         writeJsonError(res, 400, e);
         return;
       }
     }
+
+    // Burst 7 §2 (5q): the approval gate has now passed — resolve the PLAINTEXT
+    // (allocates a SecretValue per ref). These are dropped + disposed
+    // immediately after spawnAndStream is initiated (before awaiting child
+    // exit), so the secret strings/bytes never survive the child lifetime on
+    // the daemon heap. A pre-spawn failure path also disposes them (see the
+    // try/catch wrapping the spawn block below).
+    const resolved = await services.vault.resolveRefs(allRefs);
 
     // Build the child env: hardened-PATH baseline + non-refs + resolved refs.
     const env: NodeJS.ProcessEnv = { ...buildChildEnv() };
@@ -330,22 +348,25 @@ export function registerRunResolveRoute(
         const record = resolved.get(entry.value);
         if (record === undefined) {
           // Should not happen — resolveRefs would have thrown — but guard anyway.
-          await auditPerRef(allRefs, body.stdin_ref, resolved, false, "secret_not_found", grant?.session_id);
+          for (const r of resolved.values()) r.value.dispose();
+          await auditPerRef(allRefs, body.stdin_ref, metaByRef, false, "secret_not_found", grant?.session_id);
           writeJsonError(res, 400, new ShuttleError("secret_not_found", `Ref ${entry.value} could not be resolved.`));
           return;
         }
-        env[entry.key] = record.value;
+        // The plaintext string is materialized ONLY at this assignment.
+        env[entry.key] = record.value.bytes().toString("utf8");
       } else {
         env[entry.key] = entry.value;
       }
     }
 
-    // Build TWO maskers (one per stream) from the resolved values (NOT the
-    // refs — refs are public). A single shared masker would (a) hold back
-    // stdout tail bytes across stderr writes, (b) emit those held-back bytes
-    // to whichever stream wrote next, mixing the two streams, and (c) at
+    // Build TWO maskers (one per stream) from the resolved value BYTES (NOT the
+    // refs — refs are public; and NOT strings — the secret never enters the
+    // masker as a string, spec line 225). A single shared masker would (a) hold
+    // back stdout tail bytes across stderr writes, (b) emit those held-back
+    // bytes to whichever stream wrote next, mixing the two streams, and (c) at
     // flush time, dump everything to one stream regardless of origin.
-    const secretValues = Array.from(resolved.values()).map((r) => r.value);
+    const secretValues = Array.from(resolved.values()).map((r) => r.value.bytes());
     const stdoutMasker = createMasker(secretValues);
     const stderrMasker = createMasker(secretValues);
 
@@ -438,11 +459,13 @@ export function registerRunResolveRoute(
       // The exactOptionalPropertyTypes flag means we can't pass `stdinBytes: undefined`
       // when the field is optional — use the optional-spread idiom instead.
       // The bytes themselves are NEVER seen by the CLI; the daemon writes them
-      // directly to the child's fd 0 (see spawner.ts).
+      // directly to the child's fd 0 (see spawner.ts). Burst 7 §2 (5q): own copy
+      // of the resolved stdin bytes — the spawner scrubs the buffer it writes, so
+      // copy so the route's SecretValue is independent.
       const stdinBytes = body.stdin_ref !== undefined
-        ? Buffer.from(resolved.get(body.stdin_ref)!.value, "utf8")
+        ? Buffer.from(resolved.get(body.stdin_ref)!.value.bytes())
         : undefined;
-      await spawnAndStream({
+      const childRun = spawnAndStream({
         cmd: body.command,
         args: body.args,
         env,
@@ -457,16 +480,31 @@ export function registerRunResolveRoute(
         signal: abortController.signal,
         ...(stdinBytes !== undefined ? { stdinBytes } : {}),
       });
+      // Burst 7 §2 (5q): spawn() has already copied env into the child
+      // synchronously (spawner.ts) and spawnAndStream no longer retains
+      // input.env (it destructures the fields its long-lived handlers use). So
+      // clear the secret env STRINGS out of the route's env object and scrub
+      // every resolved SecretValue NOW — before awaiting child exit — so neither
+      // survives the child lifetime on the daemon heap. The masker BYTES stay
+      // alive (the maskers stream for the child's lifetime) and are scrubbed in
+      // the existing outer finally.
+      for (const entry of body.env) {
+        if (entry.isRef) delete env[entry.key];
+      }
+      for (const r of resolved.values()) r.value.dispose();
+      await childRun;
 
       // markUsed + audit AFTER the child exits. Success criterion: child exit == 0.
       // These run BEFORE res.end() so the response close happens-after the side
       // effects — a fetch caller that awaits the response body to completion can
-      // safely inspect last_used_at and the audit log without racing.
+      // safely inspect last_used_at and the audit log without racing. The
+      // disposed `resolved` map's metadata (ref/environment) is still intact —
+      // dispose() scrubbed only the SecretValue bytes, not the Map structure.
       const ok = childExitCode === 0;
       for (const ref of resolved.keys()) {
         await services.vault.markUsed(ref).catch(() => undefined);
       }
-      await auditPerRef(allRefs, body.stdin_ref, resolved, ok, ok ? undefined : "child_exit_nonzero", grant?.session_id);
+      await auditPerRef(allRefs, body.stdin_ref, metaByRef, ok, ok ? undefined : "child_exit_nonzero", grant?.session_id);
 
       // Close the response only if we still can. On the cancel path, res is
       // already destroyed/ended — writableEnded check prevents the double-end
@@ -483,6 +521,10 @@ export function registerRunResolveRoute(
       // pattern Buffers that flush() does not touch.
       stdoutMasker.dispose();
       stderrMasker.dispose();
+      // Burst 7 §2 (5q): idempotent backstop — the in-band drop after
+      // spawnAndStream already disposed these on the normal path; this covers a
+      // throw between resolveRefs and that drop (e.g. flushHeaders failing).
+      for (const r of resolved.values()) r.value.dispose();
     }
   });
 
@@ -494,7 +536,9 @@ export function registerRunResolveRoute(
   async function auditPerRef(
     refs: readonly string[],
     stdinRef: string | undefined,
-    resolved: Awaited<ReturnType<typeof services.vault.resolveRefs>>,
+    // Burst 7 §2 (5q): metadata-only map (no SecretValue) — auditPerRef reads
+    // only record.environment, present on AgentSecretMetadata.
+    resolved: Map<string, AgentSecretMetadata>,
     ok: boolean,
     errorCode: string | undefined,
     sessionId: string | undefined,

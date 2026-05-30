@@ -391,6 +391,83 @@ async function readAuditLines(home: string): Promise<AuditLine[]> {
   return text.split("\n").filter(Boolean).map((line) => JSON.parse(line) as AuditLine);
 }
 
+test("inject-submit (5q): resolve plaintext only AFTER approval; ONE SecretValue feeds inject + proveAbsence; dispose once", async () => {
+  // Burst 7 §2 (5q). Asserts the two-phase late-resolve discipline:
+  // (1) the pre-approval preflight uses inspect (metadata-only), and
+  //     resolveSecret is called ONLY after requireApprovals resolves;
+  // (2) the SAME SecretValue instance feeds injectIntoBackendNode AND
+  //     proveAbsence (multi-sink retention) — observed via bytes() called
+  //     exactly twice on the single resolved instance;
+  // (3) the SecretValue is disposed exactly once (outer finally), and after
+  //     the route returns .bytes() throws (used-after-dispose).
+  await withDaemon(async ({ port, services }) => {
+    services.browser = stub({ observeText: async () => true, proveAbsence: async () => ({ passed: true }) });
+    await setup(services, port);
+
+    const events: string[] = [];
+    let resolveCount = 0;
+    let bytesCount = 0;
+    let disposeCount = 0;
+    let injectSawSecret = false;
+    let proveSawSecret = false;
+
+    const realInspect = services.vault.inspect.bind(services.vault);
+    services.vault.inspect = (async (ref: string) => {
+      events.push("inspect");
+      return realInspect(ref);
+    }) as typeof services.vault.inspect;
+
+    const realResolve = services.vault.resolveSecret.bind(services.vault);
+    services.vault.resolveSecret = (async (ref: string) => {
+      events.push("resolveSecret");
+      resolveCount += 1;
+      const r = await realResolve(ref);
+      const realBytes = r.value.bytes.bind(r.value);
+      const realDispose = r.value.dispose.bind(r.value);
+      r.value.bytes = () => { bytesCount += 1; return realBytes(); };
+      r.value.dispose = () => { disposeCount += 1; realDispose(); };
+      return r;
+    }) as typeof services.vault.resolveSecret;
+
+    // Record that the sink received the real plaintext (proves the resolved
+    // bytes reached both sinks), and that approval happened before resolve.
+    const realInject = services.browser.injectIntoBackendNode.bind(services.browser);
+    services.browser.injectIntoBackendNode = (async (refNode, v: string) => {
+      events.push("inject");
+      injectSawSecret = v === SECRET;
+      return realInject(refNode, v);
+    }) as typeof services.browser.injectIntoBackendNode;
+    const realProve = services.browser.proveAbsence.bind(services.browser);
+    services.browser.proveAbsence = (async (v: string) => {
+      events.push("proveAbsence");
+      proveSawSecret = v === SECRET;
+      return realProve(v);
+    }) as typeof services.browser.proveAbsence;
+
+    const g = services.approvals.create(bindingFor());
+    services.approvals.approve(g.id);
+    const r = await call(port, "POST", "/v1/secrets/inject-submit", body({ approval_id: g.id }));
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { submitted: unknown }).submitted, true);
+
+    // (1) inspect ran in the pre-approval preflight; resolveSecret ran after.
+    assert.equal(events[0], "inspect", "pre-approval preflight must use inspect (metadata-only)");
+    const resolveIdx = events.indexOf("resolveSecret");
+    const injectIdx = events.indexOf("inject");
+    const proveIdx = events.indexOf("proveAbsence");
+    assert.ok(resolveIdx > -1 && resolveIdx < injectIdx, "resolveSecret must precede the inject sink");
+    assert.ok(injectIdx < proveIdx, "inject precedes proveAbsence");
+    // resolveSecret resolved exactly once — a single SecretValue across both sinks.
+    assert.equal(resolveCount, 1, "exactly one resolveSecret (one SecretValue across both sinks)");
+    // (2) the single SecretValue's bytes() fed BOTH sinks.
+    assert.equal(bytesCount, 2, "the same SecretValue.bytes() feeds inject AND proveAbsence");
+    assert.equal(injectSawSecret, true, "inject sink received the resolved plaintext");
+    assert.equal(proveSawSecret, true, "proveAbsence sink received the resolved plaintext");
+    // (3) disposed exactly once in the outer finally.
+    assert.equal(disposeCount, 1, "SecretValue disposed exactly once (outer finally)");
+  });
+});
+
 test("inject-submit: matching session mints grant → audit carries session_id; sessionStore.uses incremented", async () => {
   await withDaemon(async ({ port, services, home }) => {
     services.browser = stub({ observeText: async () => true, proveAbsence: async () => ({ passed: true }) });

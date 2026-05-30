@@ -44,10 +44,13 @@ export function registerSecretsDeleteRoute(
     // wire the spread to preserve a single audit shape across all routes.
     let grant: ApprovalGrant | undefined;
     try {
-      // Use the public getSecret() — it throws secret_not_found for both
-      // missing AND already-soft-deleted refs (per the invariant). This
-      // doubles as our existence check + production-or-not branch input.
-      const record = await services.vault.getSecret(b.ref);
+      // Burst 7 §2 (5q): metadata-only — delete reads only environment +
+      // allowed_domains (both on AgentSecretMetadata), so route to the no-value
+      // inspect() rather than holding a stored plaintext string across approval
+      // latency. inspect throws secret_not_found for both missing AND
+      // already-soft-deleted refs (same invariant), so it doubles as the
+      // existence check + production-or-not branch input.
+      const record = await services.vault.inspect(b.ref);
 
       // Production-gated.
       if (record.environment === "production") {

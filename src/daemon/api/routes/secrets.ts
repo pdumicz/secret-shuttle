@@ -12,6 +12,7 @@ import { writeDaemonAudit } from "../../audit.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { DEFAULT_ACTIONS } from "../../../vault/vault.js";
 import { ALL_SECRET_ACTIONS, type SecretAction } from "../../../vault/types.js";
+import type { ResolvedSecret } from "../../../vault/types.js";
 import { asObject, optApprovalIds, reqString } from "../validate.js";
 import { disableObservationDomains } from "../../chrome/internal-ops.js";
 import type { InjectResult } from "../../chrome/internal-ops.js";
@@ -151,7 +152,9 @@ export async function generateSecretCore(
     // preserve an existing record's actions on overwrite; else the default set.
     let existingActions: SecretAction[] | undefined;
     try {
-      existingActions = [...(await services.vault.getSecret(plannedRef)).allowed_actions];
+      // Burst 7 §2 (5q): overwrite-scope check reads only allowed_actions
+      // (metadata); inspect throws secret_not_found identically → catch → undefined.
+      existingActions = [...(await services.vault.inspect(plannedRef)).allowed_actions];
     } catch {
       existingActions = undefined;
     }
@@ -388,16 +391,19 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
     const approvalIds = optApprovalIds(o);
     const b = raw as InjectBody;
     reqString(o, "ref");
+    // Burst 7 §2 (5q): resolve plaintext only AFTER approval; hoisted so the
+    // finally disposes it on every exit path.
+    let resolved: ResolvedSecret | undefined;
     try {
       if (services.browser === null) throw new ShuttleError("browser_not_started", "Run `secret-shuttle browser start` first.");
 
-      const secret = await services.vault.getSecret(b.ref);
-      assertSecretActionAllowed(secret, "inject_into_field");
+      const meta = await services.vault.inspect(b.ref);
+      assertSecretActionAllowed(meta, "inject_into_field");
       const pre = await services.browser.readFocusedFingerprintAndDomain();
       if (b.domain !== undefined && !domainMatches(pre.domain, b.domain)) {
         throw new ShuttleError("domain_mismatch", `Current domain ${pre.domain} != ${b.domain}.`);
       }
-      enforceDomain(pre.domain, secret.allowed_domains, "inject");
+      enforceDomain(pre.domain, meta.allowed_domains, "inject");
 
       if (services.blind.current() !== null) {
         throw new ShuttleError(
@@ -408,14 +414,14 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
 
       const binding: ApprovalBinding = {
         action: "inject",
-        ref: secret.ref,
-        environment: secret.environment,
+        ref: meta.ref,
+        environment: meta.environment,
         destination_domain: pre.domain,
         target_id: pre.target_id,
         field_fingerprint: pre.field_fingerprint,
         template_id: null,
         template_params: null,
-        allowed_domains: secret.allowed_domains,
+        allowed_domains: meta.allowed_domains,
         ...(pre.page_title !== undefined ? { page_title: pre.page_title } : {}),
         ...(pre.page_url_host !== undefined ? { page_url_host: pre.page_url_host } : {}),
       };
@@ -442,7 +448,10 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         if (post.target_id !== pre.target_id || post.field_fingerprint !== pre.field_fingerprint || post.domain !== pre.domain) {
           throw new ShuttleError("field_changed", "Focused field changed after approval.");
         }
-        result = await services.browser.injectFocused(secret.value);
+        // Burst 7 §2 (5q): resolve the plaintext ONLY now — after approval, after
+        // the post-approval field-changed recheck, immediately before the sink.
+        resolved = await services.vault.resolveSecret(b.ref);
+        result = await services.browser.injectFocused(resolved.value.bytes().toString("utf8"));
       } catch (preWriteErr) {
         // Failure at or before injectFocused → nothing was written to the page,
         // so it is safe to auto-resume rather than strand the user in blind mode.
@@ -451,11 +460,11 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
       }
       // The secret IS now on the page. From here on, a failure must NOT resume
       // observation — blind mode stays ACTIVE until a human-approved `blind end`.
-      await services.vault.markUsed(secret.ref);
-      await writeDaemonAudit({ action: "inject", ok: true, ref: secret.ref, environment: secret.environment, domain: result.domain });
+      await services.vault.markUsed(meta.ref);
+      await writeDaemonAudit({ action: "inject", ok: true, ref: meta.ref, environment: meta.environment, domain: result.domain });
       return {
         injected: true,
-        secret_ref: secret.ref,
+        secret_ref: meta.ref,
         browser_domain: result.domain,
         field: result.field,
         blind_mode: true,
@@ -470,6 +479,9 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         ...(b.ref !== undefined ? { ref: b.ref } : {}),
       });
       throw err;
+    } finally {
+      // Burst 7 §2 (5q): scrub the resolved SecretValue on every exit path.
+      resolved?.value.dispose();
     }
   });
 
@@ -481,26 +493,30 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
     if (typeof b?.ref === "string") services.compareLimiter.check(b.ref);
     try {
       if (services.browser === null) throw new ShuttleError("browser_not_started", "Run `secret-shuttle browser start` first.");
-      const secret = await services.vault.getSecret(b.ref);
-      assertSecretActionAllowed(secret, "compare_fingerprint");
-      const capture = b.with === "selection"
-        ? await services.browser.captureSelection()
-        : await services.browser.captureFocused();
-      if (b.domain !== undefined && !domainMatches(capture.domain, b.domain)) {
-        throw new ShuttleError("domain_mismatch", `Current domain ${capture.domain} != ${b.domain}.`);
+      // Burst 7 §2 (5q): compare reads ONLY the stored fingerprint (metadata) —
+      // it is NOT a resolved-plaintext consumer. Use the no-value inspect, and
+      // do NOT capture the candidate value before approval.
+      const meta = await services.vault.inspect(b.ref);
+      assertSecretActionAllowed(meta, "compare_fingerprint");
+      // Pre-approval preflight: value-FREE metadata read (no candidate value on
+      // the daemon heap before approval). The candidate is captured AFTER the
+      // gate, below.
+      const pre = await services.browser.readFocusedFingerprintAndDomain();
+      if (b.domain !== undefined && !domainMatches(pre.domain, b.domain)) {
+        throw new ShuttleError("domain_mismatch", `Current domain ${pre.domain} != ${b.domain}.`);
       }
-      enforceDomain(capture.domain, secret.allowed_domains, "compare");
+      enforceDomain(pre.domain, meta.allowed_domains, "compare");
 
       const binding: ApprovalBinding = {
         action: "compare",
-        ref: secret.ref,
-        environment: secret.environment,
-        destination_domain: capture.domain,
+        ref: meta.ref,
+        environment: meta.environment,
+        destination_domain: pre.domain,
         target_id: null,
         field_fingerprint: null,
         template_id: null,
         template_params: null,
-        allowed_domains: secret.allowed_domains,
+        allowed_domains: meta.allowed_domains,
       };
       await requireApprovals({
         store: services.approvals,
@@ -511,12 +527,24 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         ...(b.wait_for_approval === false ? { waitMs: 0 } : {}),
       });
 
+      // Capture the candidate value ONLY after approval. The captured candidate
+      // may have moved fields after approval — re-check the domain against the
+      // approved pre.domain (fail closed if changed).
+      const capture = b.with === "selection"
+        ? await services.browser.captureSelection()
+        : await services.browser.captureFocused();
+      if (capture.domain !== pre.domain) {
+        throw new ShuttleError("field_changed", "Focused field changed after approval.");
+      }
       const fpKey = await services.vault.fingerprintKey();
-      const matches = fingerprintMatches(Buffer.from(capture.value, "utf8"), secret.fingerprint, fpKey);
-      await writeDaemonAudit({ action: "compare", ok: true, ref: secret.ref, environment: secret.environment, domain: capture.domain });
+      // HMAC the browser-captured CANDIDATE (a transient page-side string at the
+      // accepted CDP boundary), NEVER a resolved/stored secret. Materialized
+      // only at the HMAC sink and dropped right after.
+      const matches = fingerprintMatches(Buffer.from(capture.value, "utf8"), meta.fingerprint, fpKey);
+      await writeDaemonAudit({ action: "compare", ok: true, ref: meta.ref, environment: meta.environment, domain: capture.domain });
       return {
         matches,
-        secret_ref: secret.ref,
+        secret_ref: meta.ref,
         browser_domain: capture.domain,
         compared_with: b.with ?? "focused-field",
         value_visible_to_agent: false,

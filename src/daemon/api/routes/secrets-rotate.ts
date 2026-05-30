@@ -45,9 +45,11 @@ export function registerSecretsRotateRoute(
     // wire the spread to preserve a single audit shape across all routes.
     let grant: ApprovalGrant | undefined;
     try {
-      // Public getSecret enforces the soft-delete invariant: rotating an
-      // already-deleted ref is secret_not_found, which is correct.
-      const oldRecord = await services.vault.getSecret(b.ref);
+      // Burst 7 §2 (5q): metadata-only — rotate reads only environment / name /
+      // source / allowed_domains / allowed_actions (all on AgentSecretMetadata),
+      // so route to the no-value inspect(). It enforces the same soft-delete
+      // invariant: rotating an already-deleted ref is secret_not_found.
+      const oldRecord = await services.vault.inspect(b.ref);
       const kind = typeof b.kind === "string" ? b.kind : "random_32_bytes";
 
       // Production-gated. ApprovalBinding.action gained "secrets_rotate" in A5.

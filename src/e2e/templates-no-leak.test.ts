@@ -8,6 +8,7 @@ import { DaemonServer } from "../daemon/server.js";
 import { DaemonServices } from "../daemon/services.js";
 import { registerRoutes } from "../daemon/api/router.js";
 import { TemplateRegistry, type TemplateDefinition } from "../daemon/templates/registry.js";
+import { SecretValue } from "../vault/secret-value.js";
 
 const NEEDLE = "n33dle-" + randomBytes(8).toString("hex");
 
@@ -88,7 +89,7 @@ test("agentic e2e: stdin delivery — secret reaches child via stdin only, NEVER
     const { runTemplate } = await import("../daemon/templates/run.js");
     const r = await runTemplate({
       template: def, params: { name: "STRIPE_KEY" },
-      secret: NEEDLE, tmpDir: ctx.tmpDir,
+      secret: SecretValue.fromUtf8(NEEDLE), tmpDir: ctx.tmpDir,
     });
     assert.equal(r.exit_code, 0);
 
@@ -119,7 +120,7 @@ test("agentic e2e: tmp_env_file_0600 — secret reaches child via 0600 env-file 
     const { runTemplate } = await import("../daemon/templates/run.js");
     const r = await runTemplate({
       template: def, params: { name: "STRIPE_KEY" },
-      secret: NEEDLE, tmpDir: ctx.tmpDir,
+      secret: SecretValue.fromUtf8(NEEDLE), tmpDir: ctx.tmpDir,
     });
     assert.equal(r.exit_code, 0);
 

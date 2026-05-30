@@ -216,6 +216,48 @@ export const READ_SCRIPT = `
 })()
 `;
 
+// Burst 7 §2 (5q): value-FREE metadata read for the pre-approval preflight.
+// Returns the same { ok, field, domain, title, urlHost, source } metadata
+// READ_SCRIPT does, but never materializes the candidate value (no
+// getSelection().toString() / .value / .innerText) — so
+// readFocusedFingerprintAndDomain holds no candidate plaintext on the daemon
+// heap before approval.
+//
+// CRITICAL — must mirror READ_SCRIPT's ACCEPTANCE set, not just the
+// focused-field subset (verified against internal-ops.ts:208-215). READ_SCRIPT
+// returns ok:true in THREE cases: (1) a non-empty *selection* exists — and it
+// does NOT require the active element to be editable in that case
+// (source:"selection"); (2) a focused <input>/<textarea>; (3) a contentEditable
+// element (both source:"focused-field"). A naive READ_META_SCRIPT that ALWAYS
+// requires `isField` (editable active element) would reject the common
+// "compare against selected page text on a non-editable element" case that
+// READ_SCRIPT accepts today — regressing selection-mode compare (which routes
+// its pre-approval preflight through readFocusedFingerprintAndDomain too, Task
+// 2.5.6). So READ_META_SCRIPT detects selection PRESENCE *without reading the
+// text* via the value-free `!getSelection().isCollapsed` predicate (a boolean —
+// it never stringifies the selection), and accepts when EITHER a selection is
+// present OR the active element is editable.
+export const READ_META_SCRIPT = `
+(() => {
+  function meta(el){
+    const i = el instanceof HTMLInputElement ? el : null;
+    const ta = el instanceof HTMLTextAreaElement ? el : null;
+    const editable = el instanceof HTMLElement && el.isContentEditable;
+    return { tag: el.tagName.toLowerCase(), type: i?.type, name: i?.name ?? ta?.name, id: el.id, editable };
+  }
+  const a = document.activeElement;
+  if (!(a instanceof Element)) return { ok:false, reason:"no_active_element" };
+  const base = { field: meta(a), domain: location.hostname, title: document.title, urlHost: location.host };
+  // Value-free selection PRESENCE check — booleans only, never reads the text.
+  const s = window.getSelection();
+  const hasSelection = !!s && s.rangeCount > 0 && !s.isCollapsed;
+  if (hasSelection) return { ok:true, source:"selection", ...base };
+  const isField = a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || (a instanceof HTMLElement && a.isContentEditable);
+  if (!isField) return { ok:false, reason:"not_editable" };
+  return { ok:true, source:"focused-field", ...base };
+})()
+`;
+
 const WRITE_SCRIPT = (value: string) => `
 ((v) => {
   function meta(el){
@@ -956,7 +998,7 @@ export class CdpBrowserOps implements BrowserOps {
 
   async readFocusedFingerprintAndDomain(): Promise<Omit<CaptureResult, "value">> {
     const page = await this.pickPage();
-    const r = await this.evaluate<{ ok: boolean; field?: FieldDescriptor; domain?: string; title?: string; urlHost?: string }>(page.id, READ_SCRIPT);
+    const r = await this.evaluate<{ ok: boolean; field?: FieldDescriptor; domain?: string; title?: string; urlHost?: string }>(page.id, READ_META_SCRIPT);
     if (!r.ok || r.field === undefined || r.domain === undefined) throw new Error("focused_field_unavailable");
     const backendNodeId = await this.getFocusedBackendNodeId(page.id);
     const fp = fieldFingerprint(r.domain.toLowerCase(), page.id, backendNodeId, r.field);

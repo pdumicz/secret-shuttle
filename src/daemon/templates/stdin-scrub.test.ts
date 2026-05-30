@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runTemplate, __setStdinObserverForTesting } from "./run.js";
+import { SecretValue } from "../../vault/secret-value.js";
 
 // Task B3 — Phase B (memory hygiene): the stdin-delivery branch must zero
 // the local Buffer holding the secret bytes after the child has accepted them.
@@ -26,7 +27,7 @@ test("stdin-delivery: scrubs the secret Buffer AFTER the write callback fires (n
         requires_approval_when_production: false,
       },
       params: {},
-      secret: secretText,
+      secret: SecretValue.fromUtf8(secretText),
     });
     assert.equal(result.exit_code, 0);
     assert.ok(capturedBuf !== undefined, "test observer should have captured the local Buffer");
@@ -77,7 +78,7 @@ test("stdin-delivery: scrubs on stdin 'error'/'close' event (abnormal terminatio
           requires_approval_when_production: false,
         },
         params: {},
-        secret: secretText,
+        secret: SecretValue.fromUtf8(secretText),
       });
     } catch {
       // Reject is fine — the promise contract isn't what this test verifies.
@@ -113,7 +114,7 @@ test("stdin-delivery: scrub is idempotent — error + close + cb triple-fire is 
         requires_approval_when_production: false,
       },
       params: {},
-      secret: "idempotency-probe",
+      secret: SecretValue.fromUtf8("idempotency-probe"),
     });
     assert.equal(r.exit_code, 0);
     assert.equal(observerHits, 1, "observer should fire exactly once per runTemplate call");

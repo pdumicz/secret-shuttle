@@ -12,6 +12,7 @@ import { parseTemplate } from "../../inject/template.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { asObject, optApprovalIds, optBool, optString, reqString } from "../validate.js";
+import type { AgentSecretMetadata, ResolvedSecret } from "../../../vault/types.js";
 
 export function registerInjectRenderRoute(
   server: DaemonServer,
@@ -31,14 +32,19 @@ export function registerInjectRenderRoute(
     const parsed = parseTemplate(template);
 
     // Per-ref audit at the END must always fire — declare these outside the try
-    // so the finally block sees them. `resolved` may still be undefined if the
-    // resolveRefs() throw fires (deleted ref → secret_not_found); the finally
+    // so the finally block sees them. `metaByRef` may still be undefined if the
+    // metadata preflight throws (deleted ref → secret_not_found); the finally
     // block tolerates that.
     // valueVisibleToAgent tracks ACTUAL exposure: it stays false until we are
     // about to return rendered content in the response body (stdout-passthrough
     // success path). Any failure — including a failed `inject -o -` — leaves it
     // false because no plaintext ever reached the CLI.
-    let resolved: Awaited<ReturnType<typeof services.vault.resolveRefs>> | undefined;
+    // Burst 7 §2 (5q): the pre-approval preflight resolves METADATA ONLY
+    // (metaByRef, no SecretValue). The plaintext map (`resolved`) is allocated
+    // only AFTER the conditional approval gate, immediately before the render
+    // sink, and disposed in the finally.
+    let metaByRef: Map<string, AgentSecretMetadata> | undefined;
+    let resolved: Map<string, ResolvedSecret> | undefined;
     let auditOk = false;
     let auditErrorCode: string | undefined;
     let valueVisibleToAgent = false;
@@ -51,14 +57,21 @@ export function registerInjectRenderRoute(
     let grant: ApprovalGrant | undefined;
 
     try {
-      resolved = await services.vault.resolveRefs(parsed.refs);
+      // Burst 7 §2 (5q): metadata-only preflight — no SecretValue, no plaintext
+      // string held across the conditional approval gate. Deleted refs throw
+      // secret_not_found here.
+      metaByRef = new Map();
+      for (const ref of parsed.refs) {
+        if (metaByRef.has(ref)) continue; // dedupe
+        metaByRef.set(ref, await services.vault.inspect(ref));
+      }
       // Enforce policy per ref BEFORE the approval gate — fail closed without
       // prompting if any opted-out of use_as_stdin.
-      for (const record of resolved.values()) {
+      for (const record of metaByRef.values()) {
         assertSecretActionAllowed(record, "use_as_stdin");
       }
 
-      const isProduction = Array.from(resolved.values()).some(
+      const isProduction = Array.from(metaByRef.values()).some(
         (r) => r.environment === "production",
       );
 
@@ -90,14 +103,14 @@ export function registerInjectRenderRoute(
         grant = grants[0];
       }
 
-      const valuesMap = new Map<string, string>();
-      for (const [ref, record] of resolved) {
-        valuesMap.set(ref, record.value);
-      }
-      const rendered = parsed.render(valuesMap);
-
       if (outputPath === "-") {
         // Stdout-passthrough mode — return content in response body.
+        // Burst 7 §2 (5q): resolve plaintext only now (after the gate), build the
+        // values map + render immediately before the return.
+        resolved = await services.vault.resolveRefs(parsed.refs);
+        const valuesMap = new Map<string, string>();
+        for (const [ref, r] of resolved) valuesMap.set(ref, r.value.bytes().toString("utf8"));
+        const rendered = parsed.render(valuesMap);
         // All resolve/policy/approval checks have passed; plaintext is about to
         // leave the daemon in the response body, so flip the exposure flag now.
         auditOk = true;
@@ -236,7 +249,19 @@ export function registerInjectRenderRoute(
       const tempPath = `${finalPath}.${randomBytes(8).toString("hex")}.tmp`;
       let fh: Awaited<ReturnType<typeof open>> | undefined;
       try {
+        // Burst 7 §2 (5q): open the temp fh FIRST (it's part of the file-mode
+        // setup that must complete before rendering, spec line 234). Then
+        // resolve + build values + render + writeFile back-to-back with NO await
+        // (filesystem or otherwise) between render and write, so the rendered
+        // plaintext string exists only from parsed.render(...) to the
+        // immediately-following writeFile and is never held across I/O. The
+        // resolveRefs await BELOW produces the bytes (the resolve boundary) — it
+        // holds no rendered string.
         fh = await open(tempPath, "wx", 0o600);
+        resolved = await services.vault.resolveRefs(parsed.refs);
+        const valuesMap = new Map<string, string>();
+        for (const [ref, r] of resolved) valuesMap.set(ref, r.value.bytes().toString("utf8"));
+        const rendered = parsed.render(valuesMap);
         await fh.writeFile(rendered, "utf8");
         await fh.close();
         fh = undefined;
@@ -252,7 +277,7 @@ export function registerInjectRenderRoute(
       }
 
       auditOk = true;
-      for (const ref of resolved.keys()) {
+      for (const ref of parsed.refs) {
         await services.vault.markUsed(ref).catch(() => undefined);
       }
       return { rendered: true, output_path: finalPath, refs_count: parsed.refs.length };
@@ -260,11 +285,15 @@ export function registerInjectRenderRoute(
       auditErrorCode = e instanceof ShuttleError ? e.code : "unexpected_error";
       throw e;
     } finally {
-      // Per-ref audit (success or failure). When resolveRefs() threw,
-      // `resolved` is undefined and we audit per-requested-ref without
+      // Burst 7 §2 (5q): dispose every resolved SecretValue on EVERY exit path
+      // (success, throw, timeout). Idempotent + no-op when `resolved` is
+      // undefined (a throw before the plaintext resolve, e.g. path-unsafe).
+      for (const r of resolved?.values() ?? []) r.value.dispose();
+      // Per-ref audit (success or failure). When the metadata preflight threw,
+      // `metaByRef` is undefined and we audit per-requested-ref without
       // environment info — a denied/non-existent ref is still security-relevant.
       for (const ref of parsed.refs) {
-        const record = resolved?.get(ref);
+        const record = metaByRef?.get(ref);
         await writeDaemonAudit({
           action: "inject_render",
           ok: auditOk,

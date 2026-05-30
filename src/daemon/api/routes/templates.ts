@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { requireApprovals } from "../../approvals/require-approvals.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
+import type { ResolvedSecret } from "../../../vault/types.js";
 import { resolveBinary } from "../../templates/resolve-binary.js";
 import { runTemplate } from "../../templates/run.js";
 import { TemplateRegistry, assertNoPaddedParams } from "../../templates/registry.js";
@@ -125,10 +126,13 @@ export async function runTemplateCore(
   // (pre-mint failure), in which case no session was consumed and audit
   // MUST NOT carry session_id.
   let grant: ApprovalGrant | undefined;
+  // Burst 7 §2 (5q): resolve plaintext only AFTER approval; hoisted so the
+  // finally disposes it on every exit path.
+  let resolved: ResolvedSecret | undefined;
   try {
     const tpl = registry.get(templateId);
-    const secret = await services.vault.getSecret(ref);
-    assertSecretActionAllowed(secret, "use_as_stdin");
+    const meta = await services.vault.inspect(ref);
+    assertSecretActionAllowed(meta, "use_as_stdin");
 
     // Reject padded params before everything else — before validateParams,
     // before destinationEnvironment, before the approval binding is built.
@@ -147,9 +151,9 @@ export async function runTemplateCore(
     // an unsafe_binary_path error when both conditions hold.
     destEnv = tpl.destinationEnvironment?.(params);
     effectiveEnv =
-      secret.environment === "production" || destEnv === "production"
+      meta.environment === "production" || destEnv === "production"
         ? "production"
-        : secret.environment;
+        : meta.environment;
 
     // Resolve and hash the binary — capture failure instead of throwing so
     // the approval gate can still run first (preserving approval_required
@@ -172,7 +176,7 @@ export async function runTemplateCore(
     // retry — no self-mismatch.
     const binding: ApprovalBinding = {
       action: "template",
-      ref: secret.ref,
+      ref: meta.ref,
       environment: effectiveEnv,
       destination_domain: null,
       target_id: null,
@@ -213,18 +217,22 @@ export async function runTemplateCore(
     // approval was already gated, nothing executed.
     if (resolveErr !== null) throw resolveErr;
 
+    // Burst 7 §2 (5q): resolve the plaintext ONLY now — after approval and after
+    // the binary-resolution failure surfaces, immediately before the sink.
+    // runTemplate makes its own zeroable copy; we dispose this in the finally.
+    resolved = await services.vault.resolveSecret(ref);
     const result = await runTemplate({
       template: { ...tpl, binary: absolute as string },
       params,
-      secret: secret.value,
+      secret: resolved.value,
       expectedSha256: sha256 as string,
       tmpDir: services.tmpDir,
     });
-    await services.vault.markUsed(secret.ref);
+    await services.vault.markUsed(meta.ref);
     await writeDaemonAudit({
       action: "template_run",
       ok: result.exit_code === 0,
-      ref: secret.ref,
+      ref: meta.ref,
       environment: effectiveEnv,
       ...(destEnv !== undefined ? { destination_environment: destEnv } : {}),
       template_id: tpl.id,
@@ -238,7 +246,7 @@ export async function runTemplateCore(
     return {
       executed: result.exit_code === 0,
       template_id: result.template_id,
-      secret_ref: secret.ref,
+      secret_ref: meta.ref,
       binary_path: absolute,
       binary_sha256: sha256,
       exit_code: result.exit_code,
@@ -262,5 +270,8 @@ export async function runTemplateCore(
       ...(opts.bootstrapAuthority !== undefined ? { batch_id: opts.bootstrapAuthority.batchId } : {}),
     });
     throw err;
+  } finally {
+    // Burst 7 §2 (5q): scrub the resolved SecretValue on every exit path.
+    resolved?.value.dispose();
   }
 }

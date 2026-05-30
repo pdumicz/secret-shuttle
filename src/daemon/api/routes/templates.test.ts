@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -238,4 +239,71 @@ test("POST /v1/templates/run: failure AFTER session mint still records session_i
       "session.uses must still be 1: session was minted before the post-mint throw",
     );
   });
+});
+
+test("POST /v1/templates/run (5q): preflight uses inspect; resolveSecret after approval before runTemplate; disposed once", async () => {
+  // Burst 7 §2 (5q). Late-resolve discipline for /v1/templates/run:
+  // inspect for the pre-approval preflight; resolveSecret only after the
+  // approval gate, immediately before runTemplate; the SecretValue is disposed
+  // in the finally exactly once. Uses a production secret + pre-issued approval
+  // so the approval gate is exercised.
+  registry.register(STUB_OK);
+  try {
+    await withDaemon(async (ctx) => {
+      await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+      await seedProdSecret(ctx, "TPL_5Q");
+
+      const events: string[] = [];
+      let resolveCount = 0;
+      let disposeCount = 0;
+
+      const realInspect = ctx.services.vault.inspect.bind(ctx.services.vault);
+      ctx.services.vault.inspect = (async (ref: string) => {
+        events.push("inspect");
+        return realInspect(ref);
+      }) as typeof ctx.services.vault.inspect;
+      const realResolve = ctx.services.vault.resolveSecret.bind(ctx.services.vault);
+      ctx.services.vault.resolveSecret = (async (ref: string) => {
+        events.push("resolveSecret");
+        resolveCount += 1;
+        const r = await realResolve(ref);
+        const realDispose = r.value.dispose.bind(r.value);
+        r.value.dispose = () => { disposeCount += 1; realDispose(); };
+        return r;
+      }) as typeof ctx.services.vault.resolveSecret;
+
+      // Pre-issue + approve the template binding so requireApprovals resolves.
+      const g = ctx.services.approvals.create({
+        action: "template",
+        ref: "ss://local/prod/TPL_5Q",
+        environment: "production",
+        destination_domain: null,
+        target_id: null,
+        field_fingerprint: null,
+        template_id: STUB_OK_ID,
+        template_params: {},
+        template_binary_path: process.execPath,
+        template_binary_sha256: createHash("sha256").update(await readFile(process.execPath)).digest("hex"),
+      });
+      ctx.services.approvals.approve(g.id);
+
+      const r = await call(ctx, "POST", "/v1/templates/run", {
+        template_id: STUB_OK_ID,
+        ref: "ss://local/prod/TPL_5Q",
+        params: {},
+        approval_id: g.id,
+        wait_for_approval: false,
+      });
+      assert.equal(r.status, 200, `expected 200, got ${r.status} body=${JSON.stringify(r.body)}`);
+      assert.equal((r.body as { executed: boolean }).executed, true);
+
+      assert.equal(events[0], "inspect", "pre-approval preflight must use inspect");
+      const resolveIdx = events.indexOf("resolveSecret");
+      assert.ok(resolveIdx > -1, "resolveSecret must be called");
+      assert.equal(resolveCount, 1, "resolveSecret called exactly once");
+      assert.equal(disposeCount, 1, "resolved SecretValue disposed exactly once (finally)");
+    });
+  } finally {
+    UNREG();
+  }
 });

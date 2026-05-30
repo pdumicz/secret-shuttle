@@ -1,3 +1,5 @@
+import type { SecretValue } from "./secret-value.js";
+
 export type SecretEnvironment = "production" | "development" | string;
 
 export type SecretAction =
@@ -41,6 +43,14 @@ export interface SecretRecord {
   /** True if a newer ref has superseded this one but it hasn't been deleted yet. Operational state — not surfaced to agents. */
   rotating?: boolean;
 }
+
+/**
+ * Burst 7 §2 (5q). A resolved secret handed to a plaintext consumer: all the
+ * stored SecretRecord metadata EXCEPT `value`, which is a disposable,
+ * redaction-safe SecretValue (created at the resolve boundary). The
+ * string-valued SecretRecord is reserved for vault internals only.
+ */
+export type ResolvedSecret = Omit<SecretRecord, "value"> & { value: SecretValue };
 
 export interface AgentSecretMetadata {
   id: string;
