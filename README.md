@@ -36,7 +36,7 @@ context — that's the gap this closes.
 npx secret-shuttle init
 ```
 
-This starts the local daemon and walks you through setting a vault passphrase. You will see a Touch ID prompt (macOS) or a passphrase entry window. The CLI never reads the passphrase — it is entered through a local web window that only the daemon owns. After `init` completes the daemon is running and you are ready to use the CLI or hand it to an agent.
+This starts the local daemon and walks you through creating a vault passphrase in a local web window that only the daemon owns — the CLI never reads it. (Touch ID isn't a first-run prompt: it's how *later* unlocks work once the vault key is enrolled in the OS keychain. `init` enrols the keychain by default when it creates the vault — pass `--no-keychain` to opt out, or run `secret-shuttle keychain enable` later.) After `init` completes the daemon is running and you are ready to use the CLI or hand it to an agent.
 
 ## For Agents
 
@@ -126,16 +126,20 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 - `secret-shuttle agent install <claude|codex|cursor|copilot>` writes the canonical Secret Shuttle skill into your project; `secret-shuttle agent print-skill-url` prints the raw GitHub URL for any agent that accepts a remote skill URL
 - Exact-by-default domain matching (`*.example.com` for wildcards)
 - Migration command: `secret-shuttle migrate secure-vault`
+- OS-keychain master-key storage (`secret-shuttle keychain enable|disable|status`) — `init` enrols the vault master key in the OS keychain by default when it creates the vault (opt out with `--no-keychain`); these subcommands enable/disable/inspect it afterwards, so later unlocks can use the system keychain / Touch ID instead of re-entering the passphrase
+- `secret-shuttle secrets rotate <ref>` — generates a fresh secret and marks the old ref `rotating`; you then re-push the new value to its destinations and delete the old ref (it does not yet auto-re-push to existing bindings)
+- `secret-shuttle import --env-file <path>` — import secrets from a `.env` file into the vault
+- `secret-shuttle secrets delete <ref>` — remove a secret from the vault
 
 ## What Does Not Work Yet
 
-- OS-keychain or hardware-backed key storage
+- Hardware-backed key storage (HSM / Secure Enclave) — note: OS-keychain key storage *does* ship (see `keychain enable` above); this entry is only the hardware-backed tier
 - Team vaults, cloud sync, MCP server, browser extension
 - Real-page browser gates ([P2a] PENDING): treat Stripe `reveal-capture` and Vercel `inject-submit` as best-effort until each provider's manual gate outcome is recorded — the absence proof stays conservatively fail-closed regardless, so "best-effort" means "auto-resume may not succeed on every page", not "the secret may leak"
 - Template argv-vs-`--help` gates ([P2b] PENDING): the shipped templates' argv vectors have not been verified against the current `gh` / `wrangler` / `supabase` `--help` output on a per-release basis
 - Deferred provider templates (`github-actions-env-secret-set`, `github-actions-org-secret-set`, `railway-variable-set`, `netlify-env-set`, `clerk-env-set`) — see [docs/templates-deferred.md](docs/templates-deferred.md) for the reason and re-open criteria
 - Signed desktop binaries
-- Secret rotation / import / export workflows
+- Secret export workflows (rotation and `.env` import ship; export does not)
 
 ## Docs
 
