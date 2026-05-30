@@ -9,14 +9,16 @@ const ok = (tokens: string[]) => resolveCommandPath(program, tokens).ok;
 test("resolveCommandPath accepts real command paths (incl. positionals & options)", () => {
   assert.ok(ok(["status"]));
   assert.ok(ok(["status", "--json"]));
-  assert.ok(ok(["secrets", "set"]));
+  // `secrets set` carries mandatory --name/--env (requiredOption); the complete
+  // form is what the demo renders and what must resolve.
+  assert.ok(ok(["secrets", "set", "--name", "X", "--env", "production"]));
   assert.ok(ok(["secrets", "list", "--env", "production"]));
   assert.ok(ok(["agent", "install", "claude"]));        // <target> positional
-  assert.ok(ok(["template", "run", "vercel-env-add"]));  // <template-id> positional
+  assert.ok(ok(["template", "run", "vercel-env-add", "--ref", "ss://a/b/C"]));  // <template-id> + required --ref
   assert.ok(ok(["secrets", "delete", "ss://stripe/prod/X"])); // <ref> positional
   assert.ok(ok(["browser", "mark", "pick", "--as", "reveal-btn"]));
-  assert.ok(ok(["reveal-capture"]));
-  assert.ok(ok(["inject-submit"]));
+  assert.ok(ok(["reveal-capture", "--name", "X", "--env", "production", "--source", "stripe", "--reveal-handle", "h"]));
+  assert.ok(ok(["inject-submit", "--ref", "ss://a/b/C", "--field-handle", "f", "--submit-handle", "s", "--success-text", "Saved"]));
   assert.ok(ok(["internal", "blind", "end"]));
   assert.ok(ok(["init"]));
   assert.ok(ok(["provision", "--infer"]));
@@ -28,6 +30,21 @@ test("resolveCommandPath rejects removed verbs and invalid leaf pairings", () =>
   assert.ok(!ok(["generate"]));                  // removed → secrets set / provision --secret
   assert.ok(!ok(["secrets", "generate"]));       // valid parent, invalid leaf
   assert.ok(!ok(["agent", "setup", "claude"]));  // valid parent, invalid leaf
+});
+
+test("resolveCommandPath rejects missing required options and dangling option values", () => {
+  // Mandatory options (requiredOption): Commander rejects these uncopyable forms,
+  // so the guard must too — otherwise the demo could greenlight a command a user
+  // cannot paste.
+  assert.ok(!ok(["import"]));                                   // missing required --env-file
+  assert.ok(!ok(["secrets", "set"]));                           // missing required --name/--env
+  assert.ok(!ok(["secrets", "set", "--name", "X"]));            // still missing required --env
+  assert.ok(!ok(["inject-submit"]));                            // missing all four required options
+  assert.ok(!ok(["inject-submit", "--success-text", "Saved", "--domain", "vercel.com"])); // missing --ref/--field-handle/--submit-handle
+
+  // A `--flag <value>` with no value is Commander's "option argument missing".
+  assert.ok(!ok(["secrets", "list", "--env"]));                 // --env <environment> needs a value
+  assert.ok(!ok(["secrets", "set", "--name", "--env", "production"])); // --name swallowed nothing; value is another flag
 });
 
 test("resolveCommandPath enforces metadata: option names, positional arity, help passthrough", () => {
@@ -107,9 +124,17 @@ test("end-to-end: a `doctor` form fails, `npx … init` passes", () => {
 
 test("end-to-end: inject-submit with quoted multi-word --success-text resolves", () => {
   // End-to-end: the realistic Scene-8 invocation (quoted success marker) must resolve.
+  // It carries all four required options (--ref/--field-handle/--submit-handle/
+  // --success-text); the quoted value is one opaque token, not three positionals.
   assert.ok(
     resolveCommandPath(program, [
       "inject-submit",
+      "--ref",
+      "ss://stripe/prod/STRIPE_WEBHOOK_SECRET",
+      "--field-handle",
+      "value-field",
+      "--submit-handle",
+      "save-button",
       "--success-text",
       "Environment Variable Added",
       "--domain",

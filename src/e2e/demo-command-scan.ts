@@ -112,16 +112,25 @@ export interface PathResult {
 // (Commander records it on the Argument). We read it to enforce the required
 // MINIMUM, not just the arity maximum.
 interface RegisteredArg { _name: string; variadic: boolean; required: boolean }
-interface CmdOption { long?: string | null; short?: string | null; required?: boolean; optional?: boolean }
+// `required`/`optional` describe whether the option CONSUMES a value token
+// (`--flag <value>` / `--flag [value]`); `mandatory` (set by `requiredOption()`)
+// describes whether the option must be SUPPLIED at all. They are independent:
+// `--source <source>` takes a value but is not mandatory.
+interface CmdOption { long?: string | null; short?: string | null; required?: boolean; optional?: boolean; mandatory?: boolean }
 interface CmdInternals {
   registeredArguments: RegisteredArg[];
   options: CmdOption[];
   _allowUnknownOption?: boolean;
 }
 const internals = (c: Command): CmdInternals => c as unknown as CmdInternals;
-// A `--flag <value>` / `--flag [value]` option consumes the following token as
-// its value; a boolean `--flag` does not. Commander records this on the option.
+// A `--flag <value>` (required value) consumes the following token; a boolean
+// `--flag` does not. A `--flag [value]` (optional value) MAY consume the next
+// token but only if it is not itself an option. Commander records this on the option.
 const takesValue = (o: CmdOption): boolean => o.required === true || o.optional === true;
+// A `--flag <value>` REQUIRES its value (Commander errors if it is missing);
+// a `--flag [value]` does not. Only the required-value form makes a dangling
+// flag (end-of-line, or followed by another option) a hard error.
+const requiresValue = (o: CmdOption): boolean => o.required === true;
 
 // Walk the registered subcommand tree as far as the leading non-option tokens go.
 // Returns the resolved leaf and the index of the first token it did NOT consume.
@@ -152,12 +161,18 @@ function walkPath(start: Command, tokens: string[], from: number): { node: Comma
  *  - option tokens (`-…`) are validated by name against the command's registered
  *    options (long/short), with `--help`/`-h` always allowed and any option accepted
  *    when the command opts into `allowUnknownOption()` (e.g. the `bootstrap` stub).
+ *  - a `--flag <value>` whose value is MISSING (the flag ends the line or is
+ *    immediately followed by another option) is rejected, mirroring Commander's
+ *    "option argument missing" error (e.g. a trailing `secrets list --env`).
  *  - trailing non-option tokens are checked against declared positional ARITY: a
  *    command with N non-variadic positionals accepts at most N of them; a variadic
  *    positional accepts the rest. A command with zero positionals accepts none.
  *  - declared positional MINIMUM: a command with N required `<positional>`s must
  *    receive at least N (so `agent install`, `template run`, `secrets delete` fail
  *    when their required positional is missing, not just when extras are supplied).
+ *  - MANDATORY options: every `requiredOption()` (Commander `mandatory`) must be
+ *    supplied, so a bare `secret-shuttle import` / `secrets set` / `inject-submit`
+ *    (each missing a required `--flag`) is rejected rather than greenlit.
  */
 export function resolveCommandPath(program: Command, tokens: string[]): PathResult {
   const { node, next, path: resolvedPath } = walkPath(program, tokens, 0);
@@ -184,6 +199,7 @@ export function resolveCommandPath(program: Command, tokens: string[]): PathResu
   const hasVariadic = meta.registeredArguments.some((a) => a.variadic);
   const requiredPositionals = meta.registeredArguments.filter((a) => a.required).length;
   let positionalsSeen = 0;
+  const seenFlags = new Set<string>();
 
   for (let i = next; i < tokens.length; i++) {
     const tok = tokens[i]!;
@@ -197,9 +213,19 @@ export function resolveCommandPath(program: Command, tokens: string[]): PathResu
       if (!opt) {
         return { ok: false, resolvedPath, reason: `\`${resolvedPath.join(" ")}\` has no option \`${flag}\`` };
       }
+      // Record both spellings so the mandatory-options check below recognizes the
+      // option regardless of whether the demo wrote its long or short form.
+      if (opt.long) seenFlags.add(opt.long);
+      if (opt.short) seenFlags.add(opt.short);
+      const nextIsValue = i + 1 < tokens.length && !tokens[i + 1]!.startsWith("-");
+      // A `--flag <value>` with no value (line ends, or next token is another
+      // option) is what Commander rejects as "option argument missing".
+      if (!inlineValue && requiresValue(opt) && !nextIsValue) {
+        return { ok: false, resolvedPath, reason: `\`${resolvedPath.join(" ")}\` option \`${flag}\` requires a value` };
+      }
       // Skip a value-bearing option's value token so it is not miscounted as a
       // positional (e.g. `secrets list --env production`: `production` is --env's value).
-      if (!inlineValue && takesValue(opt) && i + 1 < tokens.length && !tokens[i + 1]!.startsWith("-")) {
+      if (!inlineValue && takesValue(opt) && nextIsValue) {
         i++;
       }
       continue;
@@ -223,6 +249,20 @@ export function resolveCommandPath(program: Command, tokens: string[]): PathResu
       resolvedPath,
       reason: `\`${resolvedPath.join(" ")}\` requires ${requiredPositionals} positional argument(s) but got ${positionalsSeen}`,
     };
+  }
+  // Mandatory options: a `requiredOption()` that was never supplied is rejected
+  // by Commander, so a bare `secret-shuttle import` (missing --env-file) or
+  // `inject-submit --success-text …` (missing --ref/--field-handle/--submit-handle)
+  // must not pass the guard. Skip when the command accepts unknown options.
+  if (!meta._allowUnknownOption) {
+    const missing = meta.options.find((o) => o.mandatory === true && !((o.long && seenFlags.has(o.long)) || (o.short && seenFlags.has(o.short))));
+    if (missing) {
+      return {
+        ok: false,
+        resolvedPath,
+        reason: `\`${resolvedPath.join(" ")}\` requires option \`${missing.long ?? missing.short}\``,
+      };
+    }
   }
   return { ok: true, resolvedPath, reason: "" };
 }

@@ -68,6 +68,12 @@ const REMOVED_TOKENS: Array<{ token: RegExp; what: string }> = [
   { token: /daemon\s+start\s*&&\s*secret-shuttle\s+unlock/, what: "removed `daemon start && unlock` ritual (use `npx secret-shuttle init`)" },
   // Looser `daemon start &&` catches variants that drop the explicit `secret-shuttle unlock`.
   { token: /daemon\s+start\s*&&\s*(?!\s*[\r\n])/, what: "removed `daemon start && ...` ritual (use `npx secret-shuttle init`)" },
+  // `doctor` was removed in v0.3.0 (the honesty pass replaced it with `status`).
+  // It is in neither MOVED_TOKENS nor caught by the registry path-scan in its BARE
+  // prose form (e.g. `<code>doctor</code> first`), since that scanner only sees
+  // `secret-shuttle …` invocations. A standalone-word match keeps the prose honest
+  // without snagging substrings like "doctored".
+  { token: /\bdoctor\b/, what: "removed `doctor` verb (use `secret-shuttle status`)" },
 ];
 
 // Burst 6 §1.8. Verbs that MOVED to the hidden `internal` namespace. Bare
@@ -162,7 +168,19 @@ test("demo: Scene 3 install uses `npx secret-shuttle init`, not the removed ritu
   const start = html.indexOf('class="scene-stage" data-scene="3"');
   assert.notEqual(start, -1, "Scene 3 stage block not found in demo/index.html");
   const end = html.indexOf('class="scene-stage" data-scene="4"', start);
-  const scene3 = html.slice(start, end === -1 ? undefined : end);
+  const scene3Raw = html.slice(start, end === -1 ? undefined : end);
+
+  // Match against the RENDERED stage text, not raw markup: strip tags (collapsing
+  // each to a single space) and decode the few entities the demo uses. Otherwise a
+  // future split of `secret-shuttle` and `daemon start` across <span>s would render
+  // the old ritual while this regex — anchored on raw HTML — silently missed it.
+  const scene3 = scene3Raw
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;|&#39;/g, "'");
 
   assert.match(scene3, /npx\s+secret-shuttle\s+init/, "Scene 3 must show `npx secret-shuttle init`");
 
