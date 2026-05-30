@@ -85,6 +85,15 @@ test("extractShuttleInvocations pulls command tokens and tolerates prose", () =>
   assert.deepEqual(extractShuttleInvocations("+ secret-shuttle@0.1.1"), []);
   assert.deepEqual(extractShuttleInvocations("I heard about secret-shuttle. set it up"), []);
   assert.deepEqual(extractShuttleInvocations("(npm install -g secret-shuttle)"), []);
+
+  // A shell-quoted multi-word option value is ONE token, not three. Without quote
+  // grouping, `Environment Variable Added` would split into spurious positionals.
+  assert.deepEqual(
+    extractShuttleInvocations(
+      'secret-shuttle inject-submit --success-text "Environment Variable Added" --domain vercel.com',
+    ),
+    [["inject-submit", "--success-text", "Environment Variable Added", "--domain", "vercel.com"]],
+  );
 });
 
 test("end-to-end: a `doctor` form fails, `npx … init` passes", () => {
@@ -94,4 +103,18 @@ test("end-to-end: a `doctor` form fails, `npx … init` passes", () => {
   for (const inv of extractShuttleInvocations("(npx secret-shuttle init)")) {
     assert.ok(resolveCommandPath(program, inv).ok, "init must pass");
   }
+});
+
+test("end-to-end: inject-submit with quoted multi-word --success-text resolves", () => {
+  // End-to-end: the realistic Scene-8 invocation (quoted success marker) must resolve.
+  assert.ok(
+    resolveCommandPath(program, [
+      "inject-submit",
+      "--success-text",
+      "Environment Variable Added",
+      "--domain",
+      "vercel.com",
+    ]).ok,
+    "inject-submit with a quoted multi-word --success-text value must resolve to a registered path",
+  );
 });

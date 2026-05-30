@@ -10,6 +10,10 @@ import type { Command } from "commander";
  * (`--name`, `--kind`, …) are part of the invocation and get validated against
  * the resolved command's option metadata rather than being silently invisible.
  *
+ * Shell-quoted spans (double- or single-quoted) are grouped into one opaque token
+ * (the surrounding quotes are removed). This faithfully models shell tokenization
+ * for multi-word option values like `--success-text "Environment Variable Added"`.
+ *
  * Conservative by design — the demo also embeds `secret-shuttle` in prose,
  * filenames, and npm output:
  *  - Triggers only on `secret-shuttle` followed by whitespace, so `secret-shuttle.yml`,
@@ -38,7 +42,14 @@ export function extractShuttleInvocations(rawText: string): string[][] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const tokens: string[] = [];
-    for (const raw of (m[1] ?? "").split(/\s+/)) {
+    for (const { text: raw, quoted } of splitArgs(m[1] ?? "")) {
+      if (quoted) {
+        // A shell-quoted value (e.g. `--success-text "Environment Variable Added"`):
+        // an opaque option value/positional — never a command or flag — kept verbatim
+        // as one token, bypassing the argument-shape gate.
+        if (raw !== "") tokens.push(raw);
+        continue;
+      }
       const tok = cleanToken(raw);
       if (tok === null) break; // non-argument boundary (prose / comment) → stop
       if (tok === "") continue; // dropped punctuation (e.g. a lone `\`)
@@ -47,6 +58,36 @@ export function extractShuttleInvocations(rawText: string): string[][] {
     if (tokens.length > 0) invocations.push(tokens);
   }
   return invocations;
+}
+
+// Split a shell-ish argument line into tokens, grouping double- and single-quoted
+// spans into a single token (the surrounding quotes are removed). A quoted token is
+// flagged so the caller treats it as an opaque value: it may contain spaces or
+// punctuation and is never a command name or option flag, so it bypasses the
+// argument-shape gate. Unquoted runs split on whitespace. An unterminated quote
+// consumes the rest of the line (shell-ish, good enough for our inputs).
+function splitArgs(line: string): Array<{ text: string; quoted: boolean }> {
+  const out: Array<{ text: string; quoted: boolean }> = [];
+  let buf = "";
+  let quoted = false;   // did the current token include any quoted span?
+  let started = false;  // are we currently accumulating a token?
+  let quote: '"' | "'" | null = null;
+  for (const ch of line) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else buf += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; quoted = true; started = true; continue; }
+    if (/\s/.test(ch)) {
+      if (started) { out.push({ text: buf, quoted }); buf = ""; quoted = false; started = false; }
+      continue;
+    }
+    buf += ch;
+    started = true;
+  }
+  if (started) out.push({ text: buf, quoted });
+  return out;
 }
 
 // Returns the cleaned token, "" to skip it, or null to STOP collecting this invocation.
