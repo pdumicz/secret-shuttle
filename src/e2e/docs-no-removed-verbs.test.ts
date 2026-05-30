@@ -37,6 +37,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
+import { buildProgram } from "../cli/build-program.js";
+import { extractShuttleInvocations, resolveCommandPath } from "./demo-command-scan.js";
 
 // Spec §1.7 freezes the contract as the *glob* `agents/*.example.md`, not a
 // frozen list. Enumerate the directory at collection time (readdirSync keeps
@@ -55,6 +57,9 @@ const DOCS: string[] = [
   ...AGENT_DOCS,
   "README.md",
   "examples/stripe-to-vercel/walkthrough.md",
+  // Burst-7 honesty pass: the demo was the one agent-facing surface NOT scanned,
+  // which is exactly why removed `doctor`/`generate` survived here. Now covered.
+  "demo/index.html",
 ];
 
 const REMOVED_TOKENS: Array<{ token: RegExp; what: string }> = [
@@ -118,4 +123,58 @@ test("MOVED_TOKENS regex matches bare but not internal-prefixed or reveal-captur
 
   // `reveal-capture` does NOT match (the `reveal-` prefix breaks adjacency).
   assert.ok(!captureRe.test("secret-shuttle reveal-capture --name X"), "`reveal-capture` should NOT match");
+});
+
+// Check 2 (Burst-7 honesty pass): every `secret-shuttle …` invocation rendered in
+// the demo must resolve to a registered command PATH — not merely a registered
+// top-level verb. `doctor` (removed in v0.3.0) is in neither token list above, so
+// only a registry-backed path check catches it; the same check catches invalid
+// leaf pairings like `secrets generate` or `agent setup claude`. The registry is
+// the side-effect-free buildProgram() shared with the CLI entrypoint, so it stays
+// self-maintaining as commands are added/removed.
+test("demo: every `secret-shuttle …` invocation resolves to a registered command path", async () => {
+  const program = buildProgram();
+  const html = await readFile(join(process.cwd(), "demo/index.html"), "utf8");
+  const invocations = extractShuttleInvocations(html);
+  assert.ok(
+    invocations.length > 0,
+    "expected to extract at least one `secret-shuttle …` invocation from the demo",
+  );
+  for (const tokens of invocations) {
+    const result = resolveCommandPath(program, tokens);
+    assert.ok(
+      result.ok,
+      `demo/index.html renders \`secret-shuttle ${tokens.join(" ")}\` but ${result.reason}. ` +
+        `Use a registered command (the registry is buildProgram()).`,
+    );
+  }
+});
+
+// Check 3 (Burst-7 honesty pass): keep the removed install ritual out of Scene 3.
+// `secret-shuttle daemon start` and `secret-shuttle unlock` are still REGISTERED
+// commands (so Check 2 passes them), and `npm install -g secret-shuttle` is not a
+// `secret-shuttle <verb>` form at all (so Check 2 never sees it). Assert Scene 3's
+// stage uses `npx secret-shuttle init` and contains none of the old ritual's CLI
+// command strings. Scoped to the CLI strings, within Scene 3's stage only, so the
+// retained passphrase-window button copy "Create & unlock" is unaffected.
+test("demo: Scene 3 install uses `npx secret-shuttle init`, not the removed ritual", async () => {
+  const html = await readFile(join(process.cwd(), "demo/index.html"), "utf8");
+  const start = html.indexOf('class="scene-stage" data-scene="3"');
+  assert.notEqual(start, -1, "Scene 3 stage block not found in demo/index.html");
+  const end = html.indexOf('data-scene="4"', start);
+  const scene3 = html.slice(start, end === -1 ? undefined : end);
+
+  assert.match(scene3, /npx\s+secret-shuttle\s+init/, "Scene 3 must show `npx secret-shuttle init`");
+
+  const forbidden: Array<{ re: RegExp; what: string }> = [
+    { re: /npm\s+install\s+-g\s+secret-shuttle/, what: "`npm install -g secret-shuttle`" },
+    { re: /secret-shuttle\s+daemon\s+start/, what: "`secret-shuttle daemon start`" },
+    { re: /secret-shuttle\s+unlock/, what: "`secret-shuttle unlock`" },
+  ];
+  for (const { re, what } of forbidden) {
+    assert.ok(
+      !re.test(scene3),
+      `Scene 3 must not contain the removed install ritual ${what} — use 'npx secret-shuttle init' instead.`,
+    );
+  }
 });

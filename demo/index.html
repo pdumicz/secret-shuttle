@@ -1214,7 +1214,7 @@
       <div class="scene-meta" data-scene="0">
         <span class="tag">magic path</span>
         <h1 class="title">One verb. <em>One approval.</em> Done.</h1>
-        <p class="copy"><code>provision --infer</code> reads <code>.env.example</code> + your framework configs (Vercel, Supabase, GitHub Actions) and writes a plan. <code>provision</code> mints one batch approval. You click <b>Approve</b> once in the hub. <code>provision --continue</code> ships every secret to every destination — and <code>audit</code> hands you the receipt.</p>
+        <p class="copy"><code>provision --infer</code> reads <code>.env.example</code> + your framework configs (Vercel, Supabase, GitHub Actions), writes a plan, and mints one batch approval. You click <b>Approve</b> once in the hub. <code>provision --continue</code> ships every secret to every destination — and <code>audit</code> hands you the receipt.</p>
         <div class="watch"><b>Watch for →</b> The agent never sees a value. One human click covers the whole batch. The session checkbox lets the next matching push skip the popup for 15 minutes.</div>
         <div class="gap">
           <div class="gap-label">The 30-second loop</div>
@@ -1250,8 +1250,8 @@
       <!-- Scene 03 -->
       <div class="scene-meta" data-scene="3">
         <span class="tag">setting up</span>
-        <h1 class="title">Install, daemon, <em>passphrase</em>.</h1>
-        <p class="copy">Claude installs the package, starts the daemon, and calls <code>unlock</code>. The CLI never reads the passphrase. A local web window opens — the human types it directly into the daemon's UI.</p>
+        <h1 class="title">One command, then <em>passphrase</em>.</h1>
+        <p class="copy">Claude runs <code>npx secret-shuttle init</code> — one command that installs the daemon, starts it, and opens the passphrase window. The CLI never reads the passphrase. A local web window opens — the human types it directly into the daemon's UI.</p>
         <div class="watch"><b>Watch for →</b> First-time unlock = "create passphrase" mode. Same window, different verb.</div>
         <div class="gap">
           <div class="gap-label">Gap to spot</div>
@@ -1263,8 +1263,8 @@
       <div class="scene-meta" data-scene="4">
         <span class="tag">wiring agent</span>
         <h1 class="title">Teach the agent the <em>protocol</em>.</h1>
-        <p class="copy">One command writes the Secret Shuttle skill into the project. From here, the agent knows the order — <code>doctor</code> first, prefer <code>template run</code>, never log raw values, surface <code>manual_recovery_required</code> to the human.</p>
-        <div class="watch"><b>Watch for →</b> The same command exists for <code>codex</code>, <code>cursor</code>, <code>copilot</code> — marker-managed so it doesn't clobber the rest of the file.</div>
+        <p class="copy"><code>init</code> already wrote the Secret Shuttle skill for detected agents. From here, the agent knows the order — <code>status</code> first, prefer <code>template run</code>, never log raw values, surface <code>manual_recovery_required</code> to the human.</p>
+        <div class="watch"><b>Watch for →</b> Add more agents anytime: <code>secret-shuttle agent install codex</code> — also <code>cursor</code>, <code>copilot</code> — marker-managed so it doesn't clobber the rest of the file.</div>
         <div class="gap">
           <div class="gap-label">Gap to spot</div>
           <div class="gap-body">Does Claude actually re-read its skills mid-session, or does it need a new session to pick the file up? The demo should be honest if it's the latter.</div>
@@ -1275,7 +1275,7 @@
       <div class="scene-meta" data-scene="5">
         <span class="tag">first win</span>
         <h1 class="title">Generate &amp; push — <em>two clicks</em>.</h1>
-        <p class="copy">The dev asks for an <code>INTERNAL_CRON_SECRET</code> in prod, on Vercel. Claude runs <code>doctor</code>, <code>generate</code>, then <code>template run vercel-env-add</code>. Two approval cards in sequence — generate, then publish.</p>
+        <p class="copy">The dev asks for an <code>INTERNAL_CRON_SECRET</code> in prod, on Vercel. Claude runs <code>status</code>, <code>secrets set</code>, then <code>template run vercel-env-add</code>. Two approval cards in sequence — generate, then publish.</p>
         <div class="watch"><b>Watch for →</b> Each approval is scoped to a single action. No grant is wider than what the human just OK'd.</div>
         <div class="gap">
           <div class="gap-label">Gap to spot</div>
@@ -1299,7 +1299,7 @@
       <div class="scene-meta" data-scene="7">
         <span class="tag">blind mode 🔒</span>
         <h1 class="title">Reveal. Capture. <em>Verify gone.</em></h1>
-        <p class="copy">Claude calls <code>reveal-capture</code>. The daemon takes the wheel — blind mode engages, the daemon clicks reveal, captures the bytes from the marked scope, hides them, and proves the value is absent from every observable surface before resuming.</p>
+        <p class="copy">Claude calls <code>reveal-capture</code>. The daemon takes the wheel — blind mode engages, the daemon clicks reveal, captures the bytes from the marked scope, hides them, and proves the value is absent from every surface the daemon can observe in the DOM before resuming.</p>
         <div class="watch"><b>Watch for →</b> The approval card shows the reveal label, capture mode, hide handle, and an explicit auto-resume disclosure (red).</div>
         <div class="gap">
           <div class="gap-label">Gap to spot</div>
@@ -1311,7 +1311,7 @@
       <div class="scene-meta" data-scene="8">
         <span class="tag">handoff</span>
         <h1 class="title">Inject. Submit. <em>Hand back.</em></h1>
-        <p class="copy">Same browser, now on Vercel. Claude marks the value field + Save button, then calls <code>inject-submit</code> with a success marker. The daemon writes the secret, clicks save, waits for the marker, proves the secret is gone, and only then hands observation back.</p>
+        <p class="copy">Same browser, now on Vercel. Claude marks the value field + Save button, then calls <code>inject-submit</code> with a success marker. The daemon writes the secret, clicks save, waits for the marker, proves the secret is gone from the DOM surfaces it can observe, and only then hands observation back.</p>
         <div class="watch"><b>Watch for →</b> The agent never sees the value. The argv never carries it. The success text is what the human approved.</div>
         <div class="gap">
           <div class="gap-label">Gap to spot</div>
@@ -1323,7 +1323,7 @@
       <div class="scene-meta" data-scene="9">
         <span class="tag">done</span>
         <h1 class="title">All green. <em>No one saw it.</em></h1>
-        <p class="copy">Doctor reports a clean state. The Stripe webhook signing secret is in Vercel production env. The dev never saw the raw value. The agent never saw it. No argv, no env, no log line, no chat transcript ever carried the bytes.</p>
+        <p class="copy">Status reports a clean state. The Stripe webhook signing secret is in Vercel production env. The dev never saw the raw value. The agent never saw it. No argv, no env, no log line, no chat transcript ever carried the bytes.</p>
         <div class="watch"><b>Watch for →</b> The closing summary references the secret by <code>ss://</code> ref and fingerprint — that's the agent's vocabulary from now on.</div>
         <div class="gap">
           <div class="gap-label">Gap to spot</div>
@@ -1361,10 +1361,7 @@
             <div class="group">
               <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">provision</span><span class="args">--infer</span></div>
               <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  Wrote secret-shuttle.yml — 3 secrets · vercel:production, supabase:&lt;ref&gt;</span></div>
-            </div>
-            <div class="group">
-              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">provision</span><span class="args"></span></div>
-              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  approval_required · batch b_8f3a… · 1 approval · </span><span class="em">opening hub →</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  approval_required · batch b_8f3a… · 1 approval · </span><span class="em">opening hub →</span></div>
             </div>
             <div class="group">
               <div class="line assistant"><span><span class="warn">Approve in the window your browser just opened.</span> One card covers the whole batch — <span class="dim">you click Approve, the agent never sees a value.</span></span></div>
@@ -1474,17 +1471,9 @@
           </div>
           <div class="term-body">
             <div class="group">
-              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(npm install -g secret-shuttle)</span></div>
-              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  + secret-shuttle@0.1.1</span></div>
-              <div class="line tool-result" style="padding-left:14px"><span class="dim">  added 1 package in 3.2s</span></div>
-            </div>
-            <div class="group">
-              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle daemon start)</span></div>
-              <div class="line tool-result"><span class="glyph">⎿</span><span class="json">  { <span class="k">"started"</span>: <span class="b">true</span>, <span class="k">"pid"</span>: <span class="n">8421</span> }</span></div>
-            </div>
-            <div class="group">
-              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle unlock)</span></div>
-              <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  Opening unlock window in your browser…</span></div>
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(npx secret-shuttle init)</span></div>
+              <div class="line tool-result"><span class="glyph">⎿</span><span class="json">  { <span class="k">"daemon"</span>: <span class="s">"started"</span>, <span class="k">"pid"</span>: <span class="n">8421</span> }</span></div>
+              <div class="line tool-result" style="padding-left:14px"><span class="dim">  Opening passphrase window in your browser…</span></div>
               <div class="line tool-result" style="padding-left:14px"><span class="dim">  (I cannot read the passphrase. Type it into the window →)</span></div>
             </div>
             <div class="group">
@@ -1517,12 +1506,7 @@
           </div>
           <div class="term-body">
             <div class="group">
-              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle agent install claude)</span></div>
-              <div class="line tool-result"><span class="glyph">⎿</span><span class="json">  {</span></div>
-              <div class="line tool-result" style="padding-left:14px"><span class="json">    <span class="k">"written"</span>: <span class="s">".claude/skills/secret-shuttle/SKILL.md"</span>,</span></div>
-              <div class="line tool-result" style="padding-left:14px"><span class="json">    <span class="k">"bytes"</span>: <span class="n">3481</span>,</span></div>
-              <div class="line tool-result" style="padding-left:14px"><span class="json">    <span class="k">"mode"</span>: <span class="s">"wholesale"</span></span></div>
-              <div class="line tool-result" style="padding-left:14px"><span class="json">  }</span></div>
+              <div class="line assistant"><span><code>init</code> already wrote my skill — <span class="em">.claude/skills/secret-shuttle/SKILL.md</span> (3,481 bytes; it detected a Claude project).</span></div>
             </div>
             <div class="group">
               <div class="line assistant"><span class="status">Other agents are one command away:</span></div>
@@ -1531,7 +1515,7 @@
               <div class="line assistant"><span class="status">  secret-shuttle agent install copilot   # .github/copilot-instructions.md</span></div>
             </div>
             <div class="group">
-              <div class="line assistant"><span>Skill loaded. From here I'll follow the protocol — <span class="em">doctor first</span>, prefer template over browser, never log raw values, surface <span class="warn">manual_recovery_required</span> if the daemon can't prove the secret is gone.</span></div>
+              <div class="line assistant"><span>Skill loaded. From here I'll follow the protocol — <span class="em">status first</span>, prefer template over browser, never log raw values, surface <span class="warn">manual_recovery_required</span> if the daemon can't prove the secret is gone.</span></div>
               <div class="line assistant" style="margin-top:6px"><span>Ready for the next request.</span></div>
             </div>
             <div class="group">
@@ -1555,12 +1539,12 @@
               <div class="line user-msg"><span class="marker">&gt;</span><span>generate an INTERNAL_CRON_SECRET for prod and add it to vercel</span></div>
             </div>
             <div class="group">
-              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle doctor --json)</span></div>
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle status --json)</span></div>
               <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  daemon_reachable: </span><span class="ok">true</span><span class="dim"> · unlocked: </span><span class="ok">true</span></div>
               <div class="line tool-result" style="padding-left:14px"><span class="dim">  agentic_browser.available: false (not needed)</span></div>
             </div>
             <div class="group">
-              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle generate \</span></div>
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle secrets set \</span></div>
               <div class="line tool-call" style="padding-left:32px"><span class="args">--name INTERNAL_CRON_SECRET --env production \</span></div>
               <div class="line tool-call" style="padding-left:32px"><span class="args">--kind random_32_bytes \</span></div>
               <div class="line tool-call" style="padding-left:32px"><span class="args">--allow-domain vercel.com \</span></div>
@@ -1750,7 +1734,7 @@
           </div>
           <div class="approval-body">
             <h2>Secret Shuttle</h2>
-            <div class="approval-action">Click <b>reveal-btn</b> on <b>dashboard.stripe.com</b>, capture into <b>ss://stripe/prod/STRIPE_WEBHOOK_SECRET</b> (from <b>webhook-secret-field</b>, mode <code>field</code>), hide it, and auto-resume only if the secret is verified gone.</div>
+            <div class="approval-action">Click <b>reveal-btn</b> on <b>dashboard.stripe.com</b>, capture into <b>ss://stripe/prod/STRIPE_WEBHOOK_SECRET</b> (from <b>webhook-secret-field</b>, mode <code>field</code>), hide it, and auto-resume only if the secret is verified gone from the daemon-observable DOM.</div>
             <div class="row"><span class="label">Environment</span><span class="v">production</span></div>
             <div class="row"><span class="label">URL host</span><span class="v"><code>dashboard.stripe.com</code></span></div>
             <div class="row"><span class="label">Injectable into</span><span class="v">stripe.com, vercel.com</span></div>
@@ -1761,7 +1745,7 @@
               <div class="row"><span class="label">Reveal fp</span><span class="v"><code>fp:b3a…d2</code></span></div>
               <div class="row"><span class="label">Field fp</span><span class="v"><code>fp:f7e…11</code></span></div>
             </details>
-            <div class="approval-warn">Approving authorizes auto-resume only if the secret is verified gone (capture and absence checks pass). If not, blind mode stays on.</div>
+            <div class="approval-warn">Approving authorizes auto-resume only if the secret is verified gone from the daemon-observable DOM (capture and absence checks pass). If not, blind mode stays on.</div>
             <div class="approval-actions">
               <button class="ap-btn ap-deny">Deny</button>
               <button class="ap-btn ap-approve">Approve</button>
@@ -1794,7 +1778,7 @@
               <div class="line tool-call" style="padding-left:32px"><span class="args">--ref ss://stripe/prod/STRIPE_WEBHOOK_SECRET \</span></div>
               <div class="line tool-call" style="padding-left:32px"><span class="args">--field-handle value-field \</span></div>
               <div class="line tool-call" style="padding-left:32px"><span class="args">--submit-handle save-button \</span></div>
-              <div class="line tool-call" style="padding-left:32px"><span class="args">--success-text "Environment Variable Added" \</span></div>
+              <div class="line tool-call" style="padding-left:32px"><span class="args">--success-text env-var-added \</span></div>
               <div class="line tool-call" style="padding-left:32px"><span class="args">--domain vercel.com)</span></div>
               <div class="line tool-result"><span class="glyph">⎿</span><span class="warn">  approval_required → opening UI<span class="cursor"></span></span></div>
             </div>
@@ -1845,7 +1829,7 @@
           </div>
           <div class="approval-body">
             <h2>Secret Shuttle</h2>
-            <div class="approval-action">Inject <b>ss://stripe/prod/STRIPE_WEBHOOK_SECRET</b> into <b>value-field</b> on <b>vercel.com</b>, click <b>save-button</b>, wait for success, and auto-resume only if the secret is verified gone.</div>
+            <div class="approval-action">Inject <b>ss://stripe/prod/STRIPE_WEBHOOK_SECRET</b> into <b>value-field</b> on <b>vercel.com</b>, click <b>save-button</b>, wait for success, and auto-resume only if the secret is verified gone from the daemon-observable DOM.</div>
             <div class="row"><span class="label">Environment</span><span class="v">production</span></div>
             <div class="row"><span class="label">URL host</span><span class="v"><code>vercel.com</code></span></div>
             <div class="row"><span class="label">Injectable into</span><span class="v">stripe.com, vercel.com</span></div>
@@ -1856,7 +1840,7 @@
               <div class="row"><span class="label">Field fp</span><span class="v"><code>fp:c91…83</code></span></div>
               <div class="row"><span class="label">Submit fp</span><span class="v"><code>fp:5e2…07</code></span></div>
             </details>
-            <div class="approval-warn">Approving authorizes auto-resume only if the secret is verified gone (success and absence checks pass). If not, blind mode stays on.</div>
+            <div class="approval-warn">Approving authorizes auto-resume only if the secret is verified gone from the daemon-observable DOM (success and absence checks pass). If not, blind mode stays on.</div>
             <div class="approval-actions">
               <button class="ap-btn ap-deny">Deny</button>
               <button class="ap-btn ap-approve">Approve</button>
@@ -1865,7 +1849,7 @@
         </div>
       </div>
 
-      <!-- Scene 9: terminal centered — doctor + summary -->
+      <!-- Scene 9: terminal centered — status + summary -->
       <div class="scene-stage" data-scene="9" data-layout="center">
         <div class="scene-caption">scene 09 — all green · the loop closes</div>
         <div class="win term" style="width:680px">
@@ -1878,7 +1862,7 @@
               <div class="line assistant"><span>Injected and submitted. <span class="em">absence_proof: passed</span>. Observation auto-resumed.</span></div>
             </div>
             <div class="group">
-              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle doctor)</span></div>
+              <div class="line tool-call"><span class="glyph">⏺</span><span class="tname">Bash</span><span class="args">(secret-shuttle status)</span></div>
               <div class="line tool-result"><span class="glyph">⎿</span><span class="dim">  daemon:           </span><span class="ok">running (pid 8421)</span></div>
               <div class="line tool-result" style="padding-left:14px"><span class="dim">  vault:            </span><span class="ok">unlocked</span></div>
               <div class="line tool-result" style="padding-left:14px"><span class="dim">  browser:          </span><span class="ok">ready (proxy active)</span></div>
@@ -1924,7 +1908,7 @@
         "Browser + marks",
         "Reveal-capture",
         "Inject-submit",
-        "Doctor + done",
+        "Status + done",
       ];
 
       // Default to the magic path (Scene 0). ?scene=N (0..TOTAL) deep-links a
