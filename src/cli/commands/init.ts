@@ -9,7 +9,8 @@ import { detectAgentRuntimes, type AgentRuntime } from "../agent-runtime-detect.
 import { agentInstallTarget, readBundledSkill } from "./agent.js";
 import { getSecretShuttleHome } from "../../shared/config.js";
 import { readMachineId } from "../../daemon/machine-id.js";
-import { deriveAutoAgentId } from "../../daemon/auth/agent-id.js";
+import { deriveAutoAgentId, resolveProjectScope } from "../../daemon/auth/agent-id.js";
+import { loadIdentityPerProject, writePerProjectIdentity } from "./identity-config.js";
 import { installAgentToken, type InstallResult } from "../init/agent-token-installers.js";
 
 interface HealthResponse {
@@ -171,6 +172,21 @@ async function installAgentSkills(cwd: string): Promise<AgentRuntime[]> {
   return detected;
 }
 
+/**
+ * Burst 7 §1 (Plan 5s). Resolve the per-project-identity opt-in. The flag
+ * (`init --per-project-identity`) forces opt-in for this run AND persists
+ * `identity.perProject: true` into secret-shuttle.config.json so subsequent
+ * runs are consistent. Without the flag, the config is canonical. Exported for
+ * unit tests.
+ */
+export async function resolvePerProjectOptIn(args: { cwd: string; flag: boolean }): Promise<boolean> {
+  if (args.flag) {
+    await writePerProjectIdentity(args.cwd);
+    return true;
+  }
+  return await loadIdentityPerProject(args.cwd);
+}
+
 export function initCommand(): Command {
   return new Command("init")
     .description(
@@ -178,7 +194,11 @@ export function initCommand(): Command {
     )
     .option("--no-keychain", "Skip OS keychain enrollment (passphrase unlock only).")
     .option("--no-agent-install", "Skip detecting + installing agent skill files.")
-    .action(async (options: { keychain?: boolean; agentInstall?: boolean }) => {
+    .option(
+      "--per-project-identity",
+      "Derive a per-project agent id (hashes the git-repo-root path into the id).",
+    )
+    .action(async (options: { keychain?: boolean; agentInstall?: boolean; perProjectIdentity?: boolean }) => {
       // Step 1: Ensure daemon is running (spawn if absent).
       const { daemonSpawned, port } = await ensureDaemonRunning();
 
@@ -230,12 +250,26 @@ export function initCommand(): Command {
         hint: string | null;
       }> = [];
       const nextActions: string[] = [];
+      // Burst 7 §1 (Plan 5s). Resolve the per-project-identity opt-in once,
+      // before the mint loop. The flag forces it AND persists the opt-in;
+      // otherwise the config is canonical. When opted in, hash the git-repo-root
+      // path into each agent id (3-arg derivation); when opted out, the
+      // byte-identical 2-arg path keeps existing users' ids unchanged.
+      const perProjectIdentityFlag: boolean = options.perProjectIdentity === true;
+      const perProjectIdentity = await resolvePerProjectOptIn({
+        cwd: process.cwd(),
+        flag: perProjectIdentityFlag,
+      });
+      const projectScope = perProjectIdentity ? resolveProjectScope(process.cwd()) : undefined;
       if (runtimes.length > 0) {
         const machineId = await readMachineId(getSecretShuttleHome());
         if (machineId !== null) {
           for (const runtime of runtimes) {
             try {
-              const agentId = deriveAutoAgentId(runtime, machineId);
+              const agentId =
+                projectScope !== undefined
+                  ? deriveAutoAgentId(runtime, machineId, projectScope)
+                  : deriveAutoAgentId(runtime, machineId);
               const { token } = await daemonRequest<{ token: string; agent_id: string }>(
                 "POST",
                 "/v1/tokens/mint",
@@ -314,6 +348,15 @@ Examples:
 
   # Skip agent skill install:
   secret-shuttle init --no-agent-install
+
+  # Derive a per-project agent id (hashes the git-repo-root path into the id):
+  secret-shuttle init --per-project-identity
+
+--per-project-identity
+  Derive a per-project agent id (hashes the git-repo-root path into the id).
+  One git repo = one trust domain; sub-projects share an id. Moving the
+  project dir re-derives the id on the next \`init\` and orphans prior
+  sessions/grants for that project.
 `,
     );
 }
