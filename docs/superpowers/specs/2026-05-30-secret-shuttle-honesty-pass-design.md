@@ -80,8 +80,11 @@ as `npx secret-shuttle init`; the absence-proof claim is DOM-scoped.
 ### Part 2 — README fixes (`README.md`)
 
 - **"30-Second Install"** — fix the Touch ID over-promise. First run creates the
-  passphrase in a local window; Touch ID applies to *subsequent* unlocks once
-  keychain is enrolled. (Wording, not a list change.)
+  passphrase in a local window; Touch ID is not a first-run prompt but how
+  *subsequent* unlocks work once the keychain is enrolled. `init` enrols the
+  keychain by default when it creates the vault (`--no-keychain` opts out;
+  `keychain enable` does it later), so the wording must not imply enrollment is a
+  separate manual step. (Wording, not a list change.)
 - **"What Works Today (0.4.0)"** — add the shipped-but-unlisted verbs:
   - OS-keychain key storage (`keychain enable|disable|status`).
   - `secrets rotate` — generates a new ref and marks the old one `rotating`;
@@ -146,15 +149,32 @@ tree (walking subcommands until it hits an option/argument token, i.e. a token
 starting with `-` or one that no longer matches a registered subcommand). The
 invocation is valid only if the consumed prefix resolves to a real command/leaf.
 Once the walk stops at the resolved leaf command, the guard recognizes the
-remaining tokens by inspecting that command's Commander metadata: tokens starting
-with `-` are options, and any other trailing token is checked against the
-resolved command's declared positional arguments (its `registeredArguments` /
-`.usage()` arg list, including variadic args). A trailing token that matches a
-declared positional argument is a **valid argument** (so `agent install claude`,
-`template run vercel-env-add`, and `secrets delete ss://...` pass); only a
-trailing token that is neither a known subcommand, an option, nor an accepted
-positional argument for the resolved command means the command path is invalid
-and the test fails.
+remaining tokens by inspecting that command's Commander metadata, tightly enough
+to actually catch drift (a permissive "any option-looking token + any trailing
+token when the command has ≥1 positional" rule would silently pass invalid copy):
+- **Option tokens** (starting with `-`) are validated by name against the resolved
+  command's registered options (long/short). `--help`/`-h` are always allowed, and
+  any option is accepted when the command opts into `allowUnknownOption()` (e.g.
+  the `bootstrap` stub). A value-bearing option (`--flag <value>`) consumes the
+  following token as its value so the value is not miscounted as a positional.
+- **Trailing non-option tokens** are checked against the resolved command's
+  declared positional **arity** (`registeredArguments`): a command with N
+  non-variadic positionals accepts at most N, a variadic positional soaks up the
+  rest, and a command with zero positionals accepts none. So `agent install
+  claude`, `template run vercel-env-add`, and `secrets delete ss://...` pass (one
+  declared positional, one supplied), while an extra positional or an unknown
+  option fails.
+- **`help <command…>` is special**: its variadic `[command...]` positional is
+  itself a command path, so the trailing tokens are re-resolved as a path from the
+  program root rather than waved through as positional values. This stops a removed
+  verb laundered through `help` (e.g. `secret-shuttle help doctor`) from silently
+  passing.
+A trailing token that is a valid argument for the resolved command keeps the path
+valid; only a token that is neither a known subcommand, a registered option, nor
+an accepted positional (within arity) means the command path is invalid and the
+test fails. Negative coverage must include at least: extra positionals
+(`status extra-arg`), an unknown option, and a stale command name passed through
+`help`.
 
 **Design note — why registry-backed, not a hardcoded list:** a hardcoded allow
 list is itself a drift surface (it goes stale on the next rename). Reading the
@@ -176,12 +196,15 @@ The goal is a single source of truth, not a second hand-maintained list.
 
 **Acceptance for Part 3:** the extended test fails if the demo references a
 removed/moved verb, any `secret-shuttle …` invocation whose full command path is
-not registered (e.g. `secrets generate`, `agent setup claude`), or the removed
-Scene 3 install ritual (`npm install -g secret-shuttle` / `secret-shuttle daemon
-start` / `secret-shuttle unlock`); it passes on the corrected demo, including
-Scene 3's retained passphrase-window copy "Create & unlock". The registry it
-validates against is sourced from a side-effect-free `buildProgram()` shared with
-the CLI entrypoint.
+not registered (e.g. `secrets generate`, `agent setup claude`), an invocation with
+an unknown option or an extra positional beyond the resolved command's arity, a
+removed verb laundered through `help` (e.g. `help doctor`), or the removed Scene 3
+install ritual (`npm install -g secret-shuttle` / `secret-shuttle daemon start` /
+`secret-shuttle unlock`); it passes on the corrected demo, including Scene 3's
+retained passphrase-window copy "Create & unlock". The resolver's negative
+coverage explicitly includes extra positionals, an unknown option, and a stale
+command name via `help`. The registry it validates against is sourced from a
+side-effect-free `buildProgram()` shared with the CLI entrypoint.
 
 ## Risks / edge cases
 
@@ -189,10 +212,12 @@ the CLI entrypoint.
   `secret-shuttle` in narrative sentences, not only fenced commands. The extractor
   must match the `secret-shuttle …` shape conservatively (tokens = subsequent
   words that look like command/option/argument tokens) and tolerate prose. It then
-  resolves the longest registered command path (per the Part 3 command-path note);
-  subcommand forms like `secrets set`, `template run`, `browser mark` are
+  resolves the longest registered command path (per the Part 3 command-path note)
+  and validates the remaining tokens against the leaf command's option/positional
+  metadata; subcommand forms like `secrets set`, `template run`, `browser mark` are
   validated all the way to the leaf, not just on their first token — which is what
-  catches invalid pairings like `secrets generate` or `agent setup claude`.
+  catches invalid pairings like `secrets generate` or `agent setup claude`, an
+  unknown option, an extra positional, or a removed verb passed through `help`.
 - **`internal`-namespaced and hyphenated verbs.** `secret-shuttle internal …`,
   `secret-shuttle inject-submit`, and `secret-shuttle reveal-capture` are all
   registered commands and must **pass** (validated through the registry, not
