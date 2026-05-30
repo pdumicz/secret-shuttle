@@ -9,7 +9,7 @@
  * the key into an existing config, preserving every other key (notably
  * `infer.*`) so the `init --per-project-identity` flag never clobbers it.
  */
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const CONFIG_FILE = "secret-shuttle.config.json";
@@ -59,5 +59,10 @@ export async function writePerProjectIdentity(cwd: string): Promise<void> {
       : {};
   identity["perProject"] = true;
   root["identity"] = identity;
-  await writeFile(path, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+  // Atomic write (temp-file + rename) mirroring machine-id.ts / root-token.ts:
+  // a crash mid-write must never truncate a user-editable config we re-read on
+  // every `init`. rename(2) is atomic within a filesystem.
+  const tmp = `${path}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+  await rename(tmp, path);
 }

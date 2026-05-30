@@ -909,3 +909,23 @@ test("init: no flag + config perProject:true ⇒ opt-in (config is canonical, no
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("init --per-project-identity: persists the opt-in even with zero detected runtimes (records intent for a later init)", async () => {
+  // The opt-in is resolved once BEFORE the per-runtime mint loop, so the flag
+  // records intent into the canonical config even when no agent runtime is
+  // present yet (no token is minted). A later init — after the user adds
+  // .claude/ etc. — then honors the persisted opt-in.
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ss-init-ppi-noruntime-"));
+  try {
+    // No .claude/.cursor/etc. in this bare dir ⇒ zero runtimes.
+    const optedIn = await resolvePerProjectOptIn({ cwd: dir, flag: true });
+    assert.equal(optedIn, true, "flag opts in regardless of runtime detection");
+    assert.equal(
+      await loadIdentityPerProject(dir),
+      true,
+      "opt-in persisted to config even though no token was minted",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
