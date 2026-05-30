@@ -72,8 +72,10 @@ const REMOVED_TOKENS: Array<{ token: RegExp; what: string }> = [
   // It is in neither MOVED_TOKENS nor caught by the registry path-scan in its BARE
   // prose form (e.g. `<code>doctor</code> first`), since that scanner only sees
   // `secret-shuttle …` invocations. A standalone-word match keeps the prose honest
-  // without snagging substrings like "doctored".
-  { token: /\bdoctor\b/, what: "removed `doctor` verb (use `secret-shuttle status`)" },
+  // without snagging substrings like "doctored". Case-insensitive (`/i`) so the
+  // sentence-initial capitalized form (`Doctor reports …`) — exactly the variant the
+  // prior demo text used — is also caught, not just the lowercased `doctor first`.
+  { token: /\bdoctor\b/i, what: "removed `doctor` verb (use `secret-shuttle status`)" },
 ];
 
 // Burst 6 §1.8. Verbs that MOVED to the hidden `internal` namespace. Bare
