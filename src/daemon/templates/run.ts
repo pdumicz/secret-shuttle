@@ -156,41 +156,46 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
     );
   }
 
-  // Burst 7 §2 (5q): own copy of the resolved bytes for the env-file write. We
-  // must NOT scrub the route's SecretValue (it owns/disposes it in its own
-  // finally), so copy here. writeSecretEnvFile zeroes the *concatenated* buffer
-  // it builds internally but deliberately leaves THIS caller-owned `value`
-  // intact (its contract: "the caller owns the passed-in Buffer"), so the copy
-  // would otherwise survive as plaintext until GC. We own it → the OUTER finally
-  // below zeroes it on EVERY exit path (success, a writeSecretEnvFile throw, and
-  // an expand/spawn throw), so no owned plaintext copy ever lingers in the heap.
-  const secretEnvBuf = Buffer.from(input.secret.bytes());
-  try {
-    const { path: envFilePath } = writeSecretEnvFile({
-      name: envVarName,
-      value: secretEnvBuf,
-      tmpDir: input.tmpDir,
-    });
+  // Burst 7 §2 (5q): own copy of the resolved bytes for the env-file write, held
+  // for the NARROWEST possible lifetime. writeSecretEnvFile is synchronous and
+  // copies the bytes into the 0600 env file (the child's delivery channel), so
+  // this owned copy is dead the instant the call returns — scrub it in the IIFE
+  // finally right here, rather than holding it live across the (network-bound,
+  // multi-second) child run below. writeSecretEnvFile zeroes the *concatenated*
+  // buffer it builds internally but deliberately leaves THIS caller-owned
+  // `value` intact (its contract: "the caller owns the passed-in Buffer"), so
+  // scrubbing the copy is ours; the finally fires on success AND on a
+  // writeSecretEnvFile throw.
+  const envFilePath = (() => {
+    const secretEnvBuf = Buffer.from(input.secret.bytes());
     try {
-      // Substitute the env-file path placeholder BEFORE param-expansion so that
-      // PARAM_RE (which matches [a-z_][a-z0-9_]*) does not try to look up
-      // "__env_file_path__" as a user-supplied param.
-      const rawValueArg = input.template.value_arg_template.replace(ENV_FILE_PLACEHOLDER, envFilePath);
-      const valueArg = expandParam(rawValueArg);
-      const finalArgs = [...baseExpandedArgs, ...additionalArgs, valueArg];
-      return await new Promise<TemplateRunResult>((resolve, reject) => {
-        const child = spawn(resolvedBinary, finalArgs, {
-          shell: false,
-          stdio: ["ignore", "ignore", "ignore"],
-          env: buildChildEnv(),
-        });
-        child.on("error", (err) => reject(new ShuttleError("template_spawn_failed", err.message)));
-        child.on("close", (code) => resolve({ template_id: input.template.id, exit_code: code ?? 1 }));
-      });
+      return writeSecretEnvFile({
+        name: envVarName,
+        value: secretEnvBuf,
+        tmpDir: input.tmpDir,
+      }).path;
     } finally {
-      unlinkSecretEnvFile(envFilePath);
+      secretEnvBuf.fill(0);
     }
+  })();
+
+  try {
+    // Substitute the env-file path placeholder BEFORE param-expansion so that
+    // PARAM_RE (which matches [a-z_][a-z0-9_]*) does not try to look up
+    // "__env_file_path__" as a user-supplied param.
+    const rawValueArg = input.template.value_arg_template.replace(ENV_FILE_PLACEHOLDER, envFilePath);
+    const valueArg = expandParam(rawValueArg);
+    const finalArgs = [...baseExpandedArgs, ...additionalArgs, valueArg];
+    return await new Promise<TemplateRunResult>((resolve, reject) => {
+      const child = spawn(resolvedBinary, finalArgs, {
+        shell: false,
+        stdio: ["ignore", "ignore", "ignore"],
+        env: buildChildEnv(),
+      });
+      child.on("error", (err) => reject(new ShuttleError("template_spawn_failed", err.message)));
+      child.on("close", (code) => resolve({ template_id: input.template.id, exit_code: code ?? 1 }));
+    });
   } finally {
-    secretEnvBuf.fill(0);
+    unlinkSecretEnvFile(envFilePath);
   }
 }
