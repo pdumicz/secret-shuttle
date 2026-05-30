@@ -6,6 +6,41 @@ import test from "node:test";
 import { DaemonServer } from "../../server.js";
 import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
+import { SecretValue } from "../../../vault/secret-value.js";
+
+/**
+ * Burst 7 §2 (5q). Spy on SecretValue.fromUtf8 so a test can observe every
+ * SecretValue the import route wraps from a request-body entry value, and
+ * whether each was disposed. The route imports SecretValue from the same
+ * module, so patching the static factory on the class object intercepts its
+ * usage. Each produced instance's dispose() is wrapped to record the call (the
+ * real dispose still runs, so use-after-dispose semantics are unchanged).
+ * Returns { produced, restore } — restore() MUST run in finally.
+ */
+function spySecretValueFactory(): {
+  produced: { sv: SecretValue; disposed: boolean }[];
+  restore: () => void;
+} {
+  const produced: { sv: SecretValue; disposed: boolean }[] = [];
+  const original = SecretValue.fromUtf8;
+  SecretValue.fromUtf8 = (s: string): SecretValue => {
+    const sv = original.call(SecretValue, s);
+    const entry = { sv, disposed: false };
+    const realDispose = sv.dispose.bind(sv);
+    sv.dispose = (): void => {
+      entry.disposed = true;
+      realDispose();
+    };
+    produced.push(entry);
+    return sv;
+  };
+  return {
+    produced,
+    restore: () => {
+      SecretValue.fromUtf8 = original;
+    },
+  };
+}
 
 async function withDaemon<T>(
   fn: (ctx: { port: number; token: string; services: DaemonServices; home: string }) => Promise<T>,
@@ -271,4 +306,130 @@ test("import: malformed entries (missing value) → missing_param", async () => 
     assert.equal(r.status, 400);
     assert.equal((r.body as { error: { code: string } }).error.code, "missing_param");
   });
+});
+
+// ---------------------------------------------------------------------------
+// Burst 7 §2 (5q). The import route wraps every entry value into a SecretValue
+// at the parse loop. Each not-yet-stored SecretValue MUST be disposed on the
+// approval-DENIED path, the SKIP-existing path, the secret_exists/error path,
+// and on a mid-parse-loop throw (already-wrapped entries scrubbed even though
+// the throw fires BEFORE the route-level try). The vault OWNS + disposes any
+// value it consumes; the route disposes the rest. (Spec §2 Tests: "import
+// denial/skip/error paths dispose + clear".)
+// ---------------------------------------------------------------------------
+
+test("import: production approval-denied disposes every wrapped SecretValue", async () => {
+  const spy = spySecretValueFactory();
+  try {
+    await withDaemon(async (ctx) => {
+      await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+      // Production + wait_for_approval:false → denied from requireApprovals
+      // BEFORE the entry loop, so every wrapped SecretValue is unconsumed.
+      const r = await call(ctx, "POST", "/v1/secrets/import", {
+        entries: [
+          { key: "PROD_A", value: "prod-a" },
+          { key: "PROD_B", value: "prod-b" },
+        ],
+        source: "local",
+        environment: "production",
+        wait_for_approval: false,
+      });
+      assert.equal(r.status, 400);
+      assert.equal((r.body as { error: { code: string } }).error.code, "approval_required");
+    });
+    assert.equal(spy.produced.length, 2, "both entries wrapped a SecretValue");
+    for (const { disposed } of spy.produced) {
+      assert.ok(disposed, "every wrapped SecretValue disposed on the approval-denied path");
+    }
+  } finally {
+    spy.restore();
+  }
+});
+
+test("import: skip_existing disposes the skipped entry's SecretValue", async () => {
+  const spy = spySecretValueFactory();
+  try {
+    await withDaemon(async (ctx) => {
+      await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+      // Seed an existing ref (generate wraps its own SecretValue internally).
+      await call(ctx, "POST", "/v1/secrets/generate", {
+        name: "ALREADY", environment: "development", source: "local", allowed_domains: ["example.com"],
+      });
+      const beforeImport = spy.produced.length;
+      const r = await call(ctx, "POST", "/v1/secrets/import", {
+        entries: [
+          { key: "ALREADY", value: "skip-me" },
+          { key: "FRESH", value: "store-me" },
+        ],
+        source: "local",
+        environment: "development",
+        skip_existing: true,
+      });
+      assert.equal(r.status, 200, `expected 200, got ${r.status} body=${JSON.stringify(r.body)}`);
+      // The two import entries each wrapped a SecretValue after the seed.
+      const importWraps = spy.produced.slice(beforeImport);
+      assert.equal(importWraps.length, 2, "both import entries wrapped a SecretValue");
+      for (const { disposed } of importWraps) {
+        assert.ok(disposed, "skipped entry disposed by the route, stored entry disposed by the vault");
+      }
+    });
+  } finally {
+    spy.restore();
+  }
+});
+
+test("import: secret_exists (dup without force) disposes every wrapped SecretValue", async () => {
+  const spy = spySecretValueFactory();
+  try {
+    await withDaemon(async (ctx) => {
+      await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+      await call(ctx, "POST", "/v1/secrets/generate", {
+        name: "DUP", environment: "development", source: "local", allowed_domains: ["example.com"],
+      });
+      const beforeImport = spy.produced.length;
+      const r = await call(ctx, "POST", "/v1/secrets/import", {
+        entries: [
+          { key: "DUP", value: "collide" },
+          { key: "TRAILING", value: "never-reached" },
+        ],
+        source: "local",
+        environment: "development",
+      });
+      assert.equal(r.status, 400);
+      assert.equal((r.body as { error: { code: string } }).error.code, "secret_exists");
+      const importWraps = spy.produced.slice(beforeImport);
+      assert.equal(importWraps.length, 2, "both import entries wrapped a SecretValue before the throw");
+      for (const { disposed } of importWraps) {
+        assert.ok(disposed, "the dup entry + the trailing unconsumed entry both disposed on the secret_exists throw");
+      }
+    });
+  } finally {
+    spy.restore();
+  }
+});
+
+test("import: mid-parse-loop throw disposes already-wrapped SecretValues", async () => {
+  const spy = spySecretValueFactory();
+  try {
+    await withDaemon(async (ctx) => {
+      await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+      // First entry is valid (wraps a live SecretValue); the second is malformed
+      // (missing value) so the parse/wrap loop throws AFTER the first wrap, BEFORE
+      // the route-level try. The guard try/catch must dispose the first entry.
+      const r = await call(ctx, "POST", "/v1/secrets/import", {
+        entries: [
+          { key: "GOOD", value: "good-val" },
+          { key: "BAD" }, // missing value → throws mid-loop
+        ],
+        source: "local",
+        environment: "development",
+      });
+      assert.equal(r.status, 400);
+      assert.equal((r.body as { error: { code: string } }).error.code, "missing_param");
+      assert.equal(spy.produced.length, 1, "only the first (valid) entry wrapped a SecretValue before the throw");
+      assert.ok(spy.produced[0]!.disposed, "the already-wrapped entry disposed by the parse-loop guard catch");
+    });
+  } finally {
+    spy.restore();
+  }
 });

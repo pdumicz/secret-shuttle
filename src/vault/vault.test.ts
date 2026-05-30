@@ -27,7 +27,7 @@ test("vault stores encrypted secrets and returns metadata only", async () => {
       name: "STRIPE_WEBHOOK_SECRET",
       environment: "production",
       source: "stripe",
-      value: "whsec_test_secret_value_123456789",
+      value: SecretValue.fromUtf8("whsec_test_secret_value_123456789"),
       allowedDomains: ["dashboard.stripe.com", "vercel.com"],
     });
 
@@ -150,7 +150,7 @@ async function withVault<T>(
         name: s.name,
         environment: s.environment,
         source: s.source,
-        value: s.value,
+        value: SecretValue.fromUtf8(s.value),
         allowedDomains: ["example.com"],
       });
     }
@@ -299,8 +299,11 @@ test("markRotating throws secret_not_found for a soft-deleted ref (soft-delete i
   );
 });
 
-test("generate produces a SecretRecord with a value and is callable without going through approvals", async () => {
+test("generate returns AgentSecretMetadata (no value) and is callable without going through approvals", async () => {
   await withVault([], async (vault) => {
+    // Burst 7 §2 (5q): generate no longer reads the stored record back — it
+    // returns the upsertSecret metadata directly, so no string-valued
+    // SecretRecord crosses the vault boundary.
     const rec = await vault.generate({
       name: "GEN_NEW",
       environment: "development",
@@ -309,8 +312,8 @@ test("generate produces a SecretRecord with a value and is callable without goin
       allowed_domains: ["example.com"],
     });
     assert.equal(rec.ref, "ss://stripe/dev/GEN_NEW");
-    assert.equal(typeof rec.value, "string");
-    assert.ok(rec.value.length > 0);
+    assert.equal((rec as unknown as Record<string, unknown>)["value"], undefined, "no plaintext on the generate return");
+    assert.equal(rec.value_visible_to_agent, false);
     assert.equal(rec.environment, "development");
   });
 });
@@ -349,7 +352,8 @@ async function setUpTestVault(opts: {
   const vault = new Vault(() => Buffer.from(key));
   await vault.ensureInitialized();
   for (const s of opts.secrets) {
-    await vault.upsertSecret({ ...s, allowedDomains: ["example.com"] });
+    const { value, ...rest } = s;
+    await vault.upsertSecret({ ...rest, value: SecretValue.fromUtf8(value), allowedDomains: ["example.com"] });
   }
   return {
     vault,
@@ -450,7 +454,8 @@ async function freshVaultWithSecret(s: {
   const key = randomBytes(32);
   const vault = new Vault(() => Buffer.from(key));
   await vault.ensureInitialized();
-  await vault.upsertSecret({ ...s, allowedDomains: ["example.com"] });
+  const { value, ...rest } = s;
+  await vault.upsertSecret({ ...rest, value: SecretValue.fromUtf8(value), allowedDomains: ["example.com"] });
   return {
     vault,
     cleanup: async () => {
@@ -510,6 +515,83 @@ test("assertSecretActionAllowed accepts both a ResolvedSecret and AgentSecretMet
     assert.doesNotThrow(() => assertSecretActionAllowed(meta, "inject_into_field"));
     assert.doesNotThrow(() => assertSecretActionAllowed(resolved, "inject_into_field"));
     resolved.value.dispose();
+  } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Burst 7 §2 (5q) write path: UpsertSecretInput.value is a SecretValue that the
+// vault OWNS — it scrubs the inbound value on EVERY exit (success, the
+// secret_exists pre-write throw, and read/write error), serializes the bytes
+// into the stored string (on-disk stays string), and Vault.generate returns
+// AgentSecretMetadata (no read-back, no stored string crossing the boundary).
+// ---------------------------------------------------------------------------
+
+/** Create a fresh ephemeral vault with NO seeded secret. Returns the Vault + a
+ *  cleanup() the caller must invoke in finally. (Burst 7 §2.6.) */
+async function freshVault(): Promise<{ vault: Vault; cleanup: () => Promise<void> }> {
+  const home = await mkdtemp(path.join(os.tmpdir(), "secret-shuttle-write-"));
+  const originalHome = process.env.SECRET_SHUTTLE_HOME;
+  process.env.SECRET_SHUTTLE_HOME = home;
+  const key = randomBytes(32);
+  const vault = new Vault(() => Buffer.from(key));
+  await vault.ensureInitialized();
+  return {
+    vault,
+    cleanup: async () => {
+      if (originalHome === undefined) delete process.env.SECRET_SHUTTLE_HOME;
+      else process.env.SECRET_SHUTTLE_HOME = originalHome;
+      await rm(home, { recursive: true, force: true });
+    },
+  };
+}
+
+test("upsertSecret disposes the inbound SecretValue on success", async () => {
+  const { vault, cleanup } = await freshVault();
+  try {
+    const sv = SecretValue.fromUtf8("inbound-secret");
+    await vault.upsertSecret({ name: "TOK", environment: "development", source: "local", value: sv, allowedDomains: [] });
+    assert.throws(() => sv.bytes(), /used after dispose/, "disposed after a successful write");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("upsertSecret disposes the inbound SecretValue on the secret_exists pre-write throw", async () => {
+  const { vault, cleanup } = await freshVault();
+  try {
+    await vault.upsertSecret({ name: "TOK", environment: "development", source: "local", value: SecretValue.fromUtf8("first"), allowedDomains: [] });
+    const dup = SecretValue.fromUtf8("dup");
+    await assert.rejects(
+      () => vault.upsertSecret({ name: "TOK", environment: "development", source: "local", value: dup, allowedDomains: [] }),
+      /already exists/,
+    );
+    assert.throws(() => dup.bytes(), /used after dispose/, "disposed even though the write threw before record build");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("stored record round-trips its real plaintext on disk (SecretValue did not corrupt serialization)", async () => {
+  const { vault, cleanup } = await freshVault();
+  try {
+    await vault.upsertSecret({ name: "TOK", environment: "development", source: "local", value: SecretValue.fromUtf8("real-bytes-on-disk"), allowedDomains: [] });
+    const resolved = await vault.resolveSecret("ss://local/dev/TOK");
+    assert.equal(resolved.value.bytes().toString("utf8"), "real-bytes-on-disk");
+    resolved.value.dispose();
+  } finally {
+    await cleanup();
+  }
+});
+
+test("Vault.generate returns AgentSecretMetadata (no value) and a valid ref", async () => {
+  const { vault, cleanup } = await freshVault();
+  try {
+    const meta = await vault.generate({ name: "GEN", environment: "development", source: "local", kind: "random_32_bytes", allowed_domains: [] });
+    assert.equal((meta as unknown as Record<string, unknown>)["value"], undefined, "no plaintext in the generate return");
+    assert.match(meta.ref, /^ss:\/\/local\/dev\/GEN$/);
+    assert.equal(meta.value_visible_to_agent, false);
   } finally {
     await cleanup();
   }

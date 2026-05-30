@@ -7,6 +7,7 @@ import { DaemonServer } from "../server.js";
 import { DaemonServices } from "../services.js";
 import { HubBroker, type HubEvent, type HubSubscriber } from "./hub-broker.js";
 import { registerRoutes } from "../api/router.js";
+import { SecretValue } from "../../vault/secret-value.js";
 
 interface E2ECtx {
   port: number;
@@ -214,7 +215,7 @@ test("e2e: production stdin op → hub surface → approve → child reads value
       source: "local",
       environment: "production",
       name: "PROD_STDIN",
-      value: "prod-secret-value",
+      value: SecretValue.fromUtf8("prod-secret-value"),
       allowedDomains: ["docker.io"],
       allowedActions: ["use_as_stdin"],
     });
@@ -334,7 +335,7 @@ test("hub e2e: combined production env+stdin --no-wait path surfaces both URLs (
       source: "local",
       environment: "production",
       name: "NW_ENV",
-      value: "nw-env-value",
+      value: SecretValue.fromUtf8("nw-env-value"),
       allowedDomains: ["docker.io"],
       allowedActions: ["use_as_stdin"],
     });
@@ -342,7 +343,7 @@ test("hub e2e: combined production env+stdin --no-wait path surfaces both URLs (
       source: "local",
       environment: "production",
       name: "NW_STDIN",
-      value: "nw-stdin-value",
+      value: SecretValue.fromUtf8("nw-stdin-value"),
       allowedDomains: ["docker.io"],
       allowedActions: ["use_as_stdin"],
     });
@@ -527,7 +528,7 @@ test("hub e2e: combined production env+stdin via sequential hub promotion (Plan 
       source: "local",
       environment: "production",
       name: "COMBINED_ENV",
-      value: "combined-env-value",
+      value: SecretValue.fromUtf8("combined-env-value"),
       allowedDomains: ["docker.io"],
       allowedActions: ["use_as_stdin"],
     });
@@ -535,7 +536,7 @@ test("hub e2e: combined production env+stdin via sequential hub promotion (Plan 
       source: "local",
       environment: "production",
       name: "COMBINED_STDIN",
-      value: "combined-stdin-value",
+      value: SecretValue.fromUtf8("combined-stdin-value"),
       allowedDomains: ["docker.io"],
       allowedActions: ["use_as_stdin"],
     });

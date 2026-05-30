@@ -7,6 +7,7 @@ import { DaemonServer } from "../server.js";
 import { DaemonServices } from "../services.js";
 import { registerRoutes } from "./router.js";
 import { DEFAULT_ACTIONS } from "../../vault/vault.js";
+import { SecretValue } from "../../vault/secret-value.js";
 
 async function withDaemon<T>(fn: (ctx: { port: number; services: DaemonServices }) => Promise<T>): Promise<T> {
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-gaa-"));
@@ -114,7 +115,7 @@ test("production force-rotate WITHOUT allowed_actions records the PRESERVED exis
     await call(port, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
     await services.vault.upsertSecret({
       name: "P2", environment: "production", source: "local",
-      value: "v1", allowedDomains: ["example.com"], allowedActions: ["inject_into_field"],
+      value: SecretValue.fromUtf8("v1"), allowedDomains: ["example.com"], allowedActions: ["inject_into_field"],
     });
     const g = await call(port, "POST", "/v1/secrets/generate", {
       name: "P2", environment: "production", source: "local",

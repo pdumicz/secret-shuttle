@@ -8,6 +8,7 @@ import { DaemonServices } from "../services.js";
 import { registerRoutes } from "./router.js";
 import { getShuttlePaths } from "../../shared/config.js";
 import { ShuttleError } from "../../shared/errors.js";
+import { SecretValue } from "../../vault/secret-value.js";
 import type { BrowserOps } from "../chrome/internal-ops.js";
 
 function stub(over: Partial<BrowserOps> = {}): BrowserOps {
@@ -68,7 +69,7 @@ const SECRET = "whsec_must_never_leak_value";
 async function setup(services: DaemonServices, port: number, opts: { allowedActions?: string[] } = {}) {
   await call(port, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
   await services.vault.upsertSecret({
-    name: "WH", environment: "production", source: "stripe", value: SECRET,
+    name: "WH", environment: "production", source: "stripe", value: SecretValue.fromUtf8(SECRET),
     allowedDomains: ["vercel.com"],
     ...(opts.allowedActions !== undefined ? { allowedActions: opts.allowedActions as never } : {}),
   });

@@ -10,6 +10,7 @@ import {
 } from "../chrome/capture-target-ops.js";
 import { disableObservationDomains } from "../chrome/internal-ops.js";
 import { canonicalEnvironment } from "../../shared/refs.js";
+import { SecretValue } from "../../vault/secret-value.js";
 import type { BootstrapStore, BatchState, PlanEntry, ResolvedDestination } from "./store.js";
 import type { DaemonServices } from "../services.js";
 import type { BootstrapAuthority } from "./authority.js";
@@ -700,7 +701,9 @@ async function runCaptureStep(
       name: entry.secret,
       environment: refEnvFromRef(entry.ref),
       source: refSourceFromRef(entry.ref),
-      value: captured.value,
+      // Bootstrap capture string boundary — wrap into a SecretValue the vault
+      // OWNS + disposes (Burst 7 §2 / 5q).
+      value: SecretValue.fromUtf8(captured.value),
       allowedDomains: entry.destinations.map((d) => d.domain),
       ...(entry.force === true ? { force: true } : {}),
     });

@@ -13,6 +13,7 @@ import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { DEFAULT_ACTIONS } from "../../../vault/vault.js";
 import { ALL_SECRET_ACTIONS, type SecretAction } from "../../../vault/types.js";
 import type { ResolvedSecret } from "../../../vault/types.js";
+import { SecretValue } from "../../../vault/secret-value.js";
 import { asObject, optApprovalIds, reqString } from "../validate.js";
 import { disableObservationDomains } from "../../chrome/internal-ops.js";
 import type { InjectResult } from "../../chrome/internal-ops.js";
@@ -204,12 +205,14 @@ export async function generateSecretCore(
       grant = grants[0]!;
     }
 
-    const value = generateSecretValue(input.kind ?? "random_32_bytes");
+    // Burst 7 §2 (5q): generateSecretValue returns an ENCODED string — wrap via
+    // fromUtf8 so the stored value + fingerprint are byte-identical to pre-5q.
+    // upsertSecret OWNS + disposes the SecretValue in its finally.
     const meta = await services.vault.upsertSecret({
       name: input.name,
       environment: env,
       source: input.source ?? "local",
-      value,
+      value: SecretValue.fromUtf8(generateSecretValue(input.kind ?? "random_32_bytes")),
       ...(input.description !== undefined ? { description: input.description } : {}),
       allowedDomains: effectiveAllowed,
       allowedActions: effectiveActions,
@@ -360,7 +363,9 @@ export function registerSecrets(server: DaemonServer, services: DaemonServices, 
         name: b.name,
         environment: env,
         source: b.source,
-        value: capture.value,
+        // Accepted capture string boundary — wrap into a SecretValue the vault
+        // OWNS + disposes (Burst 7 §2 / 5q).
+        value: SecretValue.fromUtf8(capture.value),
         ...(b.description !== undefined ? { description: b.description } : {}),
         allowedDomains: effectiveAllowed,
         ...(b.force !== undefined ? { force: b.force } : {}),

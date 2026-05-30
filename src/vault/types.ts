@@ -98,7 +98,7 @@ export interface UpsertSecretInput {
   name: string;
   environment: string;
   source: string;
-  value: string;
+  value: SecretValue;
   description?: string;
   allowedDomains: string[];
   allowedActions?: SecretAction[];

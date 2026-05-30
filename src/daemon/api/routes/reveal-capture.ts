@@ -7,6 +7,7 @@ import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { canonicalEnvironment, buildSecretRef } from "../../../shared/refs.js";
+import { SecretValue } from "../../../vault/secret-value.js";
 import { asObject, optApprovalIds, optString, reqString } from "../validate.js";
 import { blankAllPages, disableObservationDomains } from "../../chrome/internal-ops.js";
 import type { Baseline, BackendNodeRef } from "../../chrome/internal-ops.js";
@@ -419,24 +420,44 @@ export async function revealCaptureCore(
 
       // Store the captured value (it never leaves the daemon). Only on a
       // non-empty capture; an empty value is a fail-closed outcome.
+      //
+      // Burst 7 §2 (5q): proof-before-upsert. On the hideDone happy path the
+      // absence proof runs FIRST on a single owned SecretValue, then the SAME
+      // SecretValue is handed to upsertSecret LAST (the vault takes ownership +
+      // disposes it in its finally — .bytes() above already ran, so no
+      // use-after-dispose). The !hideDone branch preserves the prior
+      // fail-closed-but-persisted store (no proof; a separate owned SecretValue
+      // the vault disposes) so `meta` is still populated for the fail-closed
+      // audit. The upsert is NOT gated on hideDone — only on a non-empty capture.
       let meta: { ref: string; fingerprint: string } | undefined;
-      if (capturedValue !== "") {
+      let proofPassed = false;
+      if (capturedValue !== "" && hideDone) {
+        const sv = SecretValue.fromUtf8(capturedValue);
+        try {
+          // Prove absence FIRST (browser/CDP string-boundary transient).
+          proofPassed = (await browser.proveAbsence(sv.bytes().toString("utf8"))).passed;
+        } catch {
+          proofPassed = false;
+        }
+        // Hand the SAME SecretValue to the vault LAST — it takes ownership and
+        // disposes in its finally.
         meta = await services.vault.upsertSecret({
-          name, environment: env, source, value: capturedValue,
+          name, environment: env, source, value: sv,
           allowedDomains: effectiveAllowed,
           ...(input.description !== undefined ? { description: input.description } : {}),
           ...(input.force !== undefined ? { force: input.force } : {}),
         });
-      }
-
-      // Absence proof for the captured value (REUSED Phase-2 hardened proof).
-      let proofPassed = false;
-      if (capturedValue !== "" && hideDone) {
-        try {
-          proofPassed = (await browser.proveAbsence(capturedValue)).passed;
-        } catch {
-          proofPassed = false;
-        }
+      } else if (capturedValue !== "" && !hideDone) {
+        // Fail-closed-but-persisted: a non-empty capture is stored even when the
+        // page could not be neutralized (hideDone false), with NO absence proof
+        // (proofPassed stays false → the success-return gate below fails closed).
+        // A separate owned SecretValue the vault disposes.
+        meta = await services.vault.upsertSecret({
+          name, environment: env, source, value: SecretValue.fromUtf8(capturedValue),
+          allowedDomains: effectiveAllowed,
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.force !== undefined ? { force: input.force } : {}),
+        });
       }
 
       if (capturedValue !== "" && hideDone && proofPassed && meta !== undefined) {

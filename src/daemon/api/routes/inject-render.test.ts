@@ -6,6 +6,7 @@ import path from "node:path";
 import { DaemonServer } from "../../server.js";
 import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
+import { SecretValue } from "../../../vault/secret-value.js";
 
 interface Ctx {
   port: number;
@@ -79,7 +80,7 @@ async function seedSecret(
     source: opts.source,
     environment: opts.environment,
     name: opts.name,
-    value: opts.value,
+    value: SecretValue.fromUtf8(opts.value),
     allowedDomains: [],
     ...(opts.allowedActions !== undefined ? { allowedActions: opts.allowedActions as never } : {}),
   });

@@ -60,50 +60,62 @@ export class Vault {
   }
 
   async upsertSecret(input: UpsertSecretInput): Promise<AgentSecretMetadata> {
-    const plaintext = await this.read();
-    const environment = canonicalEnvironment(input.environment);
-    const ref = buildSecretRef(input.source, environment, input.name);
-    const existing = plaintext.secrets.find((secret) => secret.ref === ref);
+    // Burst 7 §2 (5q): the vault OWNS the handed-off SecretValue. Scrub it in a
+    // `finally` so the inbound plaintext is zeroed on EVERY exit — the success
+    // path, the pre-write `secret_exists` throw (which fires before `record` is
+    // built), and any read()/write() error.
+    try {
+      const plaintext = await this.read();
+      const environment = canonicalEnvironment(input.environment);
+      const ref = buildSecretRef(input.source, environment, input.name);
+      const existing = plaintext.secrets.find((secret) => secret.ref === ref);
 
-    if (existing !== undefined && input.force !== true) {
-      throw new ShuttleError(
-        "secret_exists",
-        `Secret ${ref} already exists. Re-run with --force to overwrite it.`,
-      );
+      if (existing !== undefined && input.force !== true) {
+        throw new ShuttleError(
+          "secret_exists",
+          `Secret ${ref} already exists. Re-run with --force to overwrite it.`,
+        );
+      }
+
+      const now = new Date().toISOString();
+      const record: SecretRecord = {
+        id: existing?.id ?? `sec_${randomUUID().replaceAll("-", "")}`,
+        ref,
+        name: input.name,
+        environment,
+        source: input.source.toLowerCase(),
+        created_at: existing?.created_at ?? now,
+        updated_at: now,
+        last_used_at: existing?.last_used_at ?? null,
+        fingerprint: fingerprintSecret(input.value.bytes(), Buffer.from(plaintext.fingerprint_key as string, "base64")),
+        allowed_domains: normalizeDomains(input.allowedDomains),
+        // Explicit caller-supplied actions win. Otherwise: a brand-new record gets
+        // the extended default set; an OVERWRITE preserves the prior record's
+        // allowed_actions so a force-rotate never silently widens scope (§4.4).
+        allowed_actions:
+          input.allowedActions ?? (existing !== undefined ? [...existing.allowed_actions] : [...DEFAULT_ACTIONS]),
+        requires_approval: input.requiresApproval ?? environment === "production",
+        classification: environment === "production" ? "production_secret" : "secret",
+        // Tier A: the stored record stays a string (on-disk format unchanged).
+        // The bytes→string conversion is the bounded encrypt-boundary transient.
+        value: input.value.bytes().toString("utf8"),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+      };
+
+      if (existing === undefined) {
+        plaintext.secrets.push(record);
+      } else {
+        const index = plaintext.secrets.findIndex((secret) => secret.ref === ref);
+        plaintext.secrets[index] = record;
+      }
+
+      await this.write(plaintext);
+      return toAgentMetadata(record);
+    } finally {
+      // Vault OWNS the handed-off value — scrub on success, secret_exists throw,
+      // and read/write error alike (the throw can fire before `record` is built).
+      input.value.dispose();
     }
-
-    const now = new Date().toISOString();
-    const record: SecretRecord = {
-      id: existing?.id ?? `sec_${randomUUID().replaceAll("-", "")}`,
-      ref,
-      name: input.name,
-      environment,
-      source: input.source.toLowerCase(),
-      created_at: existing?.created_at ?? now,
-      updated_at: now,
-      last_used_at: existing?.last_used_at ?? null,
-      fingerprint: fingerprintSecret(Buffer.from(input.value, "utf8"), Buffer.from(plaintext.fingerprint_key as string, "base64")),
-      allowed_domains: normalizeDomains(input.allowedDomains),
-      // Explicit caller-supplied actions win. Otherwise: a brand-new record gets
-      // the extended default set; an OVERWRITE preserves the prior record's
-      // allowed_actions so a force-rotate never silently widens scope (§4.4).
-      allowed_actions:
-        input.allowedActions ?? (existing !== undefined ? [...existing.allowed_actions] : [...DEFAULT_ACTIONS]),
-      requires_approval: input.requiresApproval ?? environment === "production",
-      classification: environment === "production" ? "production_secret" : "secret",
-      value: input.value,
-      ...(input.description !== undefined ? { description: input.description } : {}),
-    };
-
-    if (existing === undefined) {
-      plaintext.secrets.push(record);
-    } else {
-      const index = plaintext.secrets.findIndex((secret) => secret.ref === ref);
-      plaintext.secrets[index] = record;
-    }
-
-    await this.write(plaintext);
-    return toAgentMetadata(record);
   }
 
   async list(
@@ -212,23 +224,23 @@ export class Vault {
     allowed_actions?: SecretAction[];
     description?: string;
     force?: boolean;
-  }): Promise<SecretRecord> {
-    const value = generateSecretValue(input.kind);
-    await this.upsertSecret({
+  }): Promise<AgentSecretMetadata> {
+    // generateSecretValue returns an ENCODED string (base64url/hex). Wrap it via
+    // fromUtf8 so the stored value + fingerprint stay byte-identical to the
+    // pre-5q behavior (Code-Grounding #9). Return the upsertSecret metadata
+    // directly — no getSecret read-back, so no string-valued SecretRecord
+    // crosses the vault boundary to the rotate route (read-path-review finding).
+    // upsertSecret OWNS + disposes the SecretValue in its finally.
+    return await this.upsertSecret({
       name: input.name,
       environment: input.environment,
       source: input.source,
-      value,
+      value: SecretValue.fromUtf8(generateSecretValue(input.kind)),
       allowedDomains: input.allowed_domains,
       ...(input.allowed_actions !== undefined ? { allowedActions: input.allowed_actions } : {}),
       ...(input.description !== undefined ? { description: input.description } : {}),
       ...(input.force !== undefined ? { force: input.force } : {}),
     });
-    // Return the canonical stored record (with `ref`) — read it back from the
-    // freshly persisted vault to keep generate/rotate code paths uniform.
-    const env = canonicalEnvironment(input.environment);
-    const ref = buildSecretRef(input.source, env, input.name);
-    return this.getSecret(ref);
   }
 
   private async read(): Promise<VaultPlaintext> {
