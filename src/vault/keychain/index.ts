@@ -15,11 +15,12 @@ export type GetKeychainOptions = {
  * Return the platform-appropriate keychain adapter.
  *
  * On supported platforms (darwin, linux, win32), returns the per-platform
- * class — note **all three are stubs in Plan 1**; Plan 5a replaces their
- * internals with native-module-backed implementations.
+ * class — all three are real implementations backed by `@napi-rs/keyring`
+ * (dynamically imported; `isAvailable()` returns false when the native
+ * module can't load, so callers fall back to the passphrase UI).
  *
- * On unsupported platforms, returns an UnsupportedKeychain that mirrors the
- * stub behavior (isAvailable → false; ops throw keychain_not_implemented).
+ * On unsupported platforms, returns an UnsupportedKeychain
+ * (isAvailable → false; ops throw keychain_not_implemented).
  */
 export function getKeychainAdapter(opts: GetKeychainOptions = {}): KeychainAdapter {
   const platform = opts.platformOverride ?? process.platform;
