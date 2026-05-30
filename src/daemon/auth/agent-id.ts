@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { ShuttleError } from "../../shared/errors.js";
 
@@ -27,7 +28,34 @@ export function assertAgentIdValid(id: string): void {
   }
 }
 
-export function deriveAutoAgentId(runtime: string, machineId: string): string {
-  const digest = createHash("sha256").update(`${machineId}\x00${runtime}`).digest("hex");
+export function deriveAutoAgentId(runtime: string, machineId: string, projectScope?: string): string {
+  // 2-arg callers get byte-identical output (existing users unaffected). The
+  // per-project variant appends a scope component to the digest material; the
+  // id FORMAT (`${runtime}-${16 hex}`) and AGENT_ID_RE validity are preserved.
+  const material =
+    projectScope === undefined
+      ? `${machineId}\x00${runtime}`
+      : `${machineId}\x00${runtime}\x00${projectScope}`;
+  const digest = createHash("sha256").update(material).digest("hex");
   return `${runtime}-${digest.slice(0, 16)}`;
+}
+
+/**
+ * Absolute git-repo-root path, or `cwd` when not in a repo / git absent.
+ * Hashed into the per-project agent id (the path itself never appears in the
+ * id). One git repo = one trust domain (sub-projects share an id, see plan §1
+ * monorepo note). `--show-toplevel` returns the worktree root, stable per
+ * checkout.
+ */
+export function resolveProjectScope(cwd: string): string {
+  try {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return root.length > 0 ? root : cwd;
+  } catch {
+    return cwd; // not a git repo, or git absent → cwd is the scope
+  }
 }
