@@ -7,10 +7,11 @@ import type { DaemonServices } from "../../services.js";
 import { writeDaemonAudit } from "../../audit.js";
 import { asObject, optApprovalIds, optBool, optString } from "../validate.js";
 import { canonicalEnvironment, buildSecretRef } from "../../../shared/refs.js";
+import { SecretValue } from "../../../vault/secret-value.js";
 
 interface ImportEntry {
   key: string;
-  value: string;
+  value: SecretValue;
 }
 
 interface RouteRegistrar {
@@ -37,14 +38,36 @@ export function registerSecretsImportRoute(
     if (!Array.isArray(entriesRaw)) {
       throw new ShuttleError("bad_request", "entries: must be an array");
     }
+    // Burst 7 §2 (5q): wrap each entry value into a SecretValue at the PARSE
+    // loop and drop the raw parsed string from the request-body object graph so
+    // it is GC-eligible before the (possibly long) production approval gate.
+    // This guard try/catch is DISTINCT from — and precedes — the route-level try
+    // below: a later malformed entry would otherwise leak every SecretValue
+    // already wrapped from a prior valid entry (the route-level catch starts
+    // AFTER this loop, and it writes a failure audit that must NOT fire for
+    // these pre-approval parse errors). `entries` is declared before the guard
+    // so both the catch and the downstream store loop see it.
     const entries: ImportEntry[] = [];
-    for (const e of entriesRaw) {
-      const eo = asObject(e);
-      const key = optString(eo, "key");
-      const value = optString(eo, "value");
-      if (key === undefined) throw new ShuttleError("missing_param", "entries[].key required");
-      if (value === undefined) throw new ShuttleError("missing_param", "entries[].value required");
-      entries.push({ key, value });
+    try {
+      for (const e of entriesRaw) {
+        const eo = asObject(e);
+        const key = optString(eo, "key");
+        const value = optString(eo, "value");
+        if (key === undefined) throw new ShuttleError("missing_param", "entries[].key required");
+        if (value === undefined) throw new ShuttleError("missing_param", "entries[].value required");
+        entries.push({ key, value: SecretValue.fromUtf8(value) });
+        // Drop the raw parsed value string from the request-body object graph.
+        // (JS strings can't be zeroed; the win is prompt unreachability — the
+        // same Tier-A bound as the vault read transient.)
+        if (e !== null && typeof e === "object") delete (e as Record<string, unknown>)["value"];
+      }
+    } catch (err) {
+      // A later entry threw during parse/validation AFTER earlier entries were
+      // already wrapped into live SecretValues — the route-level catch below
+      // does not cover this pre-try region, so dispose here. (dispose() is
+      // idempotent; this only ever holds not-yet-stored values.)
+      for (const entry of entries) entry.value.dispose();
+      throw err;
     }
 
     const source = optString(o, "source") ?? "local";
@@ -94,13 +117,17 @@ export function registerSecretsImportRoute(
       const skipped_existing: string[] = [];
       const refs: string[] = [];
 
-      for (const entry of entries) {
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i]!;
         // Try to get existing secret. upsertSecret will throw secret_exists if
         // the ref exists and force=false — we need to check ourselves for skip_existing.
         const candidateRef = buildSecretRef(source, environment, entry.key);
         let existingRef: string | undefined;
         try {
-          const existing = await services.vault.getSecret(candidateRef);
+          // Burst 7 §2 (5q): existence check reads only .ref (metadata) — route
+          // to the no-value inspect(). It throws secret_not_found for missing /
+          // soft-deleted refs, same as before.
+          const existing = await services.vault.inspect(candidateRef);
           existingRef = existing.ref;
         } catch {
           // Does not exist — proceed with upsert
@@ -108,6 +135,9 @@ export function registerSecretsImportRoute(
 
         if (existingRef !== undefined) {
           if (skipExisting) {
+            // Burst 7 §2 (5q): skipped — not handed to the vault, so the route
+            // disposes its SecretValue here before continuing.
+            entry.value.dispose();
             skipped_existing.push(entry.key);
             continue;
           }
@@ -120,6 +150,10 @@ export function registerSecretsImportRoute(
               error_code: "secret_exists",
               ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
             });
+            // Dispose THIS entry + all remaining unconsumed entries before the
+            // throw (the entries before `i` were already consumed by the vault,
+            // which disposed them; dispose() is idempotent regardless).
+            for (let j = i; j < entries.length; j++) entries[j]!.value.dispose();
             throw new ShuttleError(
               "secret_exists",
               `Ref already exists: ${existingRef}. Use --force to overwrite or --skip-existing to continue past.`,
@@ -132,6 +166,7 @@ export function registerSecretsImportRoute(
           name: entry.key,
           environment,
           source,
+          // Already a SecretValue — the vault OWNS + disposes it (Burst 7 §2).
           value: entry.value,
           allowedDomains: [],
           // Pass force:true only when the ref already exists; upsertSecret
@@ -151,6 +186,11 @@ export function registerSecretsImportRoute(
 
       return { ok: true, imported, skipped: 0, refs, skipped_existing };
     } catch (err) {
+      // Burst 7 §2 (5q): defensively dispose every entry's SecretValue. dispose()
+      // is idempotent, so vault-consumed + skipped entries (already disposed) are
+      // unaffected; this scrubs the approval-denied-before-loop case, where
+      // requireApprovals throws BEFORE the entry loop so ALL entries are unconsumed.
+      for (const entry of entries) entry.value.dispose();
       // Only write a top-level failure audit if it is NOT a secret_exists we
       // already audited above (which re-throws immediately after the audit).
       if (

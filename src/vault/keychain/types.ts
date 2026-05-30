@@ -1,13 +1,13 @@
 /**
  * Adapter interface for OS-level secret storage.
  *
- * Each platform's adapter is backed by a native module (likely
- * @napi-rs/keyring, evaluated in Plan 5a) that talks to the OS keyring
- * through memory APIs — never argv. This avoids the `ps`-recoverable
+ * Each platform's adapter is backed by `@napi-rs/keyring`, which talks to the
+ * OS keyring through memory APIs — never argv. This avoids the `ps`-recoverable
  * password leak inherent in shell-CLI wrappers around `security`,
  * `secret-tool`, or PowerShell credential cmdlets.
  *
- * Plan 1 ships stubs only; Plan 5a wires in the real implementations.
+ * The darwin/linux/win32 adapters are real implementations; only the
+ * unsupported-platform fallback (UnsupportedKeychain in index.ts) is a stub.
  *
  * Keys are namespaced by (service, account). For Secret Shuttle's master key,
  * we use service = "secret-shuttle" and account = the daemon's unique vault id

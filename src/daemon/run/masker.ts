@@ -51,12 +51,18 @@ export interface Masker {
  * the whole "ABCDE" gone, not just "BCD" (which would leave "A*** E" — a
  * partial leak).
  */
-export function createMasker(secrets: readonly string[]): Masker {
-  const deduped = [...new Set(secrets.filter((s) => s.length > 0))];
-  // Encode each secret to its raw byte buffer once.
-  const patterns: Buffer[] = deduped
-    .map((s) => Buffer.from(s, "utf8"))
-    .sort((a, b) => b.length - a.length);
+export function createMasker(secrets: readonly Buffer[]): Masker {
+  // Burst 7 §2 (5q): inputs are raw secret BYTES — the secret never enters the
+  // masker as a string (spec line 225), so the dedupe key cannot be a
+  // reversible string copy (.toString(...) is forbidden). Dedupe by BYTE
+  // comparison and defensive-copy each accepted pattern.
+  const patterns: Buffer[] = [];
+  for (const b of secrets) {
+    if (b.length === 0) continue;
+    if (patterns.some((p) => p.equals(b))) continue; // byte-compare dedupe, no string key
+    patterns.push(Buffer.from(b)); // defensive copy of the accepted bytes
+  }
+  patterns.sort((a, b) => b.length - a.length);
   let maxLen = patterns.length > 0 ? patterns[0]!.length : 0;
   let lookback = Buffer.alloc(0);
 

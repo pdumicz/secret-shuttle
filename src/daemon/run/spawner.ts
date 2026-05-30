@@ -93,6 +93,14 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
 
     const c = child;
 
+    // Burst 7 §2 (5q): destructure the fields the long-lived handlers use into
+    // locals, then reference ONLY these locals below. spawn() above already
+    // read options.env synchronously, so the `input` object (and input.env)
+    // becomes unreachable from this closure once spawn has returned — the route
+    // can drop its env reference + dispose the resolved SecretValues right after
+    // spawnAndStream is initiated, without affecting the running child.
+    const { outputWriter, signal, stdinBytes } = input;
+
     // Cancellation wiring: SIGTERM on abort, SIGKILL after grace.
     let killTimer: NodeJS.Timeout | undefined;
     const onAbort = (): void => {
@@ -102,13 +110,13 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
         if (!exited) c.kill("SIGKILL");
       }, KILL_GRACE_MS);
     };
-    if (input.signal !== undefined) {
-      if (input.signal.aborted) onAbort();
-      else input.signal.addEventListener("abort", onAbort, { once: true });
+    if (signal !== undefined) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    c.stdout?.on("data", (chunk: Buffer) => input.outputWriter.writeStdout(chunk));
-    c.stderr?.on("data", (chunk: Buffer) => input.outputWriter.writeStderr(chunk));
+    c.stdout?.on("data", (chunk: Buffer) => outputWriter.writeStdout(chunk));
+    c.stderr?.on("data", (chunk: Buffer) => outputWriter.writeStderr(chunk));
 
     // If stdin bytes were supplied, write+end the stream and scrub the
     // Buffer once those bytes have flushed. EPIPE is swallowed: a child
@@ -124,9 +132,9 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
     // clobber not-yet-flushed bytes. error/close fallbacks handle abnormal
     // termination (child crashes pre-write, broken pipe). The scrub helper
     // is idempotent so triple-fire (error + close + cb) is safe.
-    if (input.stdinBytes !== undefined) {
+    if (stdinBytes !== undefined) {
       if (c.stdin !== null) {
-        const stdinBuf = input.stdinBytes;
+        const stdinBuf = stdinBytes;
         let scrubbed = false;
         const scrub = (): void => {
           if (scrubbed) return;
@@ -146,7 +154,7 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
           // Non-EPIPE errors should still bubble through writeError but
           // not crash the daemon. Log via outputWriter so the route can
           // surface as a structured stream event.
-          input.outputWriter.writeError({
+          outputWriter.writeError({
             code: "stdin_write_failed",
             message: err.message,
           });
@@ -168,7 +176,7 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
         // — when stdinBytes is set, spawnAndStream configures stdio[0] as
         // a pipe — but if a future refactor or platform quirk leaves
         // c.stdin null, scrub immediately rather than leaking the Buffer.
-        input.stdinBytes.fill(0);
+        stdinBytes.fill(0);
       }
     }
 
@@ -176,17 +184,17 @@ export function spawnAndStream(input: SpawnInput): Promise<void> {
       if (exited) return;
       exited = true;
       if (killTimer !== undefined) clearTimeout(killTimer);
-      input.outputWriter.writeError({ code: "spawn_failed", message: err.message, exit_code: 127 });
-      input.outputWriter.writeExit(127);
+      outputWriter.writeError({ code: "spawn_failed", message: err.message, exit_code: 127 });
+      outputWriter.writeExit(127);
       resolve();
     });
-    c.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    c.on("close", (code: number | null, sig: NodeJS.Signals | null) => {
       if (exited) return;
       exited = true;
       if (killTimer !== undefined) clearTimeout(killTimer);
       // POSIX convention: signal → 128 + signum. Approximate for common signals.
-      const exitCode = code !== null ? code : signal === "SIGTERM" ? 143 : signal === "SIGKILL" ? 137 : 1;
-      input.outputWriter.writeExit(exitCode);
+      const exitCode = code !== null ? code : sig === "SIGTERM" ? 143 : sig === "SIGKILL" ? 137 : 1;
+      outputWriter.writeExit(exitCode);
       resolve();
     });
   });

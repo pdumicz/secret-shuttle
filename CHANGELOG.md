@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Added (Burst 7 — Identity & Memory Hardening)
+
+- **Opt-in per-project agent IDs (Plan 5s):** `deriveAutoAgentId` gains an optional `projectScope` (the git-repo-root path, `git rev-parse --show-toplevel`, or `cwd` when not in a repo) folded into the sha256 material. Opt in via `identity: { perProject: true }` in `secret-shuttle.config.json` or `secret-shuttle init --per-project-identity` (which merges the key into the config, preserving any `infer.*` block). **Fully back-compatible:** without opt-in, the 2-arg derivation is byte-identical to before, so no existing agent identity changes. Monorepo sub-projects share the git-root id (one repo = one trust domain); moving a project re-derives its id on the next `init`. Closes the per-(machine, runtime) identity collision where a session-affordance leak in one project was consumable by the same agent id in another.
+- **`SecretValue` wrapper + Buffer use-path (Plan 5q — memory hygiene):** secret plaintext on the per-secret *use* path is now a scrubbable `Buffer` wrapped in a `SecretValue` whose `toString`/`toJSON`/`util.inspect` all redact to `"[secret]"` — accidental `${sv}` / `JSON.stringify(sv)` / log interpolation cannot leak the value; `.bytes()` is the single audited plaintext accessor; `dispose()` zeros the backing buffer. `Vault.resolveSecret`/`resolveRefs` return a disposable `ResolvedSecret`; the value-free `Vault.inspect`→`AgentSecretMetadata` accessor serves metadata-only callers; `Vault.getSecret` (string) is now vault-internal-only. Every true-plaintext consumer (inject-submit, `/v1/secrets/inject`, templates stdin, run-resolve env, inject-render, compare) follows a two-phase discipline: **value-free preflight before the approval gate, resolve strictly after, dispose on every exit path**. `Vault.upsertSecret` owns + disposes the inbound `SecretValue` in a `finally` (including the `secret_exists` throw-before-write). `fingerprintSecret`/`fingerprintMatches` take `Buffer` — **migration-free** (HMAC over identical bytes), so existing stored fingerprints stay valid. A repo-scan guard test prevents future routes from serializing a raw resolved value or calling the string-valued `getSecret`.
+
+### Changed (Burst 7 — Identity & Memory Hardening)
+
+- `Vault.generate` now returns `AgentSecretMetadata` (was a string-valued `SecretRecord` via a `getSecret` read-back) — no route receives a stored plaintext string from generate anymore.
+- `UpsertSecretInput.value` is now a `SecretValue` (was `string`); inbound producers (generate, capture, reveal-capture, import, bootstrap executor) wrap at the boundary and the vault owns disposal. `secret-shuttle secrets import` early-wraps each entry value at the parse loop so no raw request-body secret string survives the production approval gate.
+
+### Internal — Burst 7
+
+- The on-disk vault format is **unchanged** (Tier A): `VaultPlaintext` is still JSON-serialized then AES-256-GCM-encrypted; `SecretRecord.value` stays a string at rest. 5q hardens the in-memory *use* path, not the at-rest format. The bulk encrypt/decrypt JSON serialization remains a bounded, short-lived plaintext transient — eliminating it (a binary vault format, "Tier B") is a documented future option, not this burst.
+- No wire-format change (5q is internal-only); no `error_code` additions.
+- Plan 5a (native `@napi-rs/keyring` keychain adapters) was found already shipped under Plan 5b/5f; this burst only corrected stale "stub" doc comments in `src/vault/keychain/{index,types}.ts` to match the shipped reality.
+
+### Known limitations — Burst 7
+
+- Per-project identity granularity is git-root-level; per-subdirectory (sub-monorepo) granularity is deferred.
+- 5q Tier B (binary vault format to remove the bulk encrypt/decrypt string transient) and the CI/CD secret-delivery story remain forward-referenced, not implemented.
+
 ### Added (Burst 6 — Vision Polish)
 
 - **`provision --infer` Supabase detector (§2):** per-secret name-predicate-gated detector. Default predicate is `^SUPABASE_[A-Z0-9_]+$`. Optional `infer.supabaseNames` override in `secret-shuttle.config.json` extends the predicate (per-entry grammar `^[A-Z_][A-Z0-9_]*$`; invalid entries drop individually with a `needs_edit` issue naming the offending value; whole `supabaseNames` non-array drops the whole override with one `needs_edit`). When the predicate matches and `supabase/config.toml` is present, the detector reads `.supabase/project.json`'s `ref` field for the cloud project_ref. Missing / malformed `project.json` → emits `supabase:TODO_run_supabase_link_first` + a `needs_edit` instructing the user to run `supabase link --project-ref <ref>` first. Project-state + override sanitization are resolved once per `provision --infer` (not per-secret).

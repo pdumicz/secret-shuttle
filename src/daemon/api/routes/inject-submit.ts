@@ -2,6 +2,7 @@ import { ShuttleError } from "../../../shared/errors.js";
 import { requireApprovals } from "../../approvals/require-approvals.js";
 import { makeHubOpenUrlImpl } from "../../hub/route-helpers.js";
 import type { ApprovalBinding, ApprovalGrant } from "../../approvals/store.js";
+import type { ResolvedSecret } from "../../../vault/types.js";
 import { domainMatches } from "../../../policy/domain-policy.js";
 import type { DaemonServer } from "../../server.js";
 import type { DaemonServices } from "../../services.js";
@@ -45,13 +46,19 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
     // threw (pre-mint failure), in which case no session was consumed and
     // audit MUST NOT carry session_id.
     let grant: ApprovalGrant | undefined;
+    // Burst 7 §2 (5q): the resolved plaintext is held in a single SecretValue
+    // that feeds BOTH sinks (injectIntoBackendNode + proveAbsence) and is
+    // disposed ONCE in the outer finally below. Hoisted OUTSIDE the try so the
+    // finally sees it on every exit path (success, throw, successTimeoutMs
+    // timeout).
+    let resolved: ResolvedSecret | undefined;
     try {
       if (services.browser === null) {
         throw new ShuttleError("browser_not_started", "Run `secret-shuttle browser start` first.");
       }
       const browser = services.browser;
-      const secret = await services.vault.getSecret(ref);
-      assertSecretActionAllowed(secret, "inject_submit");
+      const meta = await services.vault.inspect(ref);
+      assertSecretActionAllowed(meta, "inject_submit");
 
       if (services.blind.current() !== null) {
         throw new ShuttleError(
@@ -89,7 +96,7 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
       if (b.domain !== undefined && !domainMatches(domain, b.domain)) {
         throw new ShuttleError("domain_mismatch", `Field handle domain ${domain} != ${b.domain}.`);
       }
-      enforceDomain(domain, secret.allowed_domains, "inject-submit");
+      enforceDomain(domain, meta.allowed_domains, "inject-submit");
 
       let successTimeoutMs = SUCCESS_TIMEOUT_DEFAULT_MS;
       const tms = o["success_timeout_ms"];
@@ -99,14 +106,14 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
 
       const binding: ApprovalBinding = {
         action: "inject_submit",
-        ref: secret.ref,
-        environment: secret.environment,
+        ref: meta.ref,
+        environment: meta.environment,
         destination_domain: domain,
         target_id: fieldHandle.target_id,
         field_fingerprint: fieldHandle.handle_fingerprint,
         template_id: null,
         template_params: null,
-        allowed_domains: secret.allowed_domains,
+        allowed_domains: meta.allowed_domains,
         submit_fingerprint: submitHandle.handle_fingerprint,
         success_condition: successText,
         auto_resume: true,
@@ -153,6 +160,12 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
         throw preWriteErr;
       }
 
+      // Burst 7 §2 (5q): resolve the plaintext ONLY now — after approval, after
+      // the pre-write revalidate, immediately before the sink. One SecretValue
+      // feeds both injectIntoBackendNode AND proveAbsence below; the outer
+      // finally disposes it exactly once.
+      resolved = await services.vault.resolveSecret(ref);
+
       // From here the secret is on the page. A failure (incl. a HANG — see
       // withDeadline) MUST NOT auto-resume: blind stays ACTIVE; respond
       // fail-closed (submitted:"unknown").
@@ -168,7 +181,7 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
           (async () => {
             await browser.injectIntoBackendNode(
               { target_id: fieldHandle.target_id, backend_node_id: fieldHandle.backend_node_id },
-              secret.value,
+              resolved.value.bytes().toString("utf8"),
             );
             await browser.clickBackendNode({
               target_id: submitHandle.target_id,
@@ -198,14 +211,14 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
           const blankMs = Number(process.env.SECRET_SHUTTLE_BLANK_DEADLINE_MS) || 15_000;
           await withDeadline(blankAllPages(services.cdp), blankMs, "blank_timeout").catch(() => undefined);
         }
-        await services.vault.markUsed(secret.ref).catch(() => undefined);
+        await services.vault.markUsed(meta.ref).catch(() => undefined);
         await writeDaemonAudit({
-          action: "inject_submit", ok: false, ref: secret.ref, environment: secret.environment,
+          action: "inject_submit", ok: false, ref: meta.ref, environment: meta.environment,
           domain, submitted: "unknown", blind_mode: true,
           ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
         });
         return {
-          submitted: "unknown", secret_ref: secret.ref, domain,
+          submitted: "unknown", secret_ref: meta.ref, domain,
           blind_mode: true, next: "manual_recovery_required", value_visible_to_agent: false,
         };
       }
@@ -219,12 +232,12 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
       let proofPassed = false;
       if (successObserved) {
         try {
-          proofPassed = (await browser.proveAbsence(secret.value)).passed;
+          proofPassed = (await browser.proveAbsence(resolved.value.bytes().toString("utf8"))).passed;
         } catch {
           proofPassed = false;
         }
       }
-      await services.vault.markUsed(secret.ref).catch(() => undefined);
+      await services.vault.markUsed(meta.ref).catch(() => undefined);
 
       if (successObserved && proofPassed) {
         // T7-M1 (Task-7 review carry-forward): autoResumeBlind throws BEFORE it
@@ -238,12 +251,12 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
             op: "inject_submit", domain, success_signal: "text_matched", absence_proof: "passed",
           });
           await writeDaemonAudit({
-            action: "inject_submit", ok: true, ref: secret.ref, environment: secret.environment,
+            action: "inject_submit", ok: true, ref: meta.ref, environment: meta.environment,
             domain, submitted: true, success_signal: "text_matched", absence_proof: "passed", blind_mode: false,
             ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
           });
           return {
-            submitted: true, secret_ref: secret.ref, domain,
+            submitted: true, secret_ref: meta.ref, domain,
             success_signal: "text_matched", absence_proof: "passed",
             blind_mode: false, value_visible_to_agent: false,
           };
@@ -253,12 +266,12 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
       }
 
       await writeDaemonAudit({
-        action: "inject_submit", ok: true, ref: secret.ref, environment: secret.environment,
+        action: "inject_submit", ok: true, ref: meta.ref, environment: meta.environment,
         domain, submitted: "unknown", blind_mode: true,
         ...(grant.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       return {
-        submitted: "unknown", secret_ref: secret.ref, domain,
+        submitted: "unknown", secret_ref: meta.ref, domain,
         blind_mode: true, next: "manual_recovery_required", value_visible_to_agent: false,
       };
     } catch (err) {
@@ -277,6 +290,12 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
         ...(grant?.session_id !== undefined ? { session_id: grant.session_id } : {}),
       });
       throw err;
+    } finally {
+      // Burst 7 §2 (5q): scrub the single resolved SecretValue on EVERY exit
+      // path — success, throw, and the successTimeoutMs/observeText timeout.
+      // dispose() is idempotent and .bytes()-after-dispose throws, so the value
+      // is zeroed exactly once regardless of which sink ran last.
+      resolved?.value.dispose();
     }
   });
 }

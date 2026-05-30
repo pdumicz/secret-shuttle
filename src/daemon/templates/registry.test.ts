@@ -3,6 +3,7 @@ import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
 import { TemplateRegistry, assertNoPaddedParams } from "./registry.js";
 import { resolveBinary } from "./resolve-binary.js";
+import { SecretValue } from "../../vault/secret-value.js";
 
 // validateParams tests for vercel-env-add
 
@@ -273,7 +274,7 @@ test("supabase-edge-secret-set: runs end-to-end with a stub supabase binary, sec
     const def = { ...r.get("supabase-edge-secret-set"), binary: stubPath };
     const result = await runTemplate({
       template: def, params: { name: "STRIPE_KEY" },
-      secret: "needle-supabase-9f",
+      secret: SecretValue.fromUtf8("needle-supabase-9f"),
       tmpDir,
     });
     assert.equal(result.exit_code, 0);

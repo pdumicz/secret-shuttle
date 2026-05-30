@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createMasker } from "./masker.js";
 
+// Burst 7 §2 (5q): createMasker now takes Buffer[]. Map test strings to bytes.
+const toBufs = (s: string[]): Buffer[] => s.map((x) => Buffer.from(x, "utf8"));
+
 /**
  * Task B2 — Defense-in-depth tests for masker.dispose() and flush()
  * self-sanitization. The masker holds raw secret bytes in two places:
@@ -20,7 +23,7 @@ import { createMasker } from "./masker.js";
 test("masker.dispose(): zeros every pattern Buffer in place", () => {
   const secret1 = "sk_live_abcdef0123456789";
   const secret2 = "topsecretpassword";
-  const m = createMasker([secret1, secret2]);
+  const m = createMasker(toBufs([secret1, secret2]));
 
   // Pump some unrelated data through so the masker is exercised at least once.
   m.process(Buffer.from("hello world\n"));
@@ -48,7 +51,7 @@ test("masker.dispose(): zeros every pattern Buffer in place", () => {
 test("masker.dispose(): zeros the lookback Buffer in place", () => {
   // Use a long secret so process() leaves bytes in lookback.
   const secret = "needle_secret_value";
-  const m = createMasker([secret]);
+  const m = createMasker(toBufs([secret]));
 
   // Feed a chunk that ends with a prefix of the secret. The masker will hold
   // back up to maxLen-1 bytes — and since maxLen >= our input, ALL bytes
@@ -79,7 +82,7 @@ test("masker.dispose(): zeros the lookback Buffer in place", () => {
 
 test("masker.flush(): zeros the OLD lookback before reassigning", () => {
   const secret = "needle_secret_value";
-  const m = createMasker([secret]);
+  const m = createMasker(toBufs([secret]));
 
   // Park a partial-prefix in lookback.
   const partialPrefix = "needle_se";
@@ -113,7 +116,7 @@ test("masker.dispose(): is idempotent and does not leak previously-held secret b
   // is allowed to pass new input through unchanged; the guarantee is only
   // that previously-held secret material doesn't surface.
   const secret = "sk_live_idempotent";
-  const m = createMasker([secret]);
+  const m = createMasker(toBufs([secret]));
   // Park a partial-prefix in lookback so there's real secret material held
   // internally at the moment of dispose.
   m.process(Buffer.from(`prefix-sk_live_idemp`));

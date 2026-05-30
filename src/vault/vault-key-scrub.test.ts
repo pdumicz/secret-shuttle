@@ -9,6 +9,7 @@ import { encryptVault } from "./crypto.js";
 import { LockedVaultState } from "./locked-state.js";
 import type { VaultPlaintext } from "./types.js";
 import { Vault } from "./vault.js";
+import { SecretValue } from "./secret-value.js";
 
 /**
  * Phase-B memory-hygiene tests for Vault.read / Vault.write / Vault.fingerprintKey.
@@ -100,7 +101,7 @@ test("Vault.write() scrubs the keyProvider() copy after encryptVault completes (
       name: "API_KEY",
       environment: "development",
       source: "stripe",
-      value: "sk_test_value_for_scrub_check",
+      value: SecretValue.fromUtf8("sk_test_value_for_scrub_check"),
       allowedDomains: ["example.com"],
     });
 

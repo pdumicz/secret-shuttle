@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { Vault } from "./vault.js";
+import { SecretValue } from "./secret-value.js";
 
 async function withVault<T>(fn: (v: Vault) => Promise<T>): Promise<T> {
   const home = await mkdtemp(path.join(os.tmpdir(), "ss-isa-"));
@@ -28,7 +29,7 @@ test("a newly created secret gets inject_submit in the extended default action s
   await withVault(async (vault) => {
     const meta = await vault.upsertSecret({
       name: "WEBHOOK", environment: "production", source: "stripe",
-      value: "whsec_v1", allowedDomains: ["dashboard.stripe.com"],
+      value: SecretValue.fromUtf8("whsec_v1"), allowedDomains: ["dashboard.stripe.com"],
     });
     assert.deepEqual(meta.allowed_actions, [
       "capture_from_page", "inject_into_field",
@@ -41,7 +42,7 @@ test("an explicitly-scoped secret persists exactly those actions (no implicit in
   await withVault(async (vault) => {
     await vault.upsertSecret({
       name: "LEGACY", environment: "production", source: "stripe",
-      value: "whsec_legacy", allowedDomains: ["dashboard.stripe.com"],
+      value: SecretValue.fromUtf8("whsec_legacy"), allowedDomains: ["dashboard.stripe.com"],
       allowedActions: ["capture_from_page", "inject_into_field", "compare_fingerprint", "use_as_stdin"],
     });
     const rec = await vault.getSecret("ss://stripe/prod/LEGACY");
@@ -54,13 +55,13 @@ test("overwrite preserves existing allowed_actions when the caller omits them (n
   await withVault(async (vault) => {
     await vault.upsertSecret({
       name: "ROT", environment: "production", source: "stripe",
-      value: "v1", allowedDomains: ["dashboard.stripe.com"],
+      value: SecretValue.fromUtf8("v1"), allowedDomains: ["dashboard.stripe.com"],
       allowedActions: ["inject_into_field"],
     });
     // force-rotate WITHOUT specifying allowedActions — must NOT acquire the extended default.
     await vault.upsertSecret({
       name: "ROT", environment: "production", source: "stripe",
-      value: "v2", allowedDomains: ["dashboard.stripe.com"], force: true,
+      value: SecretValue.fromUtf8("v2"), allowedDomains: ["dashboard.stripe.com"], force: true,
     });
     const rec = await vault.getSecret("ss://stripe/prod/ROT");
     assert.deepEqual(rec.allowed_actions, ["inject_into_field"]);
@@ -72,12 +73,12 @@ test("an explicit caller-supplied allowedActions still wins on overwrite (explic
   await withVault(async (vault) => {
     await vault.upsertSecret({
       name: "OPT", environment: "production", source: "stripe",
-      value: "v1", allowedDomains: ["dashboard.stripe.com"],
+      value: SecretValue.fromUtf8("v1"), allowedDomains: ["dashboard.stripe.com"],
       allowedActions: ["inject_into_field"],
     });
     await vault.upsertSecret({
       name: "OPT", environment: "production", source: "stripe",
-      value: "v1", allowedDomains: ["dashboard.stripe.com"], force: true,
+      value: SecretValue.fromUtf8("v1"), allowedDomains: ["dashboard.stripe.com"], force: true,
       allowedActions: ["inject_into_field", "inject_submit"],
     });
     const rec = await vault.getSecret("ss://stripe/prod/OPT");

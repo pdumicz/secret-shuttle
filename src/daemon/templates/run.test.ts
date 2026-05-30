@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ShuttleError } from "../../shared/errors.js";
 import { runTemplate } from "./run.js";
+import { SecretValue } from "../../vault/secret-value.js";
 
 test("runs absolute binary with shell:false; suppresses output", async () => {
   const result = await runTemplate({
@@ -15,7 +16,7 @@ test("runs absolute binary with shell:false; suppresses output", async () => {
       requires_approval_when_production: false,
     },
     params: {},
-    secret: "hidden-value",
+    secret: SecretValue.fromUtf8("hidden-value"),
   });
   assert.equal(result.exit_code, 0);
   // The result MUST not include stdout/stderr (those are intentionally suppressed).
@@ -30,7 +31,7 @@ test("refuses non-absolute binary", async () => {
         secret_delivery: "stdin", required_params: [], requires_approval_when_production: false,
       },
       params: {},
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
     }),
     (err) => err instanceof ShuttleError && err.code === "unsafe_binary_path",
   );
@@ -45,7 +46,7 @@ test("refuses binary under cwd", async () => {
         secret_delivery: "stdin", required_params: [], requires_approval_when_production: false,
       },
       params: {},
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
     }),
     (err) => err instanceof ShuttleError && err.code === "unsafe_binary_path",
   );
@@ -59,7 +60,7 @@ test("refuses missing required param", async () => {
         secret_delivery: "stdin", required_params: ["name"], requires_approval_when_production: false,
       },
       params: {},
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
     }),
     (err) => err instanceof ShuttleError && err.code === "missing_param",
   );
@@ -73,7 +74,7 @@ test("runTemplate refuses when actual binary hash diverges from expectedSha256",
         secret_delivery: "stdin", required_params: [], requires_approval_when_production: false,
       },
       params: {},
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
       expectedSha256: "deadbeef".repeat(8),
     }),
     (err) => err instanceof ShuttleError && err.code === "binary_hash_mismatch",
@@ -130,7 +131,7 @@ test("tmp_env_file_0600: spawns with stdio ignore, passes the env-file path in a
         value_arg_template: "--env-file={{__env_file_path__}}",
       },
       params: { name: "STRIPE_SECRET_KEY" },
-      secret: "needle-7c4d-do-not-leak",
+      secret: SecretValue.fromUtf8("needle-7c4d-do-not-leak"),
       tmpDir: tmp,
     });
     assert.equal(r.exit_code, 0);
@@ -165,7 +166,7 @@ test("tmp_env_file_0600: unlinks the env-file on success", async () => {
         value_arg_template: "--env-file={{__env_file_path__}}",
       },
       params: { name: "TEST_NAME" },
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
       tmpDir: tmp,
     });
     const remaining = await readdir(tmp);
@@ -191,7 +192,7 @@ test("tmp_env_file_0600: unlinks the env-file even when the child exits non-zero
         value_arg_template: "--env-file={{__env_file_path__}}",
       },
       params: { name: "TEST_NAME" },
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
       tmpDir: tmp,
     });
     assert.equal(r.exit_code, 7);
@@ -218,7 +219,7 @@ test("tmp_env_file_0600: throws bad_request when value_arg_template is missing",
           required_params: [], requires_approval_when_production: false,
         },
         params: {},
-        secret: "x",
+        secret: SecretValue.fromUtf8("x"),
         tmpDir: tmp,
       }),
       (err: unknown) => err instanceof ShuttleError && err.code === "template_definition_invalid",
@@ -240,7 +241,7 @@ test("tmp_env_file_0600: throws bad_request when tmpDir is missing on the input"
         value_arg_template: "--env-file={{__env_file_path__}}",
       },
       params: {},
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
     }),
     (err: unknown) => err instanceof ShuttleError && err.code === "template_tmpdir_missing",
   );
@@ -267,7 +268,7 @@ test("runTemplate (stdin): additionalArgs are spliced into the child argv (cloud
         additionalArgs: (p) => p["env"] !== undefined && p["env"] !== "" ? ["--env", p["env"]] : [],
       },
       params: { name: "STRIPE_KEY", env: "staging" },
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
     });
     assert.equal(r.exit_code, 0);
     const argv = JSON.parse(await readFile(argvSidecar, "utf8")) as string[];
@@ -302,7 +303,7 @@ test("runTemplate freezes input.params — a callback that mutates throws (TypeE
           validateParams: (p) => { try { (p as Record<string, string>)["name"] = "MUTATED"; } catch (e) { captured = e; throw e; } },
         },
         params: { name: "STRIPE_KEY" },
-        secret: "x",
+        secret: SecretValue.fromUtf8("x"),
       }),
       (e: unknown) => e instanceof TypeError,
     );
@@ -324,7 +325,7 @@ test("runTemplate rejects padded params at the function boundary (defense in dep
         requires_approval_when_production: false,
       },
       params: { name: "STRIPE_KEY", env: " production " },
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
     }),
     (e: unknown) => e instanceof Error && (e as { code?: string }).code === "invalid_template_param",
   );
@@ -342,7 +343,7 @@ test("runTemplate rejects whitespace-only params (closes the '   ' default-scope
         requires_approval_when_production: false,
       },
       params: { name: "STRIPE_KEY", env: "   " },
-      secret: "x",
+      secret: SecretValue.fromUtf8("x"),
     }),
     (e: unknown) => e instanceof Error && (e as { code?: string }).code === "invalid_template_param",
   );
@@ -372,7 +373,7 @@ test("runTemplate (tmp_env_file_0600): additionalArgs are spliced BEFORE the val
         additionalArgs: (p) => p["project_ref"] !== undefined && p["project_ref"] !== "" ? ["--project-ref", p["project_ref"]] : [],
       },
       params: { name: "X", project_ref: "abcdef" },
-      secret: "needle",
+      secret: SecretValue.fromUtf8("needle"),
       tmpDir,
     });
     const argv = JSON.parse(await readFile(argvSidecar, "utf8")) as string[];

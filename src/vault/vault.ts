@@ -5,9 +5,11 @@ import { buildSecretRef, canonicalEnvironment } from "../shared/refs.js";
 import { generateSecretValue } from "../daemon/helpers/generate-value.js";
 import { decryptVault, encryptVault } from "./crypto.js";
 import { fingerprintSecret, isLegacyFingerprint } from "./fingerprints.js";
+import { SecretValue } from "./secret-value.js";
 import type {
   AgentSecretMetadata,
   EncryptedVaultFile,
+  ResolvedSecret,
   SecretAction,
   SecretRecord,
   UpsertSecretInput,
@@ -58,50 +60,62 @@ export class Vault {
   }
 
   async upsertSecret(input: UpsertSecretInput): Promise<AgentSecretMetadata> {
-    const plaintext = await this.read();
-    const environment = canonicalEnvironment(input.environment);
-    const ref = buildSecretRef(input.source, environment, input.name);
-    const existing = plaintext.secrets.find((secret) => secret.ref === ref);
+    // Burst 7 §2 (5q): the vault OWNS the handed-off SecretValue. Scrub it in a
+    // `finally` so the inbound plaintext is zeroed on EVERY exit — the success
+    // path, the pre-write `secret_exists` throw (which fires before `record` is
+    // built), and any read()/write() error.
+    try {
+      const plaintext = await this.read();
+      const environment = canonicalEnvironment(input.environment);
+      const ref = buildSecretRef(input.source, environment, input.name);
+      const existing = plaintext.secrets.find((secret) => secret.ref === ref);
 
-    if (existing !== undefined && input.force !== true) {
-      throw new ShuttleError(
-        "secret_exists",
-        `Secret ${ref} already exists. Re-run with --force to overwrite it.`,
-      );
+      if (existing !== undefined && input.force !== true) {
+        throw new ShuttleError(
+          "secret_exists",
+          `Secret ${ref} already exists. Re-run with --force to overwrite it.`,
+        );
+      }
+
+      const now = new Date().toISOString();
+      const record: SecretRecord = {
+        id: existing?.id ?? `sec_${randomUUID().replaceAll("-", "")}`,
+        ref,
+        name: input.name,
+        environment,
+        source: input.source.toLowerCase(),
+        created_at: existing?.created_at ?? now,
+        updated_at: now,
+        last_used_at: existing?.last_used_at ?? null,
+        fingerprint: fingerprintSecret(input.value.bytes(), Buffer.from(plaintext.fingerprint_key as string, "base64")),
+        allowed_domains: normalizeDomains(input.allowedDomains),
+        // Explicit caller-supplied actions win. Otherwise: a brand-new record gets
+        // the extended default set; an OVERWRITE preserves the prior record's
+        // allowed_actions so a force-rotate never silently widens scope (§4.4).
+        allowed_actions:
+          input.allowedActions ?? (existing !== undefined ? [...existing.allowed_actions] : [...DEFAULT_ACTIONS]),
+        requires_approval: input.requiresApproval ?? environment === "production",
+        classification: environment === "production" ? "production_secret" : "secret",
+        // Tier A: the stored record stays a string (on-disk format unchanged).
+        // The bytes→string conversion is the bounded encrypt-boundary transient.
+        value: input.value.bytes().toString("utf8"),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+      };
+
+      if (existing === undefined) {
+        plaintext.secrets.push(record);
+      } else {
+        const index = plaintext.secrets.findIndex((secret) => secret.ref === ref);
+        plaintext.secrets[index] = record;
+      }
+
+      await this.write(plaintext);
+      return toAgentMetadata(record);
+    } finally {
+      // Vault OWNS the handed-off value — scrub on success, secret_exists throw,
+      // and read/write error alike (the throw can fire before `record` is built).
+      input.value.dispose();
     }
-
-    const now = new Date().toISOString();
-    const record: SecretRecord = {
-      id: existing?.id ?? `sec_${randomUUID().replaceAll("-", "")}`,
-      ref,
-      name: input.name,
-      environment,
-      source: input.source.toLowerCase(),
-      created_at: existing?.created_at ?? now,
-      updated_at: now,
-      last_used_at: existing?.last_used_at ?? null,
-      fingerprint: fingerprintSecret(input.value, Buffer.from(plaintext.fingerprint_key as string, "base64")),
-      allowed_domains: normalizeDomains(input.allowedDomains),
-      // Explicit caller-supplied actions win. Otherwise: a brand-new record gets
-      // the extended default set; an OVERWRITE preserves the prior record's
-      // allowed_actions so a force-rotate never silently widens scope (§4.4).
-      allowed_actions:
-        input.allowedActions ?? (existing !== undefined ? [...existing.allowed_actions] : [...DEFAULT_ACTIONS]),
-      requires_approval: input.requiresApproval ?? environment === "production",
-      classification: environment === "production" ? "production_secret" : "secret",
-      value: input.value,
-      ...(input.description !== undefined ? { description: input.description } : {}),
-    };
-
-    if (existing === undefined) {
-      plaintext.secrets.push(record);
-    } else {
-      const index = plaintext.secrets.findIndex((secret) => secret.ref === ref);
-      plaintext.secrets[index] = record;
-    }
-
-    await this.write(plaintext);
-    return toAgentMetadata(record);
   }
 
   async list(
@@ -136,6 +150,29 @@ export class Vault {
       throw new ShuttleError("secret_not_found", `Secret ${ref} was not found.`);
     }
     return secret;
+  }
+
+  /** Wrap a stored record into a ResolvedSecret: strip the stored string and
+   *  attach a disposable SecretValue created from it. Used by the plaintext-
+   *  resolving accessors only. The caller OWNS and must dispose() resolved.value. */
+  private toResolvedSecret(record: SecretRecord): ResolvedSecret {
+    const { value, ...meta } = record;
+    return { ...meta, value: SecretValue.fromUtf8(value) };
+  }
+
+  /**
+   * Resolve a single ref to a ResolvedSecret (metadata + a disposable
+   * SecretValue). Throws secret_not_found for missing or soft-deleted refs.
+   * The caller OWNS the returned SecretValue and MUST dispose() it after the
+   * sink resolves (Burst 7 §2 two-phase late-resolve discipline).
+   */
+  async resolveSecret(ref: string): Promise<ResolvedSecret> {
+    const plaintext = await this.read();
+    const secret = plaintext.secrets.find((candidate) => candidate.ref === ref);
+    if (secret === undefined || secret.deleted_at !== undefined) {
+      throw new ShuttleError("secret_not_found", `Secret ${ref} was not found.`);
+    }
+    return this.toResolvedSecret(secret);
   }
 
   async softDelete(ref: string): Promise<{ ref: string; deleted_at: string }> {
@@ -187,23 +224,23 @@ export class Vault {
     allowed_actions?: SecretAction[];
     description?: string;
     force?: boolean;
-  }): Promise<SecretRecord> {
-    const value = generateSecretValue(input.kind);
-    await this.upsertSecret({
+  }): Promise<AgentSecretMetadata> {
+    // generateSecretValue returns an ENCODED string (base64url/hex). Wrap it via
+    // fromUtf8 so the stored value + fingerprint stay byte-identical to the
+    // pre-5q behavior (Code-Grounding #9). Return the upsertSecret metadata
+    // directly — no getSecret read-back, so no string-valued SecretRecord
+    // crosses the vault boundary to the rotate route (read-path-review finding).
+    // upsertSecret OWNS + disposes the SecretValue in its finally.
+    return await this.upsertSecret({
       name: input.name,
       environment: input.environment,
       source: input.source,
-      value,
+      value: SecretValue.fromUtf8(generateSecretValue(input.kind)),
       allowedDomains: input.allowed_domains,
       ...(input.allowed_actions !== undefined ? { allowedActions: input.allowed_actions } : {}),
       ...(input.description !== undefined ? { description: input.description } : {}),
       ...(input.force !== undefined ? { force: input.force } : {}),
     });
-    // Return the canonical stored record (with `ref`) — read it back from the
-    // freshly persisted vault to keep generate/rotate code paths uniform.
-    const env = canonicalEnvironment(input.environment);
-    const ref = buildSecretRef(input.source, env, input.name);
-    return this.getSecret(ref);
   }
 
   private async read(): Promise<VaultPlaintext> {
@@ -246,7 +283,7 @@ export class Vault {
     const fpKey = Buffer.from(pt.fingerprint_key, "base64");
     for (const s of pt.secrets) {
       if (isLegacyFingerprint(s.fingerprint)) {
-        s.fingerprint = fingerprintSecret(s.value, fpKey);
+        s.fingerprint = fingerprintSecret(Buffer.from(s.value, "utf8"), fpKey);
         dirty = true;
       }
     }
@@ -254,18 +291,27 @@ export class Vault {
   }
 
   /**
-   * Resolve a list of ss:// refs to a Map<ref, SecretRecord>. Uses the
-   * deleted-aware getSecret() so refs that have been soft-deleted throw
-   * secret_not_found. Single-pass — fails fast on the first missing ref.
-   * Dedupes input. Callers should do assertSecretActionAllowed + markUsed
-   * on each returned record.
+   * Resolve a list of ss:// refs to a Map<ref, ResolvedSecret>. Uses the
+   * deleted-aware lookup so soft-deleted refs throw secret_not_found.
+   * Single-pass — fails fast on the first missing ref. Dedupes input. The
+   * caller OWNS every returned SecretValue and MUST dispose() each.
    */
-  async resolveRefs(refs: readonly string[]): Promise<Map<string, SecretRecord>> {
-    const result = new Map<string, SecretRecord>();
-    for (const ref of refs) {
-      if (result.has(ref)) continue; // dedupe
-      const record = await this.getSecret(ref);
-      result.set(ref, record);
+  async resolveRefs(refs: readonly string[]): Promise<Map<string, ResolvedSecret>> {
+    const result = new Map<string, ResolvedSecret>();
+    try {
+      for (const ref of refs) {
+        if (result.has(ref)) continue; // dedupe
+        const record = await this.getSecret(ref);
+        result.set(ref, this.toResolvedSecret(record));
+      }
+    } catch (e) {
+      // A later ref threw (e.g. the second ref is soft-deleted →
+      // secret_not_found) AFTER earlier refs were already wrapped into owned,
+      // disposable SecretValues. The caller never receives the partial map, so
+      // its finally never sees those values — dispose them here before
+      // rethrowing so no resolved plaintext bytes leak on the failure path.
+      for (const r of result.values()) r.value.dispose();
+      throw e;
     }
     return result;
   }

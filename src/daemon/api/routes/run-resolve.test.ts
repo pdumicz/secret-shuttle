@@ -7,6 +7,7 @@ import path from "node:path";
 import { DaemonServer } from "../../server.js";
 import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
+import { SecretValue } from "../../../vault/secret-value.js";
 import type { StreamLine } from "../../../client/streaming-request.js";
 
 interface Ctx {
@@ -144,7 +145,7 @@ async function seedSecret(
     source: opts.source,
     environment: opts.environment,
     name: opts.name,
-    value: opts.value,
+    value: SecretValue.fromUtf8(opts.value),
     allowedDomains: [],
     ...(opts.allowedActions !== undefined ? { allowedActions: opts.allowedActions as never } : {}),
   });
@@ -1243,5 +1244,142 @@ test("POST /v1/run/resolve: combined production env+stdin + --no-wait converges 
     assert.match(second.contentType, /ndjson/);
     const exitLine = second.lines.find((l) => "exit" in l) as { exit: number } | undefined;
     assert.equal(exitLine?.exit, 0, "combined env+stdin --no-wait with approval_ids must complete exit 0");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Burst 7 §2 (5q): env drop-reference + SecretValue dispose lifetime
+// -----------------------------------------------------------------------------
+
+test("POST /v1/run/resolve (5q): clears env entries + disposes SecretValues AFTER spawn is initiated and BEFORE child exit (not in the outer finally)", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "development", name: "LIFETIME", value: "world-lifetime",
+    });
+
+    // Spy resolveRefs: record the moment each resolved SecretValue is disposed.
+    let disposedAt: number | undefined;
+    let disposeCount = 0;
+    const realResolveRefs = ctx.services.vault.resolveRefs.bind(ctx.services.vault);
+    ctx.services.vault.resolveRefs = (async (refs: readonly string[]) => {
+      const m = await realResolveRefs(refs);
+      for (const r of m.values()) {
+        const realDispose = r.value.dispose.bind(r.value);
+        r.value.dispose = () => {
+          disposeCount += 1;
+          if (disposedAt === undefined) disposedAt = Date.now();
+          realDispose();
+        };
+      }
+      return m;
+    }) as typeof ctx.services.vault.resolveRefs;
+
+    // Child sleeps ~400ms AFTER printing the secret, so the child lifetime
+    // clearly extends past the synchronous post-spawn drop. If dispose happened
+    // in the outer finally (after awaiting child exit), disposedAt would be ~at
+    // the response-complete time; we assert it fires well BEFORE that.
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [ref],
+      env: [{ key: "LIFETIME", value: ref, isRef: true }],
+      command: process.execPath,
+      args: ["-e", "process.stdout.write(process.env.LIFETIME + '\\n'); setTimeout(() => process.exit(0), 400)"],
+      cwd: process.cwd(),
+    });
+    const doneAt = Date.now();
+
+    assert.equal(r.status, 200);
+    // The child still ran correctly (env was copied before the drop) — the
+    // value reached the child and was masked on the way back.
+    assert.equal(r.stdout, "***\n", "child saw the env value despite the post-spawn env-clear");
+    const exitLine = r.lines.find((l) => "exit" in l) as { exit: number } | undefined;
+    assert.equal(exitLine?.exit, 0);
+
+    // dispose() is called at least once. The route disposes in-band right after
+    // spawn initiation AND has an idempotent backstop in the outer finally (the
+    // plan endorses the double-call: dispose() is idempotent, scrubbing the
+    // bytes exactly once regardless). The SECURITY-relevant signal is the
+    // TIMING below — the FIRST dispose fires during the child's lifetime, not
+    // after the awaited child exit.
+    assert.ok(disposeCount >= 1, "the resolved SecretValue must be disposed");
+    assert.ok(disposedAt !== undefined, "dispose must have fired");
+    // First dispose fired during the child's lifetime — at least ~200ms before
+    // the child (and thus the awaited spawn Promise) settled. An outer-finally-
+    // ONLY dispose would have disposedAt within a few ms of doneAt.
+    assert.ok(
+      doneAt - disposedAt! > 200,
+      `dispose must fire before child exit (gap=${doneAt - disposedAt!}ms; expected >200ms — proves drop is post-spawn-init, not outer-finally)`,
+    );
+  });
+});
+
+test("POST /v1/run/resolve (5q): preflight uses inspect (metadata-only) BEFORE the approval gate; plaintext resolveRefs runs after", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "development", name: "ORDER", value: "ordered-value",
+    });
+
+    const events: string[] = [];
+    const realInspect = ctx.services.vault.inspect.bind(ctx.services.vault);
+    ctx.services.vault.inspect = (async (r: string) => {
+      events.push("inspect");
+      return realInspect(r);
+    }) as typeof ctx.services.vault.inspect;
+    const realResolveRefs = ctx.services.vault.resolveRefs.bind(ctx.services.vault);
+    ctx.services.vault.resolveRefs = (async (refs: readonly string[]) => {
+      events.push("resolveRefs");
+      return realResolveRefs(refs);
+    }) as typeof ctx.services.vault.resolveRefs;
+
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [ref],
+      env: [{ key: "ORDER", value: ref, isRef: true }],
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 200);
+    // inspect ran (metadata preflight + policy) before resolveRefs (plaintext).
+    assert.ok(events.includes("inspect"), "metadata preflight must use inspect");
+    const inspectIdx = events.indexOf("inspect");
+    const resolveIdx = events.indexOf("resolveRefs");
+    assert.ok(resolveIdx > -1, "plaintext resolveRefs must be called");
+    assert.ok(inspectIdx < resolveIdx, "inspect (preflight) must precede plaintext resolveRefs");
+  });
+});
+
+test("POST /v1/run/resolve (5q): a pre-spawn failure (action_not_allowed) disposes every resolved SecretValue", async () => {
+  // The action check happens on metaByRef (no SecretValue resolved yet), so by
+  // construction nothing is leaked on that path. This test pins that the
+  // metadata-only preflight means NO plaintext SecretValue is allocated before
+  // the gate: resolveRefs (which allocates SecretValues) is never reached when
+  // the policy check fails pre-approval.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "development", name: "NOSTDIN", value: "v",
+      allowedActions: ["inject_into_field"], // use_as_stdin removed
+    });
+
+    let resolveRefsCalled = false;
+    const realResolveRefs = ctx.services.vault.resolveRefs.bind(ctx.services.vault);
+    ctx.services.vault.resolveRefs = (async (refs: readonly string[]) => {
+      resolveRefsCalled = true;
+      return realResolveRefs(refs);
+    }) as typeof ctx.services.vault.resolveRefs;
+
+    const r = await callStream(ctx, "/v1/run/resolve", {
+      refs: [ref],
+      env: [{ key: "NOSTDIN", value: ref, isRef: true }],
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: process.cwd(),
+    });
+    assert.equal(r.status, 400);
+    assert.equal((r.errorBody as { error: { code: string } }).error.code, "action_not_allowed");
+    // No plaintext SecretValue was ever allocated (the gate is metadata-only) —
+    // so there is nothing to leak across the failed pre-approval path.
+    assert.equal(resolveRefsCalled, false, "plaintext resolveRefs must NOT run when the pre-approval policy check fails");
   });
 });

@@ -333,6 +333,65 @@ test("compare returns matches=true when stubbed value matches stored secret", as
   });
 });
 
+test("compare (5q): the candidate is captured AFTER approval; the only pre-approval browser read is the value-free readFocusedFingerprintAndDomain; match correctness holds", async () => {
+  // Burst 7 §2 (5q). Compare must NOT capture the candidate value before the
+  // approval gate. The pre-approval browser read is the value-free
+  // readFocusedFingerprintAndDomain; captureFocused/captureSelection happen
+  // only after requireApprovals resolves. Uses a PRODUCTION secret + a
+  // pre-issued compare approval so the gate is exercised.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    // Seed a production secret with a known value via capture.
+    await call(ctx, "POST", "/v1/blind/start", { domain: "stripe.com", reason: "r" });
+    ctx.services.browser = stubBrowser({ domain: "stripe.com", target: "T1", value: "prod-candidate" });
+    const capGrant = ctx.services.approvals.create({
+      action: "capture", ref: null, planned_ref: "ss://stripe/prod/PCMP",
+      environment: "production", destination_domain: "stripe.com",
+      target_id: "T1", field_fingerprint: "sha256:T1-stripe.com",
+      template_id: null, template_params: null, allowed_domains: ["stripe.com"],
+    });
+    ctx.services.approvals.approve(capGrant.id);
+    const cap = await call(ctx, "POST", "/v1/secrets/capture", {
+      name: "PCMP", environment: "production", source: "stripe",
+      allowed_domains: ["stripe.com"], approval_id: capGrant.id, wait_for_approval: false,
+    });
+    assert.equal(cap.status, 200, `capture seed failed: ${JSON.stringify(cap.body)}`);
+
+    // Recording browser: ordering of the value-free read vs the value capture.
+    const events: string[] = [];
+    const recording = stubBrowser({ domain: "stripe.com", target: "T1", value: "prod-candidate" });
+    const realPre = recording.readFocusedFingerprintAndDomain.bind(recording);
+    recording.readFocusedFingerprintAndDomain = (async () => {
+      events.push("preflight");
+      return realPre();
+    }) as typeof recording.readFocusedFingerprintAndDomain;
+    const realCapture = recording.captureFocused.bind(recording);
+    recording.captureFocused = (async () => {
+      events.push("capture");
+      return realCapture();
+    }) as typeof recording.captureFocused;
+    ctx.services.browser = recording;
+
+    // Pre-issue + approve the compare binding.
+    const cmpGrant = ctx.services.approvals.create({
+      action: "compare", ref: "ss://stripe/prod/PCMP", environment: "production",
+      destination_domain: "stripe.com", target_id: null, field_fingerprint: null,
+      template_id: null, template_params: null, allowed_domains: ["stripe.com"],
+    });
+    ctx.services.approvals.approve(cmpGrant.id);
+
+    const r = await call(ctx, "POST", "/v1/secrets/compare", {
+      ref: "ss://stripe/prod/PCMP", approval_id: cmpGrant.id, wait_for_approval: false,
+    });
+    assert.equal(r.status, 200, `compare failed: ${JSON.stringify(r.body)}`);
+    assert.equal((r.body as { matches: boolean }).matches, true, "candidate must still match the stored fingerprint");
+    // The value-free preflight ran; the value capture ran AFTER it.
+    assert.equal(events[0], "preflight", "pre-approval read must be the value-free readFocusedFingerprintAndDomain");
+    const capIdx = events.indexOf("capture");
+    assert.ok(capIdx > 0, "captureFocused must run AFTER the preflight (i.e. after approval)");
+  });
+});
+
 test("approvals/poll returns status of a pending grant", async () => {
   await withDaemon(async (ctx) => {
     const g = ctx.services.approvals.create({
@@ -820,6 +879,63 @@ test("successful inject leaves daemon-managed blind mode ACTIVE and severs the p
     assert.equal(severed, true, "inject must sever agent CDP connections");
     const status = await call(ctx, "GET", "/v1/status");
     assert.notEqual((status.body as { blind_mode: unknown }).blind_mode, null);
+  });
+});
+
+test("inject (5q): preflight uses inspect, resolveSecret runs after approval before injectFocused, disposed once", async () => {
+  // Burst 7 §2 (5q). Late-resolve discipline for /v1/secrets/inject:
+  // inspect for the pre-approval preflight; resolveSecret only after the
+  // approval gate, immediately before injectFocused; SecretValue disposed in
+  // the finally exactly once.
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    await call(ctx, "POST", "/v1/secrets/generate", {
+      name: "INJ", environment: "development", source: "local",
+      allowed_domains: ["app.example.com"],
+    });
+
+    const events: string[] = [];
+    let resolveCount = 0;
+    let disposeCount = 0;
+    let injectSawSecret = false;
+
+    const realInspect = ctx.services.vault.inspect.bind(ctx.services.vault);
+    ctx.services.vault.inspect = (async (ref: string) => {
+      events.push("inspect");
+      return realInspect(ref);
+    }) as typeof ctx.services.vault.inspect;
+    const realResolve = ctx.services.vault.resolveSecret.bind(ctx.services.vault);
+    const resolvedPlain = (await realResolve("ss://local/dev/INJ")).value.bytes().toString("utf8");
+    ctx.services.vault.resolveSecret = (async (ref: string) => {
+      events.push("resolveSecret");
+      resolveCount += 1;
+      const r = await realResolve(ref);
+      const realDispose = r.value.dispose.bind(r.value);
+      r.value.dispose = () => { disposeCount += 1; realDispose(); };
+      return r;
+    }) as typeof ctx.services.vault.resolveSecret;
+
+    const browser = stubBrowser({ domain: "app.example.com", target: "T1", value: "" });
+    const realInjectFocused = browser.injectFocused.bind(browser);
+    browser.injectFocused = (async (v: string) => {
+      events.push("injectFocused");
+      injectSawSecret = v === resolvedPlain;
+      return realInjectFocused(v);
+    }) as typeof browser.injectFocused;
+    ctx.services.browser = browser;
+
+    const r = await call(ctx, "POST", "/v1/secrets/inject", {
+      ref: "ss://local/dev/INJ", domain: "app.example.com", wait_for_approval: false,
+    });
+    assert.equal(r.status, 200);
+    assert.equal((r.body as { injected: boolean }).injected, true);
+    assert.equal(events[0], "inspect", "pre-approval preflight must use inspect");
+    const resolveIdx = events.indexOf("resolveSecret");
+    const injectIdx = events.indexOf("injectFocused");
+    assert.ok(resolveIdx > -1 && resolveIdx < injectIdx, "resolveSecret must run before injectFocused");
+    assert.equal(resolveCount, 1, "resolveSecret called exactly once");
+    assert.equal(injectSawSecret, true, "injectFocused received the resolved plaintext");
+    assert.equal(disposeCount, 1, "resolved SecretValue disposed exactly once (finally)");
   });
 });
 

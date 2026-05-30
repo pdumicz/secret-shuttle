@@ -25,7 +25,8 @@ import { registerKeychainRoutes } from "../../daemon/api/routes/keychain.js";
 import { registerTokens } from "../../daemon/api/routes/tokens.js";
 import { writeSocketFile } from "../../daemon/socket-file.js";
 import { readEnvelope } from "../../vault/envelope.js";
-import { initCommand } from "./init.js";
+import { initCommand, resolvePerProjectOptIn } from "./init.js";
+import { loadIdentityPerProject } from "./identity-config.js";
 import type { KeychainAdapter } from "../../vault/keychain/types.js";
 import { deriveAutoAgentId } from "../../daemon/auth/agent-id.js";
 import { ShuttleError } from "../../shared/errors.js";
@@ -863,4 +864,68 @@ test("init: one runtime's /v1/tokens/mint failure does not halt the others; summ
       await rm(projDir, { recursive: true, force: true });
     }
   }, { keychain });
+});
+
+// ── Burst 7 §1 (Plan 5s): --per-project-identity opt-in resolution ───────────
+//
+// Asserts the flag's CONFIG side effect + the opt-in resolution, without
+// requiring a live daemon. The agent-id derivation itself is covered by
+// agent-id.test.ts; here we pin that the flag (1) persists the opt-in and
+// (2) preserves infer.*.
+
+test("init --per-project-identity: flag true OR config true ⇒ opt-in; writes config preserving infer.*", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ss-init-ppi-"));
+  try {
+    await writeFile(
+      path.join(dir, "secret-shuttle.config.json"),
+      JSON.stringify({ infer: { supabaseNames: ["DATABASE_SERVICE_KEY"] } }),
+    );
+    // Flag set ⇒ resolves true AND persists the opt-in.
+    const optedIn = await resolvePerProjectOptIn({ cwd: dir, flag: true });
+    assert.equal(optedIn, true);
+    assert.equal(await loadIdentityPerProject(dir), true, "flag persisted into config");
+    const parsed = JSON.parse(await readFile(path.join(dir, "secret-shuttle.config.json"), "utf8"));
+    assert.deepEqual(parsed.infer, { supabaseNames: ["DATABASE_SERVICE_KEY"] }, "infer.* preserved");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: no flag + no config ⇒ opt-out (2-arg derivation path)", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ss-init-ppi-off-"));
+  try {
+    assert.equal(await resolvePerProjectOptIn({ cwd: dir, flag: false }), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("init: no flag + config perProject:true ⇒ opt-in (config is canonical, no re-write needed)", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ss-init-ppi-cfg-"));
+  try {
+    await writeFile(path.join(dir, "secret-shuttle.config.json"), JSON.stringify({ identity: { perProject: true } }));
+    assert.equal(await resolvePerProjectOptIn({ cwd: dir, flag: false }), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("init --per-project-identity: persists the opt-in even with zero detected runtimes (records intent for a later init)", async () => {
+  // The opt-in is resolved once BEFORE the per-runtime mint loop, so the flag
+  // records intent into the canonical config even when no agent runtime is
+  // present yet (no token is minted). A later init — after the user adds
+  // .claude/ etc. — then honors the persisted opt-in.
+  const dir = await mkdtemp(path.join(os.tmpdir(), "ss-init-ppi-noruntime-"));
+  try {
+    // No .claude/.cursor/etc. in this bare dir ⇒ zero runtimes.
+    const optedIn = await resolvePerProjectOptIn({ cwd: dir, flag: true });
+    assert.equal(optedIn, true, "flag opts in regardless of runtime detection");
+    assert.equal(
+      await loadIdentityPerProject(dir),
+      true,
+      "opt-in persisted to config even though no token was minted",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

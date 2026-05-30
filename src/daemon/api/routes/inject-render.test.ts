@@ -6,6 +6,7 @@ import path from "node:path";
 import { DaemonServer } from "../../server.js";
 import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
+import { SecretValue } from "../../../vault/secret-value.js";
 
 interface Ctx {
   port: number;
@@ -79,7 +80,7 @@ async function seedSecret(
     source: opts.source,
     environment: opts.environment,
     name: opts.name,
-    value: opts.value,
+    value: SecretValue.fromUtf8(opts.value),
     allowedDomains: [],
     ...(opts.allowedActions !== undefined ? { allowedActions: opts.allowedActions as never } : {}),
   });
@@ -493,5 +494,105 @@ test("POST /v1/inject/render: session pass-through — audit lacks session_id; u
 
     // Session was NOT minted — uses stays at 0.
     assert.equal(ctx.services.sessionStore.get(sg.id)!.uses, 0);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Burst 7 §2 (5q): file-mode reorder (validate before render) + late resolve
+// -----------------------------------------------------------------------------
+
+test("POST /v1/inject/render (5q): file mode validates path BEFORE render — a path-unsafe target throws inject_output_path_unsafe WITHOUT resolving plaintext or rendering", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "development", name: "PATHV", value: "must-not-render",
+    });
+
+    let resolveRefsCalled = false;
+    const realResolveRefs = ctx.services.vault.resolveRefs.bind(ctx.services.vault);
+    ctx.services.vault.resolveRefs = (async (refs: readonly string[]) => {
+      resolveRefsCalled = true;
+      return realResolveRefs(refs);
+    }) as typeof ctx.services.vault.resolveRefs;
+
+    const r = await call(ctx, "POST", "/v1/inject/render", {
+      template: `key: ${ref}`,
+      output_path: "/tmp/escape-5q.yml", // outside $HOME → path-unsafe
+    });
+    assert.equal((r.body as { error_code: string }).error_code, "inject_output_path_unsafe");
+    // The plaintext was NEVER resolved (and thus never rendered) — path
+    // validation happens before the resolve/render in file mode.
+    assert.equal(resolveRefsCalled, false, "plaintext must not be resolved when the path is rejected");
+  });
+});
+
+test("POST /v1/inject/render (5q): a write failure still disposes each resolved SecretValue", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "development", name: "WFAIL", value: "v-wfail",
+    });
+
+    let disposeCount = 0;
+    const realResolveRefs = ctx.services.vault.resolveRefs.bind(ctx.services.vault);
+    ctx.services.vault.resolveRefs = (async (refs: readonly string[]) => {
+      const m = await realResolveRefs(refs);
+      for (const rr of m.values()) {
+        const realDispose = rr.value.dispose.bind(rr.value);
+        rr.value.dispose = () => { disposeCount += 1; realDispose(); };
+      }
+      return m;
+    }) as typeof ctx.services.vault.resolveRefs;
+
+    // Force a write failure: point output at a path whose PARENT is a regular
+    // file (so open() of the temp file under it fails with ENOTDIR after path
+    // validation passes for the leaf — actually the ancestor walk rejects a
+    // non-directory ancestor first, which is still a post-resolve-independent
+    // failure). Simpler + deterministic: pre-create the final path as a
+    // directory so rename() onto it fails. We open the temp fine, render, then
+    // rename fails → catch → finally disposes.
+    const outputPath = path.join(ctx.home, "is-a-dir.yml");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(outputPath, { recursive: true }); // final path is a directory → rename fails
+
+    const r = await call(ctx, "POST", "/v1/inject/render", {
+      template: `key: ${ref}`,
+      output_path: outputPath,
+    });
+    assert.notEqual(r.status, 200, "write must fail when the final path is a directory");
+    assert.equal(disposeCount, 1, "the resolved SecretValue must be disposed even on a write failure");
+  });
+});
+
+test("POST /v1/inject/render (5q): stdout mode renders-then-returns content; resolve happens after the gate; disposed in finally", async () => {
+  await withDaemon(async (ctx) => {
+    await call(ctx, "POST", "/v1/unlock", { passphrase: "p", set_passphrase: true });
+    const ref = await seedSecret(ctx.services, {
+      source: "x", environment: "development", name: "STDOUTV", value: "stdout-secret",
+    });
+
+    let disposeCount = 0;
+    let resolveCount = 0;
+    const realResolveRefs = ctx.services.vault.resolveRefs.bind(ctx.services.vault);
+    ctx.services.vault.resolveRefs = (async (refs: readonly string[]) => {
+      resolveCount += 1;
+      const m = await realResolveRefs(refs);
+      for (const rr of m.values()) {
+        const realDispose = rr.value.dispose.bind(rr.value);
+        rr.value.dispose = () => { disposeCount += 1; realDispose(); };
+      }
+      return m;
+    }) as typeof ctx.services.vault.resolveRefs;
+
+    const r = await call(ctx, "POST", "/v1/inject/render", {
+      template: `key: ${ref}`,
+      output_path: "-",
+    });
+    assert.equal(r.status, 200);
+    // stdout mode is the intentional plaintext-out surface — content unchanged.
+    assert.equal((r.body as { content: string }).content, "key: stdout-secret");
+    assert.equal((r.body as { value_visible_to_agent?: boolean }).value_visible_to_agent ?? false, false);
+    assert.equal(resolveCount, 1, "resolveRefs called exactly once (after the gate)");
+    assert.equal(disposeCount, 1, "resolved SecretValue disposed exactly once (finally)");
   });
 });

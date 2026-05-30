@@ -2,14 +2,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createMasker } from "./masker.js";
 
+// Burst 7 §2 (5q): createMasker now takes Buffer[] (the secret never enters as
+// a string). These tests build patterns from strings, so map to bytes here.
+const toBufs = (s: string[]): Buffer[] => s.map((x) => Buffer.from(x, "utf8"));
+
 test("createMasker: empty secrets list is pass-through", () => {
-  const m = createMasker([]);
+  const m = createMasker(toBufs([]));
   assert.equal(m.process(Buffer.from("hello world")).toString("utf8"), "hello world");
   assert.equal(m.flush().toString("utf8"), "");
 });
 
 test("createMasker: replaces a complete match in a single chunk", () => {
-  const m = createMasker(["sk_live_abc123"]);
+  const m = createMasker(toBufs(["sk_live_abc123"]));
   const out = Buffer.concat([
     m.process(Buffer.from("api: sk_live_abc123 done")),
     m.flush(),
@@ -18,7 +22,7 @@ test("createMasker: replaces a complete match in a single chunk", () => {
 });
 
 test("createMasker: replaces a match split across two chunks", () => {
-  const m = createMasker(["sk_live_abc123"]);
+  const m = createMasker(toBufs(["sk_live_abc123"]));
   const a = m.process(Buffer.from("api: sk_live_"));
   const b = m.process(Buffer.from("abc123 done"));
   const c = m.flush();
@@ -29,7 +33,7 @@ test("createMasker: replaces a match split at every possible boundary", () => {
   const secret = "ABCDEFGH";
   const text = `prefix-${secret}-suffix`;
   for (let split = 0; split <= text.length; split++) {
-    const m = createMasker([secret]);
+    const m = createMasker(toBufs([secret]));
     const a = m.process(Buffer.from(text.slice(0, split)));
     const b = m.process(Buffer.from(text.slice(split)));
     const c = m.flush();
@@ -40,7 +44,7 @@ test("createMasker: replaces a match split at every possible boundary", () => {
 
 test("createMasker: multiple secrets — longer-first wins overlapping matches", () => {
   // "ABCDE" is a superset of "BCD"; longer should match.
-  const m = createMasker(["BCD", "ABCDE"]);
+  const m = createMasker(toBufs(["BCD", "ABCDE"]));
   const out = Buffer.concat([
     m.process(Buffer.from("xxABCDExx")),
     m.flush(),
@@ -49,7 +53,7 @@ test("createMasker: multiple secrets — longer-first wins overlapping matches",
 });
 
 test("createMasker: replaces multiple non-overlapping matches in one chunk", () => {
-  const m = createMasker(["secret1", "secret2"]);
+  const m = createMasker(toBufs(["secret1", "secret2"]));
   const out = Buffer.concat([
     m.process(Buffer.from("one=secret1 two=secret2 done")),
     m.flush(),
@@ -61,14 +65,14 @@ test("createMasker: secret only emitted via flush is still masked", () => {
   // Process a chunk that ends mid-secret; flush must mask the held-back portion.
   // (The held-back portion IS what's NOT been masked yet — but the chunk contained
   // the WHOLE secret, so it was already replaced by the time we hit flush.)
-  const m = createMasker(["topsecret"]);
+  const m = createMasker(toBufs(["topsecret"]));
   const a = m.process(Buffer.from("XtopsecretY"));
   const b = m.flush();
   assert.equal(Buffer.concat([a, b]).toString("utf8"), "X***Y");
 });
 
 test("createMasker: empty-string secrets are filtered (no spam)", () => {
-  const m = createMasker(["", "real"]);
+  const m = createMasker(toBufs(["", "real"]));
   const out = Buffer.concat([
     m.process(Buffer.from("hello real world")),
     m.flush(),
@@ -77,7 +81,7 @@ test("createMasker: empty-string secrets are filtered (no spam)", () => {
 });
 
 test("createMasker: deduplicates repeated secrets", () => {
-  const m = createMasker(["dup", "dup", "dup"]);
+  const m = createMasker(toBufs(["dup", "dup", "dup"]));
   const out = Buffer.concat([
     m.process(Buffer.from("a-dup-b")),
     m.flush(),
@@ -87,7 +91,7 @@ test("createMasker: deduplicates repeated secrets", () => {
 
 test("createMasker: pre-mask boundary lookback is bounded by maxLen-1", () => {
   // After a long no-match chunk, the held-back tail must be at most maxLen-1.
-  const m = createMasker(["needle"]);
+  const m = createMasker(toBufs(["needle"]));
   const a = m.process(Buffer.from("haystack ".repeat(100)));
   // We can't directly observe the lookback, but after flush the total emitted
   // bytes plus flush bytes MUST equal the input length (no data lost).
@@ -100,7 +104,7 @@ test("createMasker: handles multi-byte UTF-8 secrets correctly", () => {
   // passphrases, etc.). Make sure byte-level matching doesn't confuse code-unit
   // boundaries with byte boundaries.
   const secret = "🔑-秘密-Pa$$"; // 4-byte emoji + 3-byte CJK chars + ASCII
-  const m = createMasker([secret]);
+  const m = createMasker(toBufs([secret]));
   const out = Buffer.concat([
     m.process(Buffer.from(`prefix-${secret}-suffix`, "utf8")),
     m.flush(),
@@ -113,7 +117,7 @@ test("createMasker: bytes that don't form valid UTF-8 secrets are stored as the 
   // the wire). Plain-ASCII secrets are the normal case. This test pins the
   // round-trip for an ASCII-only secret with mixed punctuation/symbols.
   const secret = "sk_test_AbCdEf-0123_456.789~end";
-  const m = createMasker([secret]);
+  const m = createMasker(toBufs([secret]));
   const out = Buffer.concat([
     m.process(Buffer.from(`Authorization: Bearer ${secret}\n`)),
     m.flush(),

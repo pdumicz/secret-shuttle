@@ -6,6 +6,7 @@ import test from "node:test";
 import { DaemonServer } from "../daemon/server.js";
 import { DaemonServices } from "../daemon/services.js";
 import { registerRoutes } from "../daemon/api/router.js";
+import { SecretValue } from "../vault/secret-value.js";
 import type { BrowserOps } from "../daemon/chrome/internal-ops.js";
 
 const SECRET = "whsec_e2e_simulated_value_must_not_leak";
@@ -58,7 +59,7 @@ test("agentic inject-submit end-to-end leaks neither the raw secret nor observed
     services.browser = stubBrowser();
     responses.push(await call("POST", "/v1/unlock", { passphrase: "p", set_passphrase: true }));
     await services.vault.upsertSecret({
-      name: "WH", environment: "production", source: "stripe", value: SECRET, allowedDomains: ["vercel.com"],
+      name: "WH", environment: "production", source: "stripe", value: SecretValue.fromUtf8(SECRET), allowedDomains: ["vercel.com"],
     });
     // Agent marks the field + submit BEFORE blind mode (Phase 1 surface).
     services.handles.put({
