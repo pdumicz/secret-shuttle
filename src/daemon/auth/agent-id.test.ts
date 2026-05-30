@@ -99,3 +99,35 @@ test("deriveAutoAgentId(3-arg): different scopes → different ids", () => {
   const idB = deriveAutoAgentId(runtime, machineId, "/Users/me/project-b");
   assert.notEqual(idA, idB, "distinct project scopes must yield distinct ids");
 });
+
+test("resolveProjectScope: returns the git-root in a temp git repo", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ss-scope-repo-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: dir, stdio: ["ignore", "ignore", "ignore"] });
+    const scope = resolveProjectScope(dir);
+    // realpath-normalize both sides: macOS /tmp is a symlink to /private/tmp,
+    // and `git rev-parse --show-toplevel` returns the realpath'd root.
+    const { realpathSync } = await import("node:fs");
+    assert.equal(realpathSync(scope), realpathSync(dir));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveProjectScope: returns cwd in a non-repo temp dir", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ss-scope-norepo-"));
+  try {
+    // No `git init` — a bare temp dir. (Guard: if the temp dir is itself
+    // inside an enclosing repo, git would return that root; tmpdir() is not.)
+    const scope = resolveProjectScope(dir);
+    assert.equal(scope, dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveProjectScope: returns cwd when git errors (nonexistent cwd)", () => {
+  // execFileSync throws (ENOENT on the cwd / git nonzero) → cwd fallback.
+  const bogus = "/nonexistent-path-for-ss-scope-test-xyz";
+  assert.equal(resolveProjectScope(bogus), bogus);
+});
