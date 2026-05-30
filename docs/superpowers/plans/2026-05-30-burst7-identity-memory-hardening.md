@@ -4,7 +4,7 @@
 
 **Goal:** Ship the two security-infrastructure plans forward-referenced since earlier bursts — opt-in per-project agent IDs (5s) and a scrubbable `SecretValue` Buffer use-path for plaintext-out-of-heap memory hygiene (5q) — plus the 5a keychain doc-comment correction, leaving the repo publish-ready as v0.4.0.
 
-**Architecture:** All work lands on a `burst7/identity-memory-hardening` branch in a worktree at `.worktrees/burst7-identity-memory-hardening`. §1 (5s) extends `deriveAutoAgentId` with an optional `projectScope` parameter, adds a `resolveProjectScope` helper + an `identity.perProject` config loader, and wires an opt-in `init --per-project-identity` flag — back-compatible, no existing identity changes. §2 (5q) is a cross-cutting internal in-memory representation change: a new redaction-safe `SecretValue` class wraps secret plaintext as a scrubbable `Buffer`; a new `resolveSecret`/`resolveRefs` accessor returns a disposable `ResolvedSecret`; metadata/existence callers move to the value-free `Vault.inspect`→`AgentSecretMetadata`; `fingerprintSecret`/`fingerprintMatches` take `Buffer`; and every per-secret consumer adopts a two-phase late-resolve discipline (metadata-only preflight before the approval gate, plaintext resolve only after, dispose in `finally`). No HTTP wire-format change, no on-disk vault-format change (Tier A), no fingerprint migration. The Wrap corrects stale keychain doc comments, writes the CHANGELOG entry, and bumps the version. Each task commits independently.
+**Architecture:** All work lands on a `burst7/identity-memory-hardening` branch in a worktree at `.worktrees/burst7-identity-memory-hardening`. §1 (5s) extends `deriveAutoAgentId` with an optional `projectScope` parameter, adds a `resolveProjectScope` helper + an `identity.perProject` config loader, and wires an opt-in `init --per-project-identity` flag — back-compatible, no existing identity changes. §2 (5q) is a cross-cutting internal in-memory representation change: a new redaction-safe `SecretValue` class wraps secret plaintext as a scrubbable `Buffer`; a new `resolveSecret`/`resolveRefs` accessor returns a disposable `ResolvedSecret`; metadata/existence callers move to the value-free `Vault.inspect`→`AgentSecretMetadata`; `fingerprintSecret`/`fingerprintMatches` take `Buffer`; and every per-secret consumer adopts a two-phase late-resolve discipline (metadata-only preflight before the approval gate, plaintext resolve only after, dispose in `finally`). No HTTP wire-format change, no on-disk vault-format change (Tier A), no fingerprint migration. The Wrap corrects stale keychain doc comments, writes the CHANGELOG entry, and bumps the version. Each task commits independently — **except Tasks 2.4 → 2.5.7**, which are one logically-atomic, no-commit batch: the accessor split makes the whole tree tsc-red until every consumer is migrated, so the first commit lands only at the Step 2.5.7.4 green checkpoint (see the Sequencing note at Step 2.4.6).
 
 **Tech Stack:** TypeScript strict ESM (ES2022/NodeNext), noUncheckedIndexedAccess + exactOptionalPropertyTypes, node:test, @napi-rs/keyring (already present).
 
@@ -98,7 +98,7 @@ These are verified facts about the current codebase that the engineer needs befo
 | `src/daemon/templates/tmp-env-file.ts` | MODIFY | `WriteSecretEnvFileInput.value: Buffer`; byte-built prefix/newline |
 | `src/daemon/inject/template.ts` | UNCHANGED | `render(Map<string,string>)` stays string-by-contract (accepted boundary) |
 | `src/vault/crypto.ts` | UNCHANGED | Tier B — do not touch |
-| `src/e2e/no-raw-resolved-value-in-response.test.ts` | CREATE | repo-scan guard: no daemon route serializes a raw resolved `.value` into a response |
+| `src/e2e/no-raw-resolved-value-in-response.test.ts` | CREATE | two repo-scan guards: (1) no daemon route serializes a raw resolved `.value` (direct + `.get(...)!.value` shapes); (2) no route calls `getSecret` (vault-internal-only) |
 | `src/vault/keychain/index.ts` | MODIFY (Wrap.1) | correct stale "stubs in Plan 1 / Plan 5a" comments (`:18,22`) |
 | `src/vault/keychain/types.ts` | MODIFY (Wrap.1) | correct stale "Plan 1 ships stubs / Plan 5a wires" comments (`:5,10`) |
 | `CHANGELOG.md` | MODIFY (Wrap.2) | Burst 7 entry under `## Unreleased`, above Burst 6 |
@@ -1147,12 +1147,12 @@ test("assertSecretActionAllowed accepts both a ResolvedSecret and AgentSecretMet
 ```
 Add a small `freshVaultWithSecret` helper to the test file if one does not already exist (build a `Vault`, `upsertSecret` the record with the still-string `value` — this test runs BEFORE the write-path task 2.6, so `upsertSecret` still takes a `string` here; if 2.6 already landed, wrap with `SecretValue.fromUtf8`). Reuse the file's existing vault-construction utility rather than re-implementing key management.
 
-- [ ] **Step 2.4.2: Run, verify FAIL**
+- [ ] **Step 2.4.2: Run, verify FAIL (red = whole-project compile failure)**
 
 ```bash
 npm test -- --test-name-pattern "resolveSecret|resolveRefs returns a Map|metadata-only accessor|widened param" 2>&1 | tail -15
 ```
-Expected: FAIL — `resolveSecret` does not exist; `resolveRefs` returns `SecretRecord` not `ResolvedSecret`; the widened policy param doesn't exist.
+Expected: FAIL — at this point the consumers still compile, so the red is the **test file** failing to build: `resolveSecret` does not exist; `resolveRefs` returns `SecretRecord` not `ResolvedSecret`; the widened policy param doesn't exist. Because `npm test` runs `npm run build` (whole-project `tsc`) first, this manifests as a **build/compile failure, not a per-test failure** — a valid TDD red (compile failure is red). Once Steps 2.4.3–2.4.5 land the type change, the *route consumers* also go red, and no `npm test` will run until the Task 2.5.* batch is green (see the sequencing note at Step 2.4.6). So the accessor tests written here are first *verified GREEN* at the Step 2.5.7.3 green checkpoint, alongside the consumer tests — not in isolation at 2.4.
 
 - [ ] **Step 2.4.3: Add the `ResolvedSecret` type**
 
@@ -1256,36 +1256,26 @@ export function assertSecretActionAllowed(
 }
 ```
 
-- [ ] **Step 2.4.6: Run the accessor tests, verify PASS; expect `tsc` errors at consumers (deferred to 2.5)**
+- [ ] **Step 2.4.6: Enumerate the consumer-migration TODO list via `tsc` (do NOT run `npm test` yet)**
 
 ```bash
-npm test -- --test-name-pattern "resolveSecret|resolveRefs returns a Map|metadata-only accessor|widened param" 2>&1 | tail -15
 npx tsc --noEmit 2>&1 | head -40
 ```
-Expected: the accessor tests PASS. `tsc` will now report errors at every route that reads `record.value`/`secret.value` from `resolveRefs`/`getSecret`-typed locals (inject-render `:95`, run-resolve `:337,348,443`, etc.) because those locals are now `ResolvedSecret` (no string `.value`) OR still call `getSecret` returning a record they treat as resolved. **These errors are the per-consumer migration TODO list for Task 2.5** — record the exact list from `tsc` output. Do NOT patch them here.
+Expected: `tsc` reports errors at every route that reads `.value` from a `resolveRefs`/`resolveSecret`-typed local (inject-render `:95`, run-resolve `:337,348,443`, etc.) because those locals are now `ResolvedSecret` (`.value` is `SecretValue`, not a string). **IMPORTANT — `tsc` only catches the `resolveRefs`/`resolveSecret` shape change.** `getSecret` still returns `SecretRecord` (string `.value`) and stays vault-internal but unchanged in signature, so its consumers (`inject-submit.ts:53→:171` reading `secret.value` as a string, and the other `getSecret` callers) **continue to type-check** and will NOT appear in `tsc` output. Do not rely on `tsc` to enumerate them — the `getSecret`-consumer migration list must be driven from the §2.1 audit map / the §2.5.7 static scan (raw resolved `.value`), not from this typecheck. **What `tsc` gives you is the `resolveRefs`/`resolveSecret` per-consumer migration TODO list for Task 2.5** — record the exact list from `tsc` output. Do NOT patch them here, and do NOT run `npm test` while the tree is red (see the sequencing note).
 
-> **Sequencing note (judgment call):** Tasks 2.4 → 2.5.* are a single logically-atomic refactor that leaves `tsc` red in between. The plan keeps them as separate commits for review granularity, but the **green-typecheck checkpoint is at the end of Task 2.5.7** (all consumers migrated). Each 2.5.* sub-task runs its own behavioral tests (which compile because the test only touches that one route's surface) but the repo-wide `npx tsc --noEmit` is only required clean at 2.5.7 and again at 2.6/2.7. If the implementer prefers a continuously-green tree, collapse 2.4 + 2.5.* into one commit — the per-consumer tests still gate each change.
+> **Sequencing note (REQUIRED — not optional):** `npm test` runs `npm run build` first, and `build` runs `tsc -p tsconfig.json` over the **whole** project (`package.json:31,33`). So a single red consumer anywhere fails the build and **no test runs at all** — the targeted `npm test -- --test-name-pattern …` commands in the 2.5.* sub-tasks below CANNOT execute against a tsc-red tree (they are not isolated; the build is whole-project). Therefore Tasks 2.4 → 2.5.7 are **one logically-atomic, no-commit implementation step that MUST reach a green typecheck before any `npm test` invocation OR any `git commit`.** Implement the 2.5.* sub-tasks back-to-back (in order — each builds on the prior route's pattern), and only after the **last consumer compiles** (end of Task 2.5.7, i.e. all `resolveRefs`/`getSecret` route consumers migrated and the metadata callers routed to `inspect`) run the suite. The per-sub-task `npm test … --test-name-pattern` blocks below are written as if isolated for review clarity, but in practice you run them as a single batch at the first green point; treat **every** sub-task "Run, verify FAIL" AND "Run, verify PASS" instruction in Tasks 2.5.0–2.5.7 as a checkpoint to satisfy **after** the tree is green at Step 2.5.7.3 — do NOT execute any such `npm test` against the red tree, since the whole-project build fails before any test runs and the command would report a build error, not a red/green behavioral signal. (Each sub-task's "verify FAIL" is therefore a *pre-implementation expectation* you record while writing the test, not a command to run mid-batch; to observe the genuine red signal per-consumer, take the temporary-compatibility-shim alternative below so each commit lands against a green tree.) The per-consumer `git add` steps below stage only — there is exactly ONE commit for this batch, at Step 2.5.7.4 (the first green tree); never `git commit` a tree that fails `tsc`, and never claim a sub-task's tests pass off a build that did not run. The repo-wide `npx tsc --noEmit` green checkpoint is at Step 2.5.7.3; the targeted-test checkpoints all happen at or after it. (Alternative if a continuously-green tree per commit is desired: land 2.4 with temporary compatibility shims so the old `record.value` consumers keep compiling, then remove the shims as each consumer migrates — but the atomic-batch approach above is simpler and is the plan's default.)
 
-- [ ] **Step 2.4.7: Commit the accessor split**
+- [ ] **Step 2.4.7: Stage the accessor split — do NOT commit yet (tree is tsc-red)**
+
+The accessor type change makes the `resolveRefs`/`resolveSecret` route consumers red until they are migrated in Task 2.5. Per the **Sequencing note** at Step 2.4.6 — *never `git commit` a tree that fails `tsc`* — Tasks 2.4 → 2.5.7 are **one no-commit implementation batch.** Stage the accessor split here so it is grouped, but do not create the commit until the green checkpoint (Step 2.5.7.3 — `tsc` clean + suite green), where Step 2.5.7.4 commits the whole accessor+consumer-migration batch.
 
 ```bash
+# Stage only — the commit happens at the Step 2.5.7.4 green checkpoint, never against the red tree.
 git add src/vault/types.ts src/vault/vault.ts src/policy/policy.ts src/vault/vault.test.ts
-git commit -m "$(cat <<'EOF'
-feat(vault): resolveSecret/resolveRefs return disposable ResolvedSecret (5q)
-
-Burst 7 §2. ResolvedSecret = Omit<SecretRecord,"value"> & { value:
-SecretValue }. resolveSecret(ref) + resolveRefs(refs) wrap the stored
-string into a disposable SecretValue at the resolve boundary; callers own
-+ dispose it. getSecret stays string-valued but vault-internal-only.
-assertSecretActionAllowed widened to Pick<SecretRecord,"ref"|
-"allowed_actions"> so metadata + resolved shapes both satisfy it.
-Consumer migration follows in §2.5 (tree is intentionally tsc-red until
-2.5.7).
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
-EOF
-)"
+git status   # confirm staged; do NOT run `git commit` here
 ```
+
+If you prefer review-granular commits, the only safe option is the **temporary-compatibility-shim** alternative from the Sequencing note (land 2.4 green with shims, then remove them per-consumer). The plan's default is the no-commit batch above. The commit message at Step 2.5.7.4 covers the accessor split + all consumer migrations together.
 
 ---
 
@@ -1305,39 +1295,78 @@ This is a prerequisite for the compare + inject preflights: `readFocusedFingerpr
 
 Append to the internal-ops test file:
 ```ts
-// Burst 7 §2 (5q). The pre-approval preflight must read NO candidate value.
-// READ_META_SCRIPT returns only { ok, field, domain, title, urlHost } and must
-// never reference selection text / .value / .innerText. (Spec §2 compare
-// reorder + "Regression test (named)".)
+// Burst 7 §2 (5q). The pre-approval preflight must read NO candidate value
+// TEXT, while still mirroring READ_SCRIPT's acceptance set (selection-present
+// OR editable active element). It may call getSelection() for a VALUE-FREE
+// presence check (isCollapsed / rangeCount — booleans), but must never
+// stringify the selection (.toString()) or read .value / .innerText.
+// (Spec §2 compare reorder + "Regression test (named)".)
 import { READ_META_SCRIPT } from "./internal-ops.js";
 
-test("READ_META_SCRIPT does not read any candidate value (no getSelection/.value/.innerText)", () => {
-  assert.doesNotMatch(READ_META_SCRIPT, /getSelection/, "must not read the selection");
+test("READ_META_SCRIPT reads no candidate value TEXT (no selection .toString()/.value/.innerText)", () => {
+  // Value-free selection PRESENCE (getSelection().isCollapsed/rangeCount) is
+  // ALLOWED — what's forbidden is reading the selected TEXT or field value.
+  assert.doesNotMatch(READ_META_SCRIPT, /getSelection\(\)\s*[?.]*\s*\.\s*toString/, "must not stringify the selection");
   assert.doesNotMatch(READ_META_SCRIPT, /\.value\b/, "must not read input .value");
   assert.doesNotMatch(READ_META_SCRIPT, /innerText/, "must not read contentEditable text");
   // It SHOULD still expose the metadata fields the preflight needs.
   assert.match(READ_META_SCRIPT, /domain/);
   assert.match(READ_META_SCRIPT, /field/);
 });
+
+test("READ_META_SCRIPT mirrors READ_SCRIPT acceptance: selection presence is accepted without requiring an editable active element", () => {
+  // Regression pin for the selection-mode compare path: READ_SCRIPT returns
+  // ok:true / source:"selection" when a non-empty selection exists EVEN IF the
+  // active element is not editable. READ_META_SCRIPT must keep that branch
+  // (value-free) so compare-on-selection against non-editable page text is not
+  // rejected at the preflight. Assert the script has a selection-present accept
+  // branch (source:"selection") that does NOT gate on isField.
+  assert.match(READ_META_SCRIPT, /isCollapsed/, "uses the value-free selection-presence predicate");
+  assert.match(READ_META_SCRIPT, /source\s*:\s*["']selection["']/, "accepts the selection-present case");
+  // The selection accept must come BEFORE the not_editable rejection (so a
+  // selection on a non-editable element is accepted, not rejected).
+  const selIdx = READ_META_SCRIPT.search(/source\s*:\s*["']selection["']/);
+  const notEditableIdx = READ_META_SCRIPT.search(/not_editable/);
+  assert.ok(selIdx > -1 && notEditableIdx > -1 && selIdx < notEditableIdx,
+    "selection-present accept must precede the not_editable rejection");
+});
 ```
-(If the in-page scripts are not currently exported, export `READ_META_SCRIPT` from `internal-ops.ts`. `READ_SCRIPT` is already module-scoped; mirror its export style.)
+(If the in-page scripts are not currently exported, export `READ_META_SCRIPT` from `internal-ops.ts`. `READ_SCRIPT` is already module-scoped; mirror its export style. The regex assertions are heuristics over the script source; if a future implementer prefers a jsdom-driven behavioral test that evaluates `READ_META_SCRIPT` against a fake DOM with a non-editable selection and asserts `ok:true`/`source:"selection"`, that is stronger and welcome.)
 
-- [ ] **Step 2.5.0.2: Run, verify FAIL**
+- [ ] **Step 2.5.0.2: FAIL checkpoint — DEFERRED to the Step 2.5.7.3 green tree (do NOT run `npm test` now)**
 
+Per the **Sequencing note** (Step 2.4.6), `npm test` builds the whole project and the tree is `tsc`-red across the 2.5.* batch, so this command CANNOT run in isolation here. Do NOT run it now. Write the test (Step 2.5.0.1) and record this as a checkpoint to satisfy at Step 2.5.7.3 — by then `READ_META_SCRIPT` exists (Step 2.5.0.3), so the FAIL is observed only transiently by re-running the suite *without* this step's implementation if you want the red signal; in the default atomic batch you verify PASS at 2.5.7.3:
 ```bash
+# Run ONLY at/after the Step 2.5.7.3 green checkpoint — not against the red tree:
 npm test -- --test-name-pattern "READ_META_SCRIPT" 2>&1 | tail -10
 ```
-Expected: FAIL — `READ_META_SCRIPT` does not exist.
+(Pre-implementation expectation for this test, observed at the 2.5.7.3 checkpoint: it FAILS without Step 2.5.0.3's `READ_META_SCRIPT`. To see the genuine red signal under the atomic path, the simplest option is the temporary-compatibility-shim alternative from the Sequencing note. Default path: write now, verify PASS at 2.5.7.3.)
 
 - [ ] **Step 2.5.0.3: Add `READ_META_SCRIPT` + route `readFocusedFingerprintAndDomain` through it**
 
 In `src/daemon/chrome/internal-ops.ts`, add a value-free script next to `READ_SCRIPT` (`:200`). It returns the SAME metadata shape `READ_SCRIPT` does (so `field`/`domain`/`title`/`urlHost` are unchanged) but NEVER reads selection/`.value`/`.innerText`:
 ```ts
 // Burst 7 §2 (5q): value-FREE metadata read for the pre-approval preflight.
-// Returns the same { ok, field, domain, title, urlHost } metadata READ_SCRIPT
-// does, but never materializes the candidate value (no getSelection().toString
-// / .value / .innerText) — so readFocusedFingerprintAndDomain holds no
-// candidate plaintext on the daemon heap before approval.
+// Returns the same { ok, field, domain, title, urlHost, source } metadata
+// READ_SCRIPT does, but never materializes the candidate value (no
+// getSelection().toString() / .value / .innerText) — so
+// readFocusedFingerprintAndDomain holds no candidate plaintext on the daemon
+// heap before approval.
+//
+// CRITICAL — must mirror READ_SCRIPT's ACCEPTANCE set, not just the
+// focused-field subset (verified against internal-ops.ts:208-215). READ_SCRIPT
+// returns ok:true in THREE cases: (1) a non-empty *selection* exists — and it
+// does NOT require the active element to be editable in that case
+// (source:"selection"); (2) a focused <input>/<textarea>; (3) a contentEditable
+// element (both source:"focused-field"). A naive READ_META_SCRIPT that ALWAYS
+// requires `isField` (editable active element) would reject the common
+// "compare against selected page text on a non-editable element" case that
+// READ_SCRIPT accepts today — regressing selection-mode compare (which routes
+// its pre-approval preflight through readFocusedFingerprintAndDomain too, Task
+// 2.5.6). So READ_META_SCRIPT detects selection PRESENCE *without reading the
+// text* via the value-free `!getSelection().isCollapsed` predicate (a boolean —
+// it never stringifies the selection), and accepts when EITHER a selection is
+// present OR the active element is editable.
 export const READ_META_SCRIPT = `
 (() => {
   function meta(el){
@@ -1349,12 +1378,17 @@ export const READ_META_SCRIPT = `
   const a = document.activeElement;
   if (!(a instanceof Element)) return { ok:false, reason:"no_active_element" };
   const base = { field: meta(a), domain: location.hostname, title: document.title, urlHost: location.host };
+  // Value-free selection PRESENCE check — booleans only, never reads the text.
+  const s = window.getSelection();
+  const hasSelection = !!s && s.rangeCount > 0 && !s.isCollapsed;
+  if (hasSelection) return { ok:true, source:"selection", ...base };
   const isField = a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement || (a instanceof HTMLElement && a.isContentEditable);
   if (!isField) return { ok:false, reason:"not_editable" };
   return { ok:true, source:"focused-field", ...base };
 })()
 `;
 ```
+This keeps the preflight's acceptance set byte-for-byte aligned with READ_SCRIPT's (selection-present OR editable-active-element) while still reading **no** candidate plaintext: `s.isCollapsed`/`s.rangeCount` are booleans/numbers, never the selected string. (Edge note: READ_SCRIPT keys "has selection" off `getSelection().toString() !== ""`, whereas `!isCollapsed` is the value-free equivalent. The only divergence is a pathological zero-width-but-non-collapsed range, which produces no real candidate value anyway and is irrelevant to a fingerprint compare; the post-approval `captureSelection()` still uses the exact `toString()` path, so the compared bytes are unchanged.)
 Then change `readFocusedFingerprintAndDomain` (`:957-971`) to evaluate `READ_META_SCRIPT` instead of `READ_SCRIPT` at `:959`:
 ```ts
   async readFocusedFingerprintAndDomain(): Promise<Omit<CaptureResult, "value">> {
@@ -1382,24 +1416,13 @@ npm test -- --test-name-pattern "READ_META_SCRIPT|readFocusedFingerprint|capture
 ```
 Expected: the metadata-script test PASSES; existing capture/fingerprint behavior unchanged (fingerprint derives from metadata).
 
-- [ ] **Step 2.5.0.5: Commit**
+- [ ] **Step 2.5.0.5: Stage only — do NOT commit (tree is tsc-red since Step 2.4.7; first commit is Step 2.5.7.4)**
+
+This script change compiles in isolation, but it runs against the accessor-split red tree (staged at Step 2.4.7), so the project as a whole still fails `tsc` until the whole 2.5.* batch is migrated. Per the Sequencing note (Step 2.4.6) — *never `git commit` a tree that fails `tsc`* — stage here; the single batch commit at Step 2.5.7.4 covers this change (its `git add -A src/daemon` sweep includes `internal-ops.ts`). The Step 2.5.0.4 "verify PASS" is satisfied at the Step 2.5.7.3 green checkpoint.
 
 ```bash
 git add src/daemon/chrome/internal-ops.ts src/daemon/chrome/internal-ops.test.ts
-git commit -m "$(cat <<'EOF'
-fix(chrome): value-free READ_META_SCRIPT for pre-approval preflight (5q)
-
-Burst 7 §2. readFocusedFingerprintAndDomain evaluated the value-bearing
-READ_SCRIPT, so the candidate plaintext landed on the daemon heap before
-approval even though the TS return omitted it. New READ_META_SCRIPT
-returns the same field/domain/title/urlHost metadata but never reads
-getSelection()/.value/.innerText. Fingerprint derives from metadata, so
-no behavior change. Regression-tested by asserting the script reads no
-value.
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
-EOF
-)"
+git status   # confirm staged; do NOT run `git commit` here — the single batch commit is Step 2.5.7.4
 ```
 
 ---
@@ -1425,12 +1448,14 @@ Add a test (in the route's test file) using a stubbed/deferred approval that rec
 ```
 Concretely, the test should: stub `services.vault.resolveSecret` to return a `ResolvedSecret` whose `SecretValue` records each `.bytes()` call and whose `dispose` is spied; stub `services.vault.inspect` to return the metadata; assert `resolveSecret` is called only after the approval resolves; assert the same `SecretValue` instance reaches both `injectIntoBackendNode` and `proveAbsence`; assert `dispose` fires exactly once after the route returns. Match the existing inject-submit test harness (it likely fakes `services.browser` + `services.approvals`).
 
-- [ ] **Step 2.5.1.2: Run, verify FAIL**
+- [ ] **Step 2.5.1.2: FAIL checkpoint — DEFERRED to the Step 2.5.7.3 green tree (do NOT run `npm test` now)**
 
+Per the **Sequencing note** (Step 2.4.6), the tree is `tsc`-red across the 2.5.* batch and `npm test` builds the whole project, so this targeted command CANNOT run in isolation here. Do NOT run it now. Write the test (Step 2.5.1.1) and treat this as a checkpoint to satisfy at Step 2.5.7.3:
 ```bash
+# Run ONLY at/after the Step 2.5.7.3 green checkpoint — not against the red tree:
 npm test -- --test-name-pattern "inject-submit" 2>&1 | tail -15
 ```
-Expected: FAIL — the route still resolves before approval / disposes wrong.
+(Pre-implementation expectation, observed at the 2.5.7.3 checkpoint or via the temporary-compatibility-shim alternative: FAIL — the route still resolves before approval / disposes wrong. Default atomic path: write now, verify PASS at 2.5.7.3.)
 
 - [ ] **Step 2.5.1.3: Migrate the route**
 
@@ -1459,24 +1484,15 @@ npm test -- --test-name-pattern "inject-submit" 2>&1 | tail -15
 ```
 Expected: the new ordering/multi-sink test + all existing inject-submit tests PASS.
 
-- [ ] **Step 2.5.1.5: Commit**
+- [ ] **Step 2.5.1.5: Stage only — do NOT commit (tree is tsc-red; first commit is Step 2.5.7.4)**
+
+This consumer compiles in isolation, but the *other* not-yet-migrated 2.5.* consumers are still tsc-red, so the tree as a whole fails `tsc`. Per the Sequencing note (Step 2.4.6) — *never `git commit` a tree that fails `tsc`* — stage here and let the single batch commit at Step 2.5.7.4 cover this consumer.
 
 ```bash
 git add src/daemon/api/routes/inject-submit.ts src/vault/inject-submit-action.test.ts
-git commit -m "$(cat <<'EOF'
-refactor(inject-submit): late-resolve + single SecretValue across sinks (5q)
-
-Burst 7 §2. Pre-approval preflight uses inspect (metadata only); the
-plaintext SecretValue is resolved only after requireApprovals, feeds both
-injectIntoBackendNode and proveAbsence (the deliberate multi-sink
-retention window spanning the up-to-successTimeoutMs observeText), and is
-disposed once in the route's outer finally — scrubbed on success, throw,
-and timeout. No SecretValue is held across the approval gate.
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
-EOF
-)"
+git status   # confirm staged; do NOT run `git commit` here (see Step 2.5.7.4)
 ```
+(The Step 2.5.1.4 "verify PASS" is satisfied at the Step 2.5.7.3 green checkpoint, after the whole batch compiles — not against this red tree.)
 
 ---
 
@@ -1500,10 +1516,10 @@ Verified: `getSecret(b.ref)` `:394` → `assertSecretActionAllowed` `:395` → `
 3. Replace remaining `secret.ref`/`secret.environment` with `meta.ref`/`meta.environment`.
 4. Add a `finally` to the route's `try/catch` (`:391/:465`) disposing `resolved?.value`.
 
-- [ ] **Step 2.5.2.3: Run the inject tests, verify PASS.** Commit:
+- [ ] **Step 2.5.2.3: Stage only — do NOT commit (tree is tsc-red; first commit is Step 2.5.7.4).** Per the Sequencing note (Step 2.4.6), the tree still fails `tsc` until the whole 2.5.* batch is migrated, so the "verify PASS" checkpoint runs at Step 2.5.7.3 (after green), not here:
 ```bash
 git add src/daemon/api/routes/secrets.ts <secrets-test-file>
-git commit -m "refactor(secrets/inject): metadata preflight + late SecretValue resolve + dispose (5q)"
+git status   # do NOT run `git commit` here — the single batch commit is Step 2.5.7.4
 ```
 
 ---
@@ -1543,10 +1559,10 @@ Verified: `getSecret(ref)` `:130` → `assertSecretActionAllowed` `:131` → `re
 3. Replace remaining `secret.ref` with `meta.ref` (`:223,241`).
 4. Add a `finally` to the `try/catch` (`:128/:247`) disposing `resolved?.value`.
 
-- [ ] **Step 2.5.3.4: Run template tests, verify PASS.** Commit:
+- [ ] **Step 2.5.3.4: Stage only — do NOT commit (tree is tsc-red; first commit is Step 2.5.7.4).** Per the Sequencing note (Step 2.4.6), the tree still fails `tsc` until the whole 2.5.* batch is migrated, so the "verify PASS" checkpoint runs at Step 2.5.7.3 (after green), not here:
 ```bash
 git add src/daemon/api/routes/templates.ts src/daemon/templates/run.ts src/daemon/templates/tmp-env-file.ts <test-files>
-git commit -m "refactor(templates): Buffer-native stdin/env-file + late-resolve SecretValue (5q)"
+git status   # do NOT run `git commit` here — the single batch commit is Step 2.5.7.4
 ```
 
 ---
@@ -1562,7 +1578,20 @@ git commit -m "refactor(templates): Buffer-native stdin/env-file + late-resolve 
 Verified: `resolveRefs(allRefs)` `:220` → `assertSecretActionAllowed` per ref `:233-235` → `requireApprovals` (conditional, `:300-324`) → `env[entry.key] = record.value` `:337` → `createMasker(secretValues)` `:348-350` → `spawnAndStream` `:445` (env retained for child lifetime in the closure).
 
 - [ ] **Step 2.5.4.1: Change `createMasker` to `Buffer[]` first.**
-- `masker.ts:54` `createMasker(secrets: readonly Buffer[])`; `:55` dedupe on bytes — replace the string-dedupe with a byte-aware one: build `patterns` from the input buffers directly (defensive-copy each: `secrets.map((b) => Buffer.from(b))`), filter `b.length > 0`, drop duplicates by content (e.g. compare `.toString("base64")` keys in a `Set`), sort by length DESC. Remove the `Buffer.from(s, "utf8")` at `:57` (input is already bytes). The rest (`process`/`flush`/`dispose`) is unchanged.
+- `masker.ts:54` `createMasker(secrets: readonly Buffer[])`; `:55-59` dedupe on bytes — replace the string-dedupe with a byte-aware one that **never stringifies the secret** (spec §2 "the secret never enters the masker as a string", spec line 225 — so a `.toString("base64")` / hex dedupe key is forbidden, it is a reversible string copy of the secret). Build `patterns` by iterating the input buffers, defensive-copying each accepted one (`Buffer.from(b)`), filtering `b.length > 0`, and dropping content-duplicates via **byte comparison** against the already-accepted patterns (`if (!patterns.some((p) => p.equals(b))) patterns.push(Buffer.from(b))`), then sort by length DESC. Remove the `Buffer.from(s, "utf8")` at `:58` (input is already bytes). Concretely:
+```ts
+export function createMasker(secrets: readonly Buffer[]): Masker {
+  const patterns: Buffer[] = [];
+  for (const b of secrets) {
+    if (b.length === 0) continue;
+    if (patterns.some((p) => p.equals(b))) continue; // byte-compare dedupe, no string key
+    patterns.push(Buffer.from(b)); // defensive copy of the accepted bytes
+  }
+  patterns.sort((a, b) => b.length - a.length);
+  // ... maxLen / lookback / replaceAll unchanged
+}
+```
+The rest (`process`/`flush`/`dispose`) is unchanged.
 - Update `masker.test.ts` / `masker-scrub.test.ts` to pass `Buffer[]`.
 
 - [ ] **Step 2.5.4.2: Make `spawnAndStream` drop `input.env` after spawn.**
@@ -1572,13 +1601,18 @@ In `spawner.ts`, destructure the fields the long-lived handlers use into locals 
 ```
 and replace `input.outputWriter` → `outputWriter`, `input.signal` → `signal`, `input.stdinBytes` → `stdinBytes` throughout the handler bodies (`:98-191`). (`spawn(input.cmd, input.args, { env: input.env, ... })` at `:70` reads `options.env` synchronously, so dropping the daemon-side reference right after does not affect the child.) Keep the sync-spawn-failure path's `input.stdinBytes?.fill(0)` (`:83`) — it runs before the destructure; change it to use the local if you move the destructure above the `try`, otherwise leave as `input.stdinBytes?.fill(0)`.
 
-- [ ] **Step 2.5.4.3: Write the failing tests** (two named tests):
+- [ ] **Step 2.5.4.3: Write the failing tests** (three named tests):
 ```ts
 // (a) run-resolve clears env entries + disposes SecretValues immediately after
-//     spawnAndStream is INITIATED (not after child exit), and clearing the
-//     route's env right after the call does not affect the running child.
+//     spawnAndStream is INITIATED and BEFORE awaiting child exit — NOT in the
+//     outer finally. Assert dispose fires while the child Promise is still
+//     pending (deferred spawn stub: dispose called before the spawn Promise
+//     settles), and clearing the route's env right after the call does not
+//     affect the running child.
 // (b) spawnAndStream does not retain a reachable reference to input.env after
 //     spawn (handlers reference destructured locals): a spy/clear confirms it.
+// (c) a pre-spawn failure (e.g. secret_not_found during env build, or an
+//     approval denial) still disposes every resolved SecretValue.
 ```
 Run, verify FAIL.
 
@@ -1602,25 +1636,38 @@ Run, verify FAIL.
 3. `:337` `env[entry.key] = record.value;` → `env[entry.key] = resolved.get(entry.value)!.value.bytes().toString("utf8");` (the string is materialized only at this assignment).
 4. `:348` `const secretValues = Array.from(resolved.values()).map((r) => r.value);` → `.map((r) => r.value.bytes());` (Buffer-native masker input).
 5. `:443` `Buffer.from(resolved.get(body.stdin_ref)!.value, "utf8")` → `Buffer.from(resolved.get(body.stdin_ref)!.value.bytes())` (own copy for the spawner's stdin scrub).
-6. **Drop-reference + dispose after spawn initiation.** Immediately after `await spawnAndStream({...})` returns (the spawn has been kicked off; `:459`), but BEFORE the post-exit markUsed/audit, clear the secret env entries and dispose every resolved `SecretValue`:
+6. **Drop-reference + dispose immediately after spawn INITIATION (NOT after child exit).** The spec is explicit (§2 Sink-reality, design line 229): the env entries must be cleared and the `SecretValue`s disposed *"immediately after `spawnAndStream` is initiated (synchronously after the call returns / the spawn is kicked off — **not** after awaiting child exit)."* `spawnAndStream` `await`s child EXIT (`run-resolve.ts:445`, the Promise resolves on exit), so putting the drop after the `await` — or in the outer `finally` (`:477`) — would leave the secret env **strings** reachable through the route's `env` object for the child's entire lifetime (arbitrarily long), violating the spec. **`spawn()` reads `options.env` synchronously inside `spawnAndStream`'s Promise executor** (`spawner.ts:66,70` — the executor body runs synchronously when the Promise is constructed, before the call even returns), so by the time `spawnAndStream(...)` returns its Promise the child already holds its env copy; clearing the daemon-side `env` and disposing the `SecretValue`s right then cannot affect the running child. Therefore **do not `await` the spawn before dropping** — capture the pending Promise, drop synchronously, then `await`:
 ```ts
-      // Drop the secret env strings + scrub the SecretValues now that spawn has
-      // copied the env into the child. spawnAndStream no longer retains input.env
-      // (it destructures the fields it needs), so clearing here cannot affect the
-      // running child. The masker bytes are scrubbed in the existing finally.
+      const childRun = spawnAndStream({
+        cmd: body.command,
+        args: body.args,
+        env,
+        cwd: body.cwd,
+        outputWriter: { ...writer, writeExit(code) { childExitCode = code; writer.writeExit(code); } },
+        signal: abortController.signal,
+        ...(stdinBytes !== undefined ? { stdinBytes } : {}),
+      });
+      // Spawn has already copied env into the child synchronously (spawner.ts:70)
+      // and spawnAndStream no longer retains input.env (it destructures the fields
+      // its long-lived handlers use — Step 2.5.4.2). So clear the secret env
+      // strings out of the route's env object and scrub every resolved SecretValue
+      // NOW — before awaiting child exit — so neither survives the child lifetime
+      // on the daemon heap. The masker bytes stay alive (the maskers stream for the
+      // child's lifetime) and are scrubbed in the existing outer finally.
       for (const entry of body.env) {
         if (entry.isRef) delete env[entry.key];
       }
       for (const r of resolved.values()) r.value.dispose();
+      await childRun;
 ```
-   (Note: `spawnAndStream` is `await`ed and resolves on child EXIT in this route's current shape — verify whether the drop must move to a `.then` kicked off synchronously. Per Code-Grounding #15 the child reads `env` synchronously at `spawn()`, so the env can be cleared any time after `spawnAndStream` is CALLED. Since this route `await`s child exit, disposing after the await is still correct for heap-lifetime — but to honor the spec's "after spawn init, not after child exit," dispose in a `finally` that the route reaches regardless, OR move the dispose to run right after the synchronous spawn. Simplest spec-faithful choice: dispose in the existing outer `finally` (`:477-486`) alongside the masker dispose, AND clear `env` entries there too — both are guaranteed and neither affects the already-spawned child.)
+   The post-exit `markUsed` (`:466`, iterates `resolved.keys()`) and `auditPerRef` (`:469`, reads `record.environment`) still work after disposal — `dispose()` scrubs only the `SecretValue` **bytes**, leaving the `ResolvedSecret` metadata (`ref`/`environment`) and the Map structure intact; neither calls `.value.bytes()`. (If 2.5.4.4 item 1 routed the preflight through a `metaByRef` metadata map, feed that map to the post-exit `auditPerRef` instead for clarity — but reading the disposed `resolved` map's `.environment` is equally safe since only the bytes are gone.)
 
-  > **Decision (judgment call):** put the env-clear + `SecretValue` dispose in the existing outer `finally` (`:477`) next to `stdoutMasker.dispose()`/`stderrMasker.dispose()`. The `finally` runs on the success, error, and client-disconnect paths, the child already has its env copy, and `spawnAndStream` no longer retains `input.env` — so this satisfies "daemon heap no longer retains the env strings past spawn" without racing the streaming writers. The named test asserts (a) clearing the route's `env` right after `spawnAndStream` is invoked does not affect the child and (b) `spawnAndStream` references destructured locals.
+  > **Decision (spec-mandated, not a judgment call):** the env-clear + `SecretValue` dispose go **immediately after `spawnAndStream` is initiated and BEFORE `await childRun`** (not in the outer `finally`). Rationale: the outer `finally` runs only after the awaited child exits, so it would not satisfy the spec's "not after awaiting child exit" requirement for the env **strings**. The masker dispose stays in the outer `finally` (`:477`) because the maskers must live for the child's streaming lifetime — that is correct and unchanged. The throw/early-return paths before spawn never reach this drop, so they must also dispose the `SecretValue`s: add `for (const r of resolved.values()) r.value.dispose();` to the existing pre-spawn error branches (the `secret_not_found` env-build catch at `:333`, the approval-denied/unexpected catch at `:320`) and to any path that returns before `childRun` is created — OR, simplest, wrap the resolve-onward block in a `try { … spawn + drop + await … } catch { for (const r of resolved.values()) r.value.dispose(); throw; }` so every pre-spawn failure scrubs too (dispose is idempotent, so the in-band drop after spawn is harmless if the catch also fires). The named test asserts (a) clearing the route's `env` right after `spawnAndStream` is invoked does not affect the child, (b) `spawnAndStream` references destructured locals (does not retain `input.env`), and (c) every resolved `SecretValue` is disposed after `spawnAndStream` is invoked and **before** the child-exit await resolves (e.g. spy `dispose` and assert it fired before the awaited spawn Promise settles).
 
-- [ ] **Step 2.5.4.5: Run run-resolve + masker + spawner tests, verify PASS.** Commit:
+- [ ] **Step 2.5.4.5: Stage only — do NOT commit (tree is tsc-red; first commit is Step 2.5.7.4).** Per the Sequencing note (Step 2.4.6), the tree still fails `tsc` until the whole 2.5.* batch is migrated, so the "verify PASS" checkpoint runs at Step 2.5.7.3 (after green), not here:
 ```bash
 git add src/daemon/api/routes/run-resolve.ts src/daemon/run/spawner.ts src/daemon/run/masker.ts <test-files>
-git commit -m "refactor(run-resolve): Buffer masker/stdin + env drop-reference after spawn (5q)"
+git status   # do NOT run `git commit` here — the single batch commit is Step 2.5.7.4
 ```
 
 ---
@@ -1660,25 +1707,25 @@ Run, verify FAIL.
         return { rendered: true, refs_count: parsed.refs.length, content: rendered };
       }
 ```
-4. **file mode:** move ALL the path-safety walk (the `path.isAbsolute` check `:112`, ancestor-symlink walk `:137-181`, step-wise `mkdir` `:190-200`, leaf-symlink check `:203-215`, final TOCTOU realpath `:222-230`, temp-file `open` `:239`) to run BEFORE `valuesMap` construction + render. Then render immediately before `writeFile`:
+4. **file mode:** move ALL the path-safety walk **AND the temp-file `open`** (the `path.isAbsolute` check `:112`, ancestor-symlink walk `:137-181`, step-wise `mkdir` `:190-200`, leaf-symlink check `:203-215`, final TOCTOU realpath `:222-230`, **and the `open(tempPath, "wx", 0o600)` at `:239`**) to run BEFORE `valuesMap` construction + render. The spec is explicit (§2 Template-render, design line 234): the temp-file `open` is part of the file-mode setup that must complete **before** rendering — so `render` is the **last async step before `writeFile`** with **no `await` (filesystem or otherwise) between render and write**. A code block that renders first and then `await open(...)` (as an earlier draft did) re-introduces exactly the bug being fixed: the rendered plaintext string held across the async `open()`. Correct order — open the fh, THEN resolve + build `valuesMap` + render + `writeFile` back-to-back:
 ```ts
       // ... all path validation/setup above (now before render) ...
+      fh = await open(tempPath, "wx", 0o600);   // open BEFORE render (spec line 234)
+      // No further awaits between here and writeFile: resolve, render, write.
       resolved = await services.vault.resolveRefs(parsed.refs);
       const valuesMap = new Map<string, string>();
       for (const [ref, r] of resolved) valuesMap.set(ref, r.value.bytes().toString("utf8"));
       const rendered = parsed.render(valuesMap);
-      try {
-        fh = await open(tempPath, "wx", 0o600);
-        await fh.writeFile(rendered, "utf8");
-        // ... existing close + rename ...
-      } // ... existing catch ...
+      await fh.writeFile(rendered, "utf8");
+      // ... existing close + atomic rename ...
 ```
+   (The `resolveRefs` `await` between `open` and render is the resolve boundary itself — it produces the bytes; it does not hold a *rendered* string. The rendered plaintext exists only from `parsed.render(...)` to the immediately-following `writeFile`, with no I/O in between, satisfying "materialized only at the sink call and dropped right after." Keep the existing try/catch around the open→write→rename so a write/rename failure still unlinks the temp file and the `finally` disposes the `SecretValue`s.)
 5. Add disposal: change the existing `finally` (`:262-283`) — it already runs on every path — to also dispose: at the top of the `finally`, `for (const r of resolved?.values() ?? []) r.value.dispose();` (idempotent; covers the throw-before-render path where `resolved` is undefined → no-op).
 
-- [ ] **Step 2.5.5.3: Run inject-render tests, verify PASS.** Commit:
+- [ ] **Step 2.5.5.3: Stage only — do NOT commit (tree is tsc-red; first commit is Step 2.5.7.4).** Per the Sequencing note (Step 2.4.6), the tree still fails `tsc` until the whole 2.5.* batch is migrated, so the "verify PASS" checkpoint runs at Step 2.5.7.3 (after green), not here:
 ```bash
 git add src/daemon/api/routes/inject-render.ts <test-file>
-git commit -m "refactor(inject-render): validate path before render + late-resolve + dispose (5q)"
+git status   # do NOT run `git commit` here — the single batch commit is Step 2.5.7.4
 ```
 
 ---
@@ -1713,10 +1760,10 @@ Verified: `getSecret(b.ref)` `:484` → `assertSecretActionAllowed` `:485` → c
 
   > **Note:** the captured candidate `capture.value` is a transient page-side string at the accepted CDP boundary, materialized only at the HMAC sink and dropped right after — consistent with the spec. The candidate is NOT held across approval anymore (it's captured after).
 
-- [ ] **Step 2.5.6.3: Run compare tests, verify PASS.** Commit:
+- [ ] **Step 2.5.6.3: Stage only — do NOT commit (tree is still tsc-red until Task 2.5.7 metadata callers migrate; first commit is Step 2.5.7.4).** Per the Sequencing note (Step 2.4.6), the "verify PASS" checkpoint runs at Step 2.5.7.3 (after green), not here:
 ```bash
 git add src/daemon/api/routes/secrets.ts <secrets-test-file>
-git commit -m "refactor(secrets/compare): capture candidate only after approval; metadata-only (5q)"
+git status   # do NOT run `git commit` here — the single batch commit is Step 2.5.7.4
 ```
 
 ---
@@ -1737,7 +1784,19 @@ These callers read metadata only and currently hold a stored plaintext string ac
 - `secrets.ts:154` (generate overwrite-scope) `existingActions = [...(await services.vault.getSecret(plannedRef)).allowed_actions];` → `existingActions = [...(await services.vault.inspect(plannedRef)).allowed_actions];` (the `catch → undefined` stays; `inspect` throws `secret_not_found` identically).
 - `secrets-import.ts:103` `const existing = await services.vault.getSecret(candidateRef);` → `const existing = await services.vault.inspect(candidateRef);` (reads `existing.ref` `:104` only).
 
-- [ ] **Step 2.5.7.2: Green checkpoint — full typecheck + suite must be clean**
+- [ ] **Step 2.5.7.2: Scan for lingering route `getSecret` calls (tsc CANNOT catch these)**
+
+After this task, `services.vault.getSecret` MUST be **vault-internal-only** (called via `this.getSecret(` inside `vault.ts` by `resolveSecret`/`resolveRefs`/`generate`/the fingerprint-migration loop — Step 2.4.4 Note at the `getSecret`-stays line). **`tsc` cannot enforce this**: `getSecret` still returns a valid string-valued `SecretRecord`, so a leftover route call like `services.vault.getSecret(ref)` type-checks fine and silently keeps a stored plaintext string on the heap (the exact regression this burst removes). A static scan is the only mechanism that catches it. Confirm ZERO `services.vault.getSecret(` calls remain anywhere outside `vault.ts` (verified baseline: 8 such route calls at v0.3.1 — inject-submit `:53`, secrets-rotate `:50`, secrets `:154`/`:394`/`:484`, templates `:130`, secrets-delete `:50`, secrets-import `:103` — all must be gone, routed to `inspect` or `resolveSecret`/`resolveRefs`):
+```bash
+# Must print NOTHING. Vault internals use `this.getSecret(`; routes used
+# `services.vault.getSecret(` — so this pattern is the precise route-leak check.
+grep -rn "services\.vault\.getSecret(" src --include="*.ts" | grep -v "\.test\.ts"
+# Belt-and-braces: any `.getSecret(` outside vault.ts (tests excluded) is also a leak.
+grep -rn "\.getSecret(" src --include="*.ts" | grep -v "\.test\.ts" | grep -v "src/vault/vault.ts"
+```
+Expected: both commands print nothing. If either prints a line, that route still resolves a stored plaintext string before its approval gate (or reads metadata off the wrong accessor) — migrate it (`inspect` for metadata-only, `resolveSecret`/`resolveRefs` after approval for true plaintext) before the green checkpoint. **Make this durable:** fold the assertion into the Task 2.7 guard test (add a second `test(...)` to `src/e2e/no-raw-resolved-value-in-response.test.ts` that scans `src/daemon` for `services.vault.getSecret(` / non-`vault.ts` `.getSecret(` and asserts zero offenders), so a future route re-introducing `getSecret` fails CI rather than silently leaking. (A grep at this step proves the migration; the committed guard prevents regression.)
+
+- [ ] **Step 2.5.7.3: Green checkpoint — full typecheck + suite must be clean**
 
 ```bash
 npx tsc --noEmit 2>&1 | head -40
@@ -1745,23 +1804,34 @@ npm test 2>&1 | tail -12
 ```
 Expected: **`tsc` clean** (every route consumer migrated; no remaining route reads `.value` as a string off a resolved/stored record except the legitimate vault internals + the `inspect`-routed metadata callers). Full suite green (1588 baseline + all §1/§2 tests added so far). If `tsc` still reports a `.value` error, it points at a consumer the migration missed — fix it before committing.
 
-- [ ] **Step 2.5.7.3: Commit**
+- [ ] **Step 2.5.7.4: Commit the whole accessor + consumer-migration batch (FIRST green tree since Task 2.4)**
+
+This is the first `tsc`-clean point since the accessor split, so it is where the entire no-commit batch lands — the Task 2.4 accessor files staged at Step 2.4.7 **plus** every Task 2.5.* consumer migrated since (whatever you staged per-consumer with `git add -p`). Stage any not-yet-staged migrated files, then commit. (If you took the temporary-shim alternative and have been committing per-consumer against a green tree, this step is just the final metadata-caller commit.)
 
 ```bash
-git add src/daemon/api/routes/secrets-delete.ts src/daemon/api/routes/secrets-rotate.ts src/daemon/api/routes/secrets.ts src/daemon/api/routes/secrets-import.ts
+# The accessor split (staged at 2.4.7) + all 2.5.* consumers + the metadata callers — one green batch.
+git add -A src/vault src/policy src/daemon
+git status   # confirm the full accessor+consumer set is staged and the tree is tsc-clean (Step 2.5.7.3)
 git commit -m "$(cat <<'EOF'
-refactor(secrets): route metadata-only callers to value-free inspect (5q)
+feat(vault): disposable ResolvedSecret accessor + migrate every consumer (5q)
 
-Burst 7 §2. delete/rotate/generate-overwrite-scope/import-existence read
-only metadata yet held a stored plaintext string (delete/rotate across
-human-approval latency). Routed to Vault.inspect → AgentSecretMetadata so
-they hold no plaintext at all. Green checkpoint: tsc clean, full suite
-passes — every route consumer is off the string-valued stored record.
+Burst 7 §2 — one atomic refactor (committed at the first green tree).
+resolveSecret/resolveRefs return ResolvedSecret = Omit<SecretRecord,
+"value"> & { value: SecretValue }, wrapping the stored string into a
+disposable at the resolve boundary; callers own + dispose it. getSecret
+stays string-valued but vault-internal-only. assertSecretActionAllowed
+widened to Pick<SecretRecord,"ref"|"allowed_actions"> so metadata +
+resolved shapes both satisfy it. All resolve-path consumers migrated to
+late-resolve-after-approval + dispose-in-finally; delete/rotate/generate-
+overwrite-scope/import-existence routed to Vault.inspect → metadata-only
+(no stored plaintext held across approval latency). Green checkpoint: tsc
+clean, full suite passes.
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 EOF
 )"
 ```
+> If review-granular commits are wanted, do them per-consumer ONLY under the temporary-shim alternative (each commit against a green tree); otherwise this single batch commit is the plan's default. Never commit before the Step 2.5.7.3 green checkpoint.
 
 ---
 
@@ -1897,32 +1967,59 @@ In `src/vault/vault.ts`:
         });
       }
 ```
-  (This collapses the old separate `if (capturedValue !== "")` upsert block `:422-430` and the `if (capturedValue !== "" && hideDone)` proof block `:434-440` into one ordered block. The downstream `if (capturedValue !== "" && hideDone && proofPassed && meta !== undefined)` success branch `:442` is unchanged. Note: in the original, `proveAbsence` is gated on `hideDone`; preserve that — only attempt proof+upsert when `hideDone`. If `!hideDone`, fall through to the fail-closed audit with no store, matching today.)
+  (This reorders the `hideDone` happy path so the proof runs BEFORE the upsert. **It does NOT collapse the unconditional store** — see the two-branch requirement below. The downstream `if (capturedValue !== "" && hideDone && proofPassed && meta !== undefined)` success branch `:442` is unchanged.)
 
-  > **Important:** verify the original semantics — today the store happens whenever `capturedValue !== ""` (`:423`) even if `!hideDone`, but the proof only when `hideDone` (`:434`). The reorder above stores only when `hideDone` too. Re-read `:420-463` during implementation: if a `!hideDone` capture must still be stored (fail-closed-but-persisted), keep a store path for `capturedValue !== "" && !hideDone` that wraps a separate `SecretValue.fromUtf8(capturedValue)` and hands it to `upsertSecret` (disposed by the vault), with no proof. The spec's reorder targets the happy path (capture+proof+store all succeed); preserve the existing fail-closed persistence behavior for the `!hideDone` branch exactly.
-- **import** (`secrets-import.ts`): see Step 2.6.6 (early-wrap discipline is involved enough to warrant its own step).
+  > **Important — preserve the existing store semantics exactly (verified against source).** Today the upsert is gated ONLY on `capturedValue !== ""` and is **unconditional on `hideDone`** (`reveal-capture.ts:423-430`): a non-empty capture is stored even when `!hideDone` (fail-closed-but-persisted). The `proveAbsence` proof is the part gated on `hideDone` (`:434-440`). The snippet above only handles the `hideDone` branch; do NOT let it drop the `!hideDone` store. Implement explicit two-branch logic:
+> - **`capturedValue !== "" && hideDone`** → reorder as above: `SecretValue.fromUtf8` → `proveAbsence` (proof FIRST) → `upsertSecret` (vault takes ownership + disposes). The proof gates the success *return*, not the store.
+> - **`capturedValue !== "" && !hideDone`** → keep a store path: wrap a separate `SecretValue.fromUtf8(capturedValue)` and hand it to `upsertSecret` (vault disposes it), with NO proof — preserving today's fail-closed-but-persisted behavior so `meta` is populated and the fail-closed audit still records the stored ref.
+>
+> Re-read `:420-463` during implementation. The spec's reorder targets only the happy path (capture+proof+store all succeed); the `!hideDone` persistence path must be carried forward unchanged (named test: a `!hideDone` capture still upserts — Task 2.6.5 caution).
+- **import** (`secrets-import.ts`): see Steps 2.6.6–2.6.7 (early-wrap discipline is involved enough to warrant its own step; the failing dispose tests are written FIRST at 2.6.6, then the migration at 2.6.7).
 
-- [ ] **Step 2.6.6: Migrate import — early-wrap at the parse loop + drop strings + dispose unconsumed**
+- [ ] **Step 2.6.6: Write the FAILING import denial/skip/error dispose tests (BEFORE the migration)**
+
+These are written first (TDD red) so the denial/skip/error disposal paths — the ones most likely to leak — are pinned by a test authored before the Step 2.6.7 migration that satisfies them. Add (to the import route test file):
+```ts
+// Burst 7 §2 (5q). import disposes every not-yet-stored entry SecretValue on
+// the approval-DENIED path, the SKIP-existing path, and the secret_exists/error
+// path; and drops the originally-parsed entries[].value strings after the wrap
+// loop. (Spec §2 Tests: "import denial/skip/error paths dispose + clear".)
+```
+Stub `SecretValue.fromUtf8` (or spy on the produced `SecretValue.dispose`) to assert disposal on: (a) production + `wait_for_approval:false` no-approval → denied; (b) `skip_existing` with a pre-existing ref; (c) duplicate ref without `force` → `secret_exists`; (d) **mid-parse-loop throw**: a first entry that is valid (and so wraps a live `SecretValue`) followed by a malformed entry (e.g. missing `value`) — assert the first entry's `SecretValue` is disposed even though the throw fires inside the parse/wrap loop, BEFORE the route-level `try` (`:61`). (This is the case the Step 2.6.7 guard `try/catch` around the parse loop satisfies; the route-level `catch` alone does not cover it.)
+
+> **Do NOT run `npm test` here.** Task 2.6 is itself an atomic batch: Step 2.6.3 changes `UpsertSecretInput.value` to `SecretValue`, which makes every producer — incl. `secrets-import.ts` (still passes a string `entry.value` at `:135`) — tsc-red until migrated. So at this point `npm test` reports a whole-project build error, not the behavioral FAIL. The "verify FAIL" is a **pre-implementation expectation** you record while writing the test (the route does not yet wrap entries as `SecretValue`/dispose on these paths); it is first *observed green* at the Step 2.6.8 full-suite checkpoint (`npm test`), alongside the rest of the Task 2.6 producer batch. (To see a genuine per-route red instead, the only safe option is the temporary-compatibility-shim alternative from the Step 2.4.6 Sequencing note, which also applies to this 2.6 producer batch.)
+
+- [ ] **Step 2.6.7: Migrate import — early-wrap at the parse loop + drop strings + dispose unconsumed**
 
 In `src/daemon/api/routes/secrets-import.ts`:
 1. Change `ImportEntry` (`:11-14`): `{ key: string; value: SecretValue }`.
-2. At the parse loop (`:41-48`), wrap each value INTO a `SecretValue` immediately and drop the raw parsed string reference. The `optString`-extracted `value` local is consumed straight into `fromUtf8` and not stored elsewhere; after the loop, null the parsed-body refs so the originals are GC-eligible before the approval gate:
+2. At the parse loop (`:41-48`), wrap each value INTO a `SecretValue` immediately and drop the raw parsed string reference. The `optString`-extracted `value` local is consumed straight into `fromUtf8` and not stored elsewhere; after the loop, null the parsed-body refs so the originals are GC-eligible before the approval gate. **Wrap the parse/wrap loop ITSELF in a `try/catch` that disposes already-wrapped entries on a mid-loop throw** — the existing route's `try` starts AFTER this loop (`:61`), so a later entry that fails validation (`:45-46` missing-key/value) or `asObject`/`optString` would otherwise leak every `SecretValue` wrapped from a prior valid entry. Declare `entries` before this guard `try` so the migrated `catch` and the downstream store loop both see it:
 ```ts
     const entries: ImportEntry[] = [];
-    for (const e of entriesRaw) {
-      const eo = asObject(e);
-      const key = optString(eo, "key");
-      const value = optString(eo, "value");
-      if (key === undefined) throw new ShuttleError("missing_param", "entries[].key required");
-      if (value === undefined) throw new ShuttleError("missing_param", "entries[].value required");
-      entries.push({ key, value: SecretValue.fromUtf8(value) });
-      // Drop the raw parsed value string from the request-body object graph so
-      // it is GC-eligible before the (possibly long) production approval gate.
-      // (JS strings can't be zeroed; the win is prompt unreachability — same
-      // Tier-A bound as the vault read transient.)
-      if (e !== null && typeof e === "object") delete (e as Record<string, unknown>)["value"];
+    try {
+      for (const e of entriesRaw) {
+        const eo = asObject(e);
+        const key = optString(eo, "key");
+        const value = optString(eo, "value");
+        if (key === undefined) throw new ShuttleError("missing_param", "entries[].key required");
+        if (value === undefined) throw new ShuttleError("missing_param", "entries[].value required");
+        entries.push({ key, value: SecretValue.fromUtf8(value) });
+        // Drop the raw parsed value string from the request-body object graph so
+        // it is GC-eligible before the (possibly long) production approval gate.
+        // (JS strings can't be zeroed; the win is prompt unreachability — same
+        // Tier-A bound as the vault read transient.)
+        if (e !== null && typeof e === "object") delete (e as Record<string, unknown>)["value"];
+      }
+    } catch (err) {
+      // A later entry threw during parse/validation AFTER earlier entries were
+      // already wrapped into live SecretValues — the route-level catch (:153)
+      // does not cover this pre-try region, so dispose here. (dispose() is
+      // idempotent; this only ever holds not-yet-stored values.)
+      for (const entry of entries) entry.value.dispose();
+      throw err;
     }
 ```
+   (This guard `try` is distinct from — and precedes — the existing route-level `try` at `:61`; do NOT merge them, since the route-level `catch` writes a failure audit that should not fire for these pre-approval parse errors.)
 3. The `entries.map((e) => e.key).join(",")` in the binding (`:75`) is unchanged (keys are not secret).
 4. At the upsert (`:131-140`), pass the `SecretValue`: `value: entry.value,` (it's already a `SecretValue`). `upsertSecret` OWNS + disposes it — the route does NOT separately dispose a handed-off value.
 5. **Dispose unconsumed `SecretValue`s on skip / deny / error.** On the **skip-existing** branch (`:110-113`, entry skipped, not stored) dispose `entry.value` before `continue`. On **every error/throw path** (the `catch` at `:153`, including `secret_exists` `:123` and approval-denied from `requireApprovals` `:79`), iterate the not-yet-consumed entries and dispose each. Track consumption with an index or a `Set` of consumed entries. Concretely:
@@ -1949,16 +2046,14 @@ In `src/daemon/api/routes/secrets-import.ts`:
 ```
    And in the route-level `catch` (`:153`), defensively dispose any entry whose value hasn't been disposed yet (e.g. the production approval-denied path throws from `requireApprovals` at `:79` BEFORE the entry loop — so ALL entries are unconsumed there): wrap the body so the `catch` iterates `entries` and disposes each (`dispose()` is idempotent, so double-dispose on already-consumed/skipped entries is safe). Simplest: in the `catch`, `for (const entry of entries) entry.value.dispose();` (idempotent — vault-consumed + skipped entries are already disposed; this scrubs the approval-denied-before-loop case).
 
-- [ ] **Step 2.6.7: Write the failing import denial/skip/error dispose tests**
+- [ ] **Step 2.6.7b: PASS checkpoint for the Step 2.6.6 import dispose tests — DEFERRED to the Step 2.6.8 green tree**
 
-Add (to the import route test file):
-```ts
-// Burst 7 §2 (5q). import disposes every not-yet-stored entry SecretValue on
-// the approval-DENIED path, the SKIP-existing path, and the secret_exists/error
-// path; and drops the originally-parsed entries[].value strings after the wrap
-// loop. (Spec §2 Tests: "import denial/skip/error paths dispose + clear".)
+The denial/skip/error dispose tests written at Step 2.6.6 now pass against the migrated route — but do NOT run them in isolation yet: the Task 2.6 producer batch leaves the test files tsc-red (callers still pass `value: "string"` to `upsertSecret`) until Step 2.6.8 updates them, so `npm test` build-fails before this point. This is the green half of the 2.6.6 red→green pair; it is **verified at the Step 2.6.8 full-suite checkpoint** below (which runs the whole suite green, including these import tests). If you want to re-confirm just these after 2.6.8 is green:
+```bash
+# Run ONLY at/after the Step 2.6.8 green checkpoint — not against the red producer-batch tree:
+npm test -- --test-name-pattern "import disposes|import.*dispose" 2>&1 | tail -15
 ```
-Stub `SecretValue.fromUtf8` (or spy on the produced `SecretValue.dispose`) to assert disposal on: (a) production + `wait_for_approval:false` no-approval → denied; (b) `skip_existing` with a pre-existing ref; (c) duplicate ref without `force` → `secret_exists`. Run, verify FAIL → migrate → PASS.
+Expected (at/after 2.6.8): PASS.
 
 - [ ] **Step 2.6.8: Update all producer/upsert call-site tests + full suite green**
 
@@ -2001,7 +2096,7 @@ EOF
 
 - [ ] **Step 2.7.1: Write the guard test**
 
-Create `src/e2e/no-raw-resolved-value-in-response.test.ts`. It scans daemon route files for a raw resolved `.value` (as opposed to `.value.bytes()`) flowing into a response/serializer. It MUST allow the one intentional plaintext-out path — `inject-render`'s stdout mode returns the *rendered template string* (`content: rendered`), which is a render output, NOT a `SecretValue.value` (spec §2 Guard test note):
+Create `src/e2e/no-raw-resolved-value-in-response.test.ts` with **two** guard tests: (1) it scans daemon route files for a raw resolved `.value` (as opposed to `.value.bytes()`) flowing into a response/serializer — allowing the one intentional plaintext-out path (`inject-render`'s stdout mode returns the *rendered template string* `content: rendered`, a render output, NOT a `SecretValue.value`); and (2) it scans `src/daemon` for any `getSecret` call (the string-valued accessor must be vault-internal-only post-migration — `tsc` cannot catch a re-introduced route call, per the P2 finding):
 ```ts
 // src/e2e/no-raw-resolved-value-in-response.test.ts
 //
@@ -2020,14 +2115,17 @@ import { join } from "node:path";
 const ROUTES_DIR = join(process.cwd(), "src/daemon/api/routes");
 
 // A resolved SecretValue's value must only ever be read via `.value.bytes()`.
-// Flag any `\.value` that is NOT immediately followed by `.bytes(` or `.dispose(`
-// or `.byteLength` or `.equals(` — i.e. a raw SecretValue escaping. We scope to
-// occurrences on the same token as a resolved record/secret to avoid matching
-// unrelated `.value` (HTTP body params, capture.value at the producer boundary,
-// entry.value-as-ref in run-resolve). The implementer tunes the regex against
-// the real post-migration tree; the intent is: zero raw resolved-SecretValue
-// reads into a response.
-const SUSPICIOUS = /\b(resolved|secret|record)\.value\b(?!\s*\.(bytes|dispose|byteLength|equals)\b)/;
+// Flag any resolved-record `.value` access that is NOT immediately followed by
+// `.bytes(` / `.dispose(` / `.byteLength` / `.equals(` — i.e. a raw SecretValue
+// escaping. TWO access shapes must be caught (verified against the migrated
+// run-resolve sink shape `resolved.get(ref)!.value.bytes()`):
+//   (1) direct:  `resolved.value` / `secret.value` / `record.value`
+//   (2) indexed: `resolved.get(<ref>)!.value` / `.get(...)?.value` / `.get(...).value`
+//       — here the token immediately before `.value` is `)`/`!)`/`?)`, NOT the
+//         word `resolved`, so a word-boundary `\bresolved\.value` regex would
+//         MISS it. The indexed alternative below anchors on `.get(...)`.
+const SUSPICIOUS_DIRECT = /\b(resolved|secret|record)\.value\b(?!\s*\.(bytes|dispose|byteLength|equals)\b)/;
+const SUSPICIOUS_INDEXED = /\bresolved\.get\([^)]*\)[!?]?\.value\b(?!\s*\.(bytes|dispose|byteLength|equals)\b)/;
 
 test("no daemon route reads a raw resolved SecretValue (.value without .bytes()/.dispose())", () => {
   const files = readdirSync(ROUTES_DIR).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
@@ -2040,9 +2138,20 @@ test("no daemon route reads a raw resolved SecretValue (.value without .bytes()/
       // Skip producer boundaries where `.value` is a page-side capture string
       // being WRAPPED into a SecretValue (SecretValue.fromUtf8(capture.value)).
       if (/SecretValue\.fromUtf8\(/.test(line)) continue;
-      // Skip run-resolve's entry.value-as-ref (env entry ref, not a secret value).
-      if (/resolved\.get\(/.test(line)) continue;
-      if (SUSPICIOUS.test(line)) {
+      // NOTE: do NOT blanket-skip every `resolved.get(` line. run-resolve's
+      // env-entry ref is `resolved.get(entry.value)` — the `.value` there is an
+      // ARGUMENT inside the parens (the ref `entry.value`), which neither
+      // SUSPICIOUS regex matches (the direct one requires `resolved|secret|
+      // record` immediately before `.value`; `entry` is none of those, and the
+      // indexed one only fires on a TRAILING `.value` after `.get(...)`). So a
+      // blanket `resolved.get(` skip is both unnecessary and dangerous — it
+      // would hide a real raw `resolved.get(ref)!.value` regression. The
+      // SUSPICIOUS_INDEXED pattern catches that regression; the legitimate
+      // `resolved.get(ref)!.value.bytes()` sink is excluded by the negative
+      // lookahead. (If `entry.value`-as-ref ever DID false-match after a
+      // refactor, add a narrow skip for the exact ref-argument shape — never a
+      // blanket `.get(` skip.)
+      if (SUSPICIOUS_DIRECT.test(line) || SUSPICIOUS_INDEXED.test(line)) {
         offenders.push(`${f}:${i + 1}  ${line.trim()}`);
       }
     }
@@ -2053,36 +2162,80 @@ test("no daemon route reads a raw resolved SecretValue (.value without .bytes()/
     `Raw resolved SecretValue read(s) found — use .value.bytes() and dispose:\n${offenders.join("\n")}`,
   );
 });
-```
 
-> **Implementer note (judgment call):** the regex is a heuristic. Before relying on it, run it against the migrated tree and confirm it produces ZERO offenders AND that temporarily reverting one consumer to a raw `.value` makes it FIRE (prove the guard catches a regression). If `SecretValue.fromUtf8(...)`/`resolved.get(...)` skips prove too coarse, tighten to explicit allow-list lines. The contract the test enforces is the spec's: no daemon route serializes a raw resolved `.value`; the `inject-render -o -` `content: rendered` path is a render-string, which the regex does not match (it is `rendered`, not `*.value`).
+// Burst 7 §2 (5q) guard #2 — `getSecret` is vault-internal-only. After the
+// migration, the string-valued Vault.getSecret accessor must NOT be called from
+// any route: metadata callers use Vault.inspect, true-plaintext consumers use
+// resolveSecret/resolveRefs. `tsc` cannot enforce this (getSecret still returns
+// a valid SecretRecord, so a leftover route call type-checks while silently
+// keeping a stored plaintext string on the heap before the approval gate). This
+// scan is the only mechanism that catches a re-introduced route getSecret.
+// Vault internals call it via `this.getSecret(` inside vault.ts; routes called
+// `services.vault.getSecret(`. So both: zero `services.vault.getSecret(`
+// anywhere, and zero `.getSecret(` outside vault.ts.
+test("Vault.getSecret is vault-internal-only — no daemon route/module calls getSecret", () => {
+  const DAEMON_DIR = join(process.cwd(), "src/daemon");
+  const offenders: string[] = [];
+  const walk = (dir: string): void => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, ent.name);
+      if (ent.isDirectory()) { walk(p); continue; }
+      if (!ent.name.endsWith(".ts") || ent.name.endsWith(".test.ts")) continue;
+      const lines = readFileSync(p, "utf8").split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] ?? "";
+        if (/services\.vault\.getSecret\(/.test(line) || /\.getSecret\(/.test(line)) {
+          offenders.push(`${p.replace(process.cwd() + "/", "")}:${i + 1}  ${line.trim()}`);
+        }
+      }
+    }
+  };
+  walk(DAEMON_DIR);
+  assert.deepEqual(
+    offenders,
+    [],
+    `getSecret called outside vault internals — route metadata callers to Vault.inspect, plaintext consumers to resolveSecret/resolveRefs:\n${offenders.join("\n")}`,
+  );
+});
+```
+(`src/daemon` excludes `src/vault/vault.ts`, where the legitimate `this.getSecret(` internal callers live — so the recursive `.getSecret(` scan is safe here. If a future refactor moves a legitimate internal caller into `src/daemon`, narrow the second predicate to `services\.vault\.getSecret\(` only.)
+
+> **Implementer note (judgment call):** the regexes are heuristics. Before relying on the guard, run it against the migrated tree and confirm (a) it produces ZERO offenders, AND (b) temporarily reverting the run-resolve sink `resolved.get(entry.value)!.value.bytes().toString("utf8")` back to a raw `resolved.get(entry.value)!.value` makes it FIRE (proves `SUSPICIOUS_INDEXED` catches the indexed-access regression that a `\bresolved\.value` regex would miss), AND (c) reverting a direct `secret.value.bytes()` to `secret.value` also fires. If `SecretValue.fromUtf8(...)` proves too coarse a skip, tighten to explicit allow-list lines. The contract the test enforces is the spec's: no daemon route serializes a raw resolved `.value`; the `inject-render -o -` `content: rendered` path is a render-string, which neither regex matches (it is `rendered`, not `*.value`).
 
 - [ ] **Step 2.7.2: Run the guard + the full suite, verify PASS**
 
 ```bash
-npm test -- --test-name-pattern "no daemon route reads a raw resolved" 2>&1 | tail -10
+npm test -- --test-name-pattern "no daemon route reads a raw resolved|getSecret is vault-internal-only" 2>&1 | tail -12
 npm test 2>&1 | tail -12
 npx tsc --noEmit 2>&1 | head -5
 ```
-Expected: guard PASSES (zero offenders); full suite green (1588 baseline + all §1/§2 tests); typecheck clean.
+Expected: BOTH guards PASS (zero offenders each — no raw resolved `.value`, no route `getSecret`); full suite green (1588 baseline + all §1/§2 tests); typecheck clean.
 
-- [ ] **Step 2.7.3: Prove the guard catches a regression (sanity check, do NOT commit the regression)**
+- [ ] **Step 2.7.3: Prove the guard catches BOTH access shapes (sanity check, do NOT commit the regression)**
 
-Temporarily edit one migrated consumer to read a raw `.value` (e.g. revert one `.value.bytes().toString("utf8")` back to `.value`), run the guard, confirm it FAILS, then revert. This proves the guard is load-bearing.
+Prove the guard is load-bearing for both the direct and the indexed-access shapes (the indexed one is the run-resolve sink that a naive `\bresolved\.value` regex misses):
+1. Temporarily revert a **direct** consumer (e.g. `secret.value.bytes()` → `secret.value` in inject-submit/secrets), run the guard, confirm it FAILS (caught by `SUSPICIOUS_DIRECT`), then revert.
+2. Temporarily revert the **indexed** run-resolve sink (`resolved.get(entry.value)!.value.bytes().toString("utf8")` → `resolved.get(entry.value)!.value`), run the guard, confirm it FAILS (caught by `SUSPICIOUS_INDEXED`), then revert.
+Both must fire — if the indexed revert does NOT fire, the `SUSPICIOUS_INDEXED` pattern is wrong (it is the whole point of the P2 guard-tightening) and must be fixed before this task is complete.
 
 - [ ] **Step 2.7.4: Commit**
 
 ```bash
 git add src/e2e/no-raw-resolved-value-in-response.test.ts
 git commit -m "$(cat <<'EOF'
-test(e2e): guard — no daemon route serializes a raw resolved SecretValue (5q)
+test(e2e): guards — no raw resolved SecretValue; getSecret vault-internal (5q)
 
-Burst 7 §2. Repo-scan guard: route files must read a resolved value only
-via .value.bytes() (the single audited door), never raw. Allows the one
-intentional plaintext-out surface (inject-render -o - returns the rendered
-template string `content`, not a SecretValue.value) and the producer-side
-SecretValue.fromUtf8(capture.value) wrap. Proven load-bearing by a
-revert-and-fail sanity check.
+Burst 7 §2. Two repo-scan guards tsc cannot provide. (1) Route files must
+read a resolved value only via .value.bytes() (the single audited door),
+never raw — catches both the direct (secret.value) and indexed
+(resolved.get(ref)!.value) access shapes; allows the one intentional
+plaintext-out surface (inject-render -o - returns the rendered template
+string `content`, not a SecretValue.value) and the producer-side
+SecretValue.fromUtf8(capture.value) wrap. (2) Vault.getSecret (string
+accessor) is vault-internal-only: zero `services.vault.getSecret(` /
+non-vault.ts `.getSecret(` calls — a re-introduced route getSecret would
+type-check but leak a stored plaintext string before the approval gate.
+Both proven load-bearing by revert-and-fail sanity checks.
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 EOF
@@ -2262,7 +2415,7 @@ git commit -m "chore: bump to 0.4.0 (Burst 7 — Identity & Memory Hardening)"
 
 ```bash
 git branch --show-current        # burst7/identity-memory-hardening
-git log --oneline main..HEAD | wc -l   # ~20-24 commits (one per task)
+git log --oneline main..HEAD | wc -l   # roughly one commit per task/atomic-batch (the 2.4→2.5.7 and 2.6.* batches each land as a single commit, so the count is lower than the raw step count — used only as a sanity check, not an exact gate)
 npm test 2>&1 | tail -5
 npx tsc --noEmit && npm run check-pack 2>&1 | tail -3
 ```
@@ -2301,16 +2454,16 @@ Expected: on the burst7 branch; full suite green; typecheck + check-pack clean. 
 | §5 Success criteria (1 per-project ids; 2 no long-lived plaintext + redaction + no-cross-approval-hold; 3 no wire change; 4 keychain doc; 5 suite green/0.4.0; 6 codex gates) | Covered across §1/§2/Wrap; §5.6 = W.4 (orchestrator) ✓ |
 | §6 Risks (missed consumer → guard+audit; toJSON corrupts on-disk → round-trip test; early dispose → e2e + finally pattern; flag clobbers infer.* → merge test; git rev-parse quirks → cwd fallback; fingerprint signature → tsc + pin) | Mitigations embedded in the corresponding tasks ✓ |
 
-**No placeholders:** every code step shows the actual code; every test step shows the actual test; file paths + real line numbers + exact commands + expected output are given throughout. The literal `supabase:TODO_...` strings referenced are not in this plan (that was Burst 6); no `TBD`/`TODO`-as-placeholder remains.
+**No placeholders:** every code step shows the actual code; every test step shows either the actual test code OR a concrete named-test outline with explicit per-assertion guidance (the `2.5.4.3`/`2.5.5.1` env-clear/file-mode-reorder lifetime tests are given as named `// (a)/(b)/(c)` outlines plus the exact stub/spy/assert recipe to write them — not bare prose, but not full literal source either; the executor writes the body from the outline + the migration code in the same step). File paths + real line numbers + exact commands + expected output are given throughout. The literal `supabase:TODO_...` strings referenced are not in this plan (that was Burst 6); no `TBD`/`TODO`-as-placeholder remains.
 
 **Type consistency:** `SecretValue` (Task 2.2) → used identically in 2.3 (fingerprint inputs via `.bytes()`), 2.4 (`ResolvedSecret = Omit<SecretRecord,"value"> & { value: SecretValue }`), 2.5.* (consumer `.bytes()`/`dispose()`), 2.6 (`UpsertSecretInput.value: SecretValue`, producers `SecretValue.fromUtf8`). `ResolvedSecret` (2.4) → `resolveSecret`/`resolveRefs` return type, used in every 2.5.* consumer. `fingerprintSecret(value: Buffer, key: Buffer)` (2.3) → vault callers + compare. `assertSecretActionAllowed(secret: Pick<SecretRecord,"ref"|"allowed_actions">, ...)` (2.4) → satisfied by both `AgentSecretMetadata` and `ResolvedSecret` in 2.5.*. `READ_META_SCRIPT` (2.5.0) → consumed by `readFocusedFingerprintAndDomain`, used by inject + compare preflights.
 
 **Source vs. spec — contradictions found:** none material. The spec's line numbers and signatures matched the source on every point verified (10 gate rounds paid off). Two minor notes for the executor: (a) the spec lists `getSecret` callers and capture sites by line number that I re-confirmed exact (`secrets.ts:154/394/484`, `inject-submit.ts:53`, `templates.ts:130`, `run-resolve.ts:220`, `inject-render.ts:54`, `secrets-import.ts:103`, `secrets-delete.ts:50`, `secrets-rotate.ts:50`); (b) `generate-value.ts` is at `src/daemon/helpers/generate-value.ts` (the parent-task brief said `src/vault/generate-value.ts`, which does not exist — the spec itself already cites the correct `src/daemon/helpers/` path, so no contradiction with the spec).
 
 **Judgment calls (carry forward to the executor):**
-- **Tasks 2.4 → 2.5.* leave `tsc` red between commits** (single logically-atomic refactor split for review granularity). The green-typecheck checkpoint is Task 2.5.7; per-consumer behavioral tests gate each sub-task in between. The executor may collapse 2.4 + 2.5.* into one commit for a continuously-green tree.
+- **Tasks 2.4 → 2.5.7 are ONE no-commit batch — never commit a `tsc`-red tree.** The accessor split (2.4) makes the `resolveRefs`/`resolveSecret` consumers red until migrated, and `npm test` builds the whole project, so nothing compiles or tests until the batch is complete. Stage at 2.4.7 (Step 2.4.7 — `git add`, no commit), implement 2.5.* back-to-back, and commit the whole accessor+consumer batch at the first green tree (Step 2.5.7.3 checkpoint → Step 2.5.7.4 commit). Review-granular per-consumer commits are allowed ONLY via the temporary-compatibility-shim alternative (each commit against a green tree); the no-commit batch is the default.
 - **`run.ts` makes its own `Buffer.from(input.secret.bytes())` copy** for the stdin/env-file write+scrub, leaving the route to dispose the `SecretValue` — clear ownership, preserves `run.ts`'s existing scrub-the-written-buffer logic (Task 2.5.3 decision box).
-- **`run-resolve` env-clear + `SecretValue` dispose go in the existing outer `finally`** (next to masker dispose) — guaranteed on all paths, child already has its env copy, `spawnAndStream` no longer retains `input.env` (Task 2.5.4 decision box).
+- **`run-resolve` env-clear + `SecretValue` dispose happen immediately after `spawnAndStream` is INITIATED (synchronously after the call returns), NOT in the outer `finally`** — the child already has its env copy and `spawnAndStream` no longer retains `input.env` (destructured locals, Step 2.5.4.2), so the route clears its own `env[entry.key]` strings + disposes each `SecretValue` right away rather than holding them across the awaited child lifetime (spec §2.5.4 drop-reference requirement). Only the **masker bytes** are scrubbed in the existing outer `finally`. A pre-spawn failure path still disposes every resolved `SecretValue` (Step 2.5.4.3 test (c)).
 - **The compare byte-wrap (`Buffer.from(capture.value,"utf8")`) lands in Task 2.3** (to keep `tsc` green at the fingerprint-signature change); the compare *late-capture reorder* stays in Task 2.5.6.
 - **`reveal-capture` `!hideDone` persistence** — the reorder targets the happy path; the executor must re-read `reveal-capture.ts:420-463` and preserve the existing fail-closed-persist behavior for the `!hideDone` branch exactly (Task 2.6.5 caution).
 - **The guard regex (Task 2.7) is a heuristic** — the executor must prove it produces zero offenders on the migrated tree AND fires on a deliberately-reverted consumer before relying on it.
