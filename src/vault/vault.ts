@@ -298,10 +298,20 @@ export class Vault {
    */
   async resolveRefs(refs: readonly string[]): Promise<Map<string, ResolvedSecret>> {
     const result = new Map<string, ResolvedSecret>();
-    for (const ref of refs) {
-      if (result.has(ref)) continue; // dedupe
-      const record = await this.getSecret(ref);
-      result.set(ref, this.toResolvedSecret(record));
+    try {
+      for (const ref of refs) {
+        if (result.has(ref)) continue; // dedupe
+        const record = await this.getSecret(ref);
+        result.set(ref, this.toResolvedSecret(record));
+      }
+    } catch (e) {
+      // A later ref threw (e.g. the second ref is soft-deleted →
+      // secret_not_found) AFTER earlier refs were already wrapped into owned,
+      // disposable SecretValues. The caller never receives the partial map, so
+      // its finally never sees those values — dispose them here before
+      // rethrowing so no resolved plaintext bytes leak on the failure path.
+      for (const r of result.values()) r.value.dispose();
+      throw e;
     }
     return result;
   }

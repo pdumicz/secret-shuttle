@@ -156,14 +156,25 @@ export async function runTemplate(input: TemplateRunInput): Promise<TemplateRunR
     );
   }
 
-  const { path: envFilePath } = writeSecretEnvFile({
-    name: envVarName,
-    // Burst 7 §2 (5q): own copy of the resolved bytes for the env-file write;
-    // writeSecretEnvFile zeroes the buffer it builds, so the route's
-    // SecretValue is untouched.
-    value: Buffer.from(input.secret.bytes()),
-    tmpDir: input.tmpDir,
-  });
+  // Burst 7 §2 (5q): own copy of the resolved bytes for the env-file write. We
+  // must NOT scrub the route's SecretValue (it owns/disposes it in its own
+  // finally), so copy here. writeSecretEnvFile zeroes the *concatenated* buffer
+  // it builds internally but deliberately leaves THIS caller-owned `value`
+  // intact (its contract: "the caller owns the passed-in Buffer"), so the copy
+  // would otherwise survive as plaintext until GC on both success AND error.
+  // We own it → zero it in the finally below, alongside the env-file unlink.
+  const secretEnvBuf = Buffer.from(input.secret.bytes());
+  let envFilePath: string;
+  try {
+    ({ path: envFilePath } = writeSecretEnvFile({
+      name: envVarName,
+      value: secretEnvBuf,
+      tmpDir: input.tmpDir,
+    }));
+  } catch (e) {
+    secretEnvBuf.fill(0);
+    throw e;
+  }
 
   try {
     // Substitute the env-file path placeholder BEFORE param-expansion so that

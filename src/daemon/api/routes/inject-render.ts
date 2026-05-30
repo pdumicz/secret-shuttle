@@ -111,11 +111,21 @@ export function registerInjectRenderRoute(
         const valuesMap = new Map<string, string>();
         for (const [ref, r] of resolved) valuesMap.set(ref, r.value.bytes().toString("utf8"));
         const rendered = parsed.render(valuesMap);
+        // Burst 7 §2 (5q): the SecretValue bytes are now baked into `rendered`
+        // (the intentional plaintext-out wire surface, §0). Dispose the resolved
+        // values and drop the per-value `valuesMap` strings IMMEDIATELY — before
+        // the post-render markUsed() awaits — so no live SecretValue / extra
+        // per-value string is held across that filesystem/audit work. The
+        // finally is the idempotent backstop. `rendered` itself must survive to
+        // the return (it IS the response body).
+        for (const r of resolved.values()) r.value.dispose();
+        resolved = undefined;
+        valuesMap.clear();
         // All resolve/policy/approval checks have passed; plaintext is about to
         // leave the daemon in the response body, so flip the exposure flag now.
         auditOk = true;
         valueVisibleToAgent = true;
-        for (const ref of resolved.keys()) {
+        for (const ref of parsed.refs) {
           await services.vault.markUsed(ref).catch(() => undefined);
         }
         return { rendered: true, refs_count: parsed.refs.length, content: rendered };
@@ -261,8 +271,22 @@ export function registerInjectRenderRoute(
         resolved = await services.vault.resolveRefs(parsed.refs);
         const valuesMap = new Map<string, string>();
         for (const [ref, r] of resolved) valuesMap.set(ref, r.value.bytes().toString("utf8"));
-        const rendered = parsed.render(valuesMap);
+        let rendered: string | undefined = parsed.render(valuesMap);
         await fh.writeFile(rendered, "utf8");
+        // Burst 7 §2 (5q): the rendered plaintext is now materialized at the
+        // sink (the 0600 file) and never returned in file mode. Dispose the
+        // resolved SecretValues and DROP the rendered string + per-value
+        // `valuesMap` strings RIGHT AFTER the write resolves — before the
+        // fh.close()/rename() awaits and the post-write markUsed()/audit work —
+        // so neither a live SecretValue nor the rendered/per-value plaintext
+        // strings are held across that filesystem/audit latency (spec lines
+        // 234/285). Nulling `rendered` makes it GC-eligible immediately rather
+        // than reachable until the inner try scope ends. The route's finally is
+        // the idempotent backstop for the throw/timeout paths.
+        for (const r of resolved.values()) r.value.dispose();
+        resolved = undefined;
+        valuesMap.clear();
+        rendered = undefined;
         await fh.close();
         fh = undefined;
         await rename(tempPath, finalPath);

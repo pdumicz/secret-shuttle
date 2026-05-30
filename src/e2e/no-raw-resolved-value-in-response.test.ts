@@ -1,80 +1,152 @@
 // src/e2e/no-raw-resolved-value-in-response.test.ts
 //
 // Burst 7 §2 (5q) guard. After the SecretValue migration, no daemon route may
-// pass a RAW resolved `.value` (a SecretValue) into a response/serializer — the
-// only byte door is `.value.bytes()`. This scans the route files for the
-// dangerous patterns. It deliberately does NOT forbid all plaintext in
-// responses: inject-render's stdout mode returns the rendered TEMPLATE STRING
-// (`content: rendered`), which is a render output, not a SecretValue.value —
-// that is the one intentional, agent-requested plaintext-out wire surface (§0).
+// read a RAW resolved `.value` (a SecretValue) other than through the audited
+// byte door `.value.bytes()` (plus the inspection helpers .dispose()/.byteLength/
+// .equals()) or by handing the whole SecretValue BY REFERENCE to a Buffer-native
+// internal sink. This guard is TYPE-AWARE (TypeScript compiler API) rather than
+// regex/name-based: it resolves the static type of every `.value` access in the
+// route files and flags only those whose type is the `SecretValue` class — so it
+// catches a raw read regardless of the receiver's variable name. A regex pinned
+// to `resolved|secret|record` would MISS a loop alias such as
+// `for (const r of resolved.values()) return { value: r.value }` (the receiver
+// `r` is none of those names) — exactly the realistic future miss this rewrite
+// closes. It deliberately does NOT forbid all plaintext in responses:
+// inject-render's stdout mode returns the rendered TEMPLATE STRING
+// (`content: rendered`), which is a `string`, not a `SecretValue` — that is the
+// one intentional, agent-requested plaintext-out wire surface (§0).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import ts from "typescript";
 
 const ROUTES_DIR = join(process.cwd(), "src/daemon/api/routes");
+const TSCONFIG = join(process.cwd(), "tsconfig.json");
 
-// A resolved SecretValue's value must only ever be read via `.value.bytes()`.
-// Flag any resolved-record `.value` access that is NOT immediately followed by
-// `.bytes(` / `.dispose(` / `.byteLength` / `.equals(` — i.e. a raw SecretValue
-// escaping. TWO access shapes must be caught (verified against the migrated
-// run-resolve sink shape `resolved.get(ref)!.value.bytes()`):
-//   (1) direct:  `resolved.value` / `secret.value` / `record.value`
-//   (2) indexed: `resolved.get(<ref>)!.value` / `.get(...)?.value` / `.get(...).value`
-//       — here the token immediately before `.value` is `)`/`!)`/`?)`, NOT the
-//         word `resolved`, so a word-boundary `\bresolved\.value` regex would
-//         MISS it. The indexed alternative below anchors on `.get(...)`.
-const SUSPICIOUS_DIRECT = /\b(resolved|secret|record)\.value\b(?!\s*\.(bytes|dispose|byteLength|equals)\b)/;
-const SUSPICIOUS_INDEXED = /\bresolved\.get\([^)]*\)[!?]?\.value\b(?!\s*\.(bytes|dispose|byteLength|equals)\b)/;
+// Reading a SecretValue is allowed only when the access is the receiver of one
+// of these member calls (the audited "doors"): `.bytes()` is the single plaintext
+// door; the others are non-leaking inspection/lifecycle helpers.
+const ALLOWED_MEMBERS = new Set(["bytes", "dispose", "byteLength", "equals"]);
 
-// Audited allow-list (Task 2.7 implementer note). A raw `resolved.value` is fine
-// when the SecretValue object is handed BY REFERENCE to a Buffer-native internal
-// sink that itself reads `.bytes()` and is disposed in the route's `finally` —
-// it never reaches a response serializer. The single such site post-migration is
-// the templates route passing `secret: resolved.value` into `runTemplate`
-// (TemplateRunInput.secret: SecretValue; run.ts copies via `input.secret.bytes()`).
-// The skip is anchored to that EXACT field-pass shape so it can never mask a real
-// raw-value response leak (a bare `resolved.value` in a returned object would not
-// match `secret: resolved.value,`). If a second such audited sink appears, add its
-// exact line here — never broaden to a bare `resolved.value` skip.
-const ALLOWED_DIRECT_SINKS = [/^\s*secret:\s*resolved\.value,?\s*$/];
+/**
+ * Build a typed Program over the route files (resolving their imports via the
+ * repo tsconfig) so the checker can tell a `SecretValue`-typed `.value` from a
+ * plain-string `.value` (e.g. `entry.value`, `capture.value`, `o.value`).
+ */
+function buildProgram(routeFiles: string[]): ts.Program {
+  const cfg = ts.readConfigFile(TSCONFIG, ts.sys.readFile);
+  const parsed = ts.parseJsonConfigFileContent(
+    cfg.config,
+    ts.sys,
+    process.cwd(),
+  );
+  return ts.createProgram(routeFiles, {
+    ...parsed.options,
+    noEmit: true,
+    skipLibCheck: true,
+  });
+}
+
+/** True iff `type` is (or includes, for a union) the `SecretValue` class. */
+function isSecretValueType(type: ts.Type): boolean {
+  const named = (t: ts.Type): boolean => t.getSymbol()?.getName() === "SecretValue";
+  if (type.isUnion()) return type.types.some(named);
+  return named(type);
+}
+
+/**
+ * Audited by-reference handoff check. A raw SecretValue (not `.value.bytes()`) is
+ * permitted when it is handed BY REFERENCE into a Buffer-native internal sink
+ * that itself reads `.bytes()` and disposes in the route's `finally` — it never
+ * reaches a response serializer. The two such sites post-migration are:
+ *   - templates  → `runTemplate({ secret: resolved.value, ... })`  (TemplateRunInput.secret: SecretValue)
+ *   - secrets-import → `upsertSecret({ value: entry.value, ... })` (UpsertSecretInput.value: SecretValue)
+ * Rather than name-allow-listing the property (which would have to allow `value`
+ * — the very field a leaked wire-response object would use — and so could mask a
+ * real leak), this is TYPE-DIRECTED: the SecretValue access is the initializer of
+ * a property of an object literal that is a DIRECT ARGUMENT of a call, AND the
+ * call's contextual (parameter) type declares that property as `SecretValue`. A
+ * returned/response object literal is NOT a call argument, and its contextual
+ * type's `value` property is `string`/absent — so `return { value: r.value }`
+ * can never satisfy this and is still flagged.
+ */
+function isByRefSinkHandoff(valueAccess: ts.Expression, checker: ts.TypeChecker): boolean {
+  const prop = valueAccess.parent;
+  if (!ts.isPropertyAssignment(prop) || prop.initializer !== valueAccess) return false;
+  if (!ts.isIdentifier(prop.name)) return false;
+  const objLit = prop.parent;
+  if (!ts.isObjectLiteralExpression(objLit)) return false;
+  // The object literal must itself be a direct argument of a call expression.
+  const call = objLit.parent;
+  if (!ts.isCallExpression(call) || !call.arguments.includes(objLit)) return false;
+  // The parameter (contextual) type the object flows into must declare this
+  // property as a SecretValue — i.e. the callee asked for the SecretValue by
+  // reference. A response object has no such contextual SecretValue property.
+  const ctxType = checker.getContextualType(objLit);
+  if (ctxType === undefined) return false;
+  const propSym = ctxType.getProperty(prop.name.text);
+  if (propSym === undefined) return false;
+  const propType = checker.getTypeOfSymbolAtLocation(propSym, objLit);
+  return isSecretValueType(propType);
+}
 
 test("no daemon route reads a raw resolved SecretValue (.value without .bytes()/.dispose())", () => {
-  const files = readdirSync(ROUTES_DIR).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+  const files = readdirSync(ROUTES_DIR)
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
+    .map((f) => join(ROUTES_DIR, f));
+  const program = buildProgram(files);
+  const checker = program.getTypeChecker();
   const offenders: string[] = [];
-  for (const f of files) {
-    const text = readFileSync(join(ROUTES_DIR, f), "utf8");
-    const lines = text.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i] ?? "";
-      // Skip producer boundaries where `.value` is a page-side capture string
-      // being WRAPPED into a SecretValue (SecretValue.fromUtf8(capture.value)).
-      if (/SecretValue\.fromUtf8\(/.test(line)) continue;
-      // Skip the audited SecretValue-by-reference-into-a-Buffer-native-sink lines
-      // (see ALLOWED_DIRECT_SINKS above) — these never serialize plaintext.
-      if (ALLOWED_DIRECT_SINKS.some((re) => re.test(line))) continue;
-      // NOTE: do NOT blanket-skip every `resolved.get(` line. run-resolve's
-      // env-entry ref is `resolved.get(entry.value)` — the `.value` there is an
-      // ARGUMENT inside the parens (the ref `entry.value`), which neither
-      // SUSPICIOUS regex matches (the direct one requires `resolved|secret|
-      // record` immediately before `.value`; `entry` is none of those, and the
-      // indexed one only fires on a TRAILING `.value` after `.get(...)`). So a
-      // blanket `resolved.get(` skip is both unnecessary and dangerous — it
-      // would hide a real raw `resolved.get(ref)!.value` regression. The
-      // SUSPICIOUS_INDEXED pattern catches that regression; the legitimate
-      // `resolved.get(ref)!.value.bytes()` sink is excluded by the negative
-      // lookahead. (If `entry.value`-as-ref ever DID false-match after a
-      // refactor, add a narrow skip for the exact ref-argument shape — never a
-      // blanket `.get(` skip.)
-      if (SUSPICIOUS_DIRECT.test(line) || SUSPICIOUS_INDEXED.test(line)) {
-        offenders.push(`${f}:${i + 1}  ${line.trim()}`);
+
+  for (const file of files) {
+    const sf = program.getSourceFile(file);
+    if (sf === undefined) continue;
+    const rel = file.replace(process.cwd() + "/", "");
+
+    const visit = (node: ts.Node): void => {
+      // Match BOTH `x.value` (PropertyAccess) and `x["value"]` (ElementAccess).
+      let valueAccess: ts.Expression | undefined;
+      if (ts.isPropertyAccessExpression(node) && node.name.text === "value") {
+        valueAccess = node;
+      } else if (
+        ts.isElementAccessExpression(node) &&
+        ts.isStringLiteralLike(node.argumentExpression) &&
+        node.argumentExpression.text === "value"
+      ) {
+        valueAccess = node;
       }
-    }
+
+      if (valueAccess !== undefined) {
+        const t = checker.getTypeAtLocation(valueAccess);
+        if (isSecretValueType(t)) {
+          // The `.value` resolves to a SecretValue. Allowed ONLY when it is the
+          // receiver of an audited member call (`.value.bytes()` etc.), OR when
+          // it is handed BY REFERENCE into a Buffer-native internal sink whose
+          // parameter is typed SecretValue (runTemplate's `secret`, upsertSecret's
+          // `value`) — see isByRefSinkHandoff. A bare `.value` reaching a response
+          // object (e.g. `return { value: r.value }`) is neither and IS flagged.
+          const parent = valueAccess.parent;
+          const isAuditedDoor =
+            ts.isPropertyAccessExpression(parent) &&
+            parent.expression === valueAccess &&
+            ALLOWED_MEMBERS.has(parent.name.text);
+          const isAuditedByRefSink = isByRefSinkHandoff(valueAccess, checker);
+          if (!isAuditedDoor && !isAuditedByRefSink) {
+            const { line } = sf.getLineAndCharacterOfPosition(valueAccess.getStart(sf));
+            offenders.push(`${rel}:${line + 1}  ${valueAccess.getText(sf)}`);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
   }
+
   assert.deepEqual(
     offenders,
     [],
-    `Raw resolved SecretValue read(s) found — use .value.bytes() and dispose:\n${offenders.join("\n")}`,
+    `Raw resolved SecretValue read(s) found — read only via .value.bytes() (and dispose):\n${offenders.join("\n")}`,
   );
 });
 
