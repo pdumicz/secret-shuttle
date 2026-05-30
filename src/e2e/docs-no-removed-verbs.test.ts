@@ -161,7 +161,7 @@ test("demo: Scene 3 install uses `npx secret-shuttle init`, not the removed ritu
   const html = await readFile(join(process.cwd(), "demo/index.html"), "utf8");
   const start = html.indexOf('class="scene-stage" data-scene="3"');
   assert.notEqual(start, -1, "Scene 3 stage block not found in demo/index.html");
-  const end = html.indexOf('data-scene="4"', start);
+  const end = html.indexOf('class="scene-stage" data-scene="4"', start);
   const scene3 = html.slice(start, end === -1 ? undefined : end);
 
   assert.match(scene3, /npx\s+secret-shuttle\s+init/, "Scene 3 must show `npx secret-shuttle init`");

@@ -44,9 +44,10 @@ export function extractShuttleInvocations(rawText: string): string[][] {
     const tokens: string[] = [];
     for (const { text: raw, quoted } of splitArgs(m[1] ?? "")) {
       if (quoted) {
-        // A shell-quoted value (e.g. `--success-text "Environment Variable Added"`):
-        // an opaque option value/positional — never a command or flag — kept verbatim
-        // as one token, bypassing the argument-shape gate.
+        // A shell-quoted span (e.g. `--success-text "Environment Variable Added"`) is
+        // kept verbatim as one opaque value: it bypasses cleanToken's argument-shape
+        // gate so internal spaces survive. The resolver still re-validates the full
+        // token sequence against the registry, so this never launders drift.
         if (raw !== "") tokens.push(raw);
         continue;
       }
