@@ -15,7 +15,15 @@ async function tmpCwd(): Promise<{ root: string; restore: () => void }> {
   return { root, restore: () => process.chdir(orig) };
 }
 
-const FAKE_SKILL_CONTENT = "# Fake Skill\nbody\n";
+const FAKE_BODY = "# Fake Skill\nbody\n";
+const FAKE_SKILL_CONTENT = [
+  "---",
+  "name: secret-shuttle",
+  "description: Use secret refs without plaintext",
+  "---",
+  "",
+  FAKE_BODY,
+].join("\n");
 
 test("agentInstallTarget('claude') writes wholesale to .claude/skills/secret-shuttle/SKILL.md", async () => {
   const { root, restore } = await tmpCwd();
@@ -26,33 +34,46 @@ test("agentInstallTarget('claude') writes wholesale to .claude/skills/secret-shu
   } finally { restore(); }
 });
 
-test("agentInstallTarget('cursor') writes wholesale to .cursor/rules/secret-shuttle.mdc", async () => {
+test("agentInstallTarget('cursor') writes a framed .mdc rule (description/globs/alwaysApply, no skill frontmatter)", async () => {
   const { root, restore } = await tmpCwd();
   try {
     await agentInstallTarget("cursor", { skillContent: FAKE_SKILL_CONTENT, cwd: root });
     const out = await readFile(path.join(root, ".cursor/rules/secret-shuttle.mdc"), "utf8");
-    assert.equal(out, FAKE_SKILL_CONTENT);
+    assert.ok(out.startsWith("---\ndescription: "), "starts with .mdc frontmatter");
+    assert.ok(out.includes("\nglobs:\n"), "blank globs line");
+    assert.ok(out.includes("\nalwaysApply: false\n"), "alwaysApply: false");
+    assert.ok(!out.includes("name: secret-shuttle"), "skill frontmatter stripped");
+    assert.ok(out.includes(FAKE_BODY), "body preserved");
   } finally { restore(); }
 });
 
-test("agentInstallTarget('codex') writes a marked snippet to AGENTS.md", async () => {
+test("agentInstallTarget('codex') writes a frontmatter-stripped body in markers to AGENTS.md", async () => {
   const { root, restore } = await tmpCwd();
   try {
     await agentInstallTarget("codex", { skillContent: FAKE_SKILL_CONTENT, cwd: root });
     const out = await readFile(path.join(root, "AGENTS.md"), "utf8");
     assert.ok(out.startsWith(BEGIN));
-    assert.ok(out.includes(FAKE_SKILL_CONTENT));
+    assert.ok(out.includes(FAKE_BODY), "body preserved");
+    // No skill frontmatter (and therefore no `---` fence) inside the snippet.
+    const between = out.slice(out.indexOf(BEGIN) + BEGIN.length, out.indexOf(END));
+    assert.ok(!between.includes("name: secret-shuttle"), "frontmatter stripped");
+    assert.ok(!between.trimStart().startsWith("---"), "no leading frontmatter fence in snippet");
     assert.ok(out.endsWith(`${END}\n`));
   } finally { restore(); }
 });
 
-test("agentInstallTarget('copilot') writes a marked snippet to .github/copilot-instructions.md", async () => {
+test("agentInstallTarget('copilot') writes a frontmatter-stripped body in markers to .github/copilot-instructions.md", async () => {
   const { root, restore } = await tmpCwd();
   try {
     await agentInstallTarget("copilot", { skillContent: FAKE_SKILL_CONTENT, cwd: root });
     const out = await readFile(path.join(root, ".github/copilot-instructions.md"), "utf8");
     assert.ok(out.includes(BEGIN));
-    assert.ok(out.includes(FAKE_SKILL_CONTENT));
+    assert.ok(out.includes(FAKE_BODY), "body preserved");
+    assert.ok(!out.includes("name: secret-shuttle"), "frontmatter stripped");
+    // A leading `---` fence inside the snippet would betray a verbatim (un-framed) leak.
+    const between = out.slice(out.indexOf(BEGIN) + BEGIN.length, out.indexOf(END));
+    assert.ok(!between.trimStart().startsWith("---"), "no leading frontmatter fence in snippet");
+    assert.ok(out.endsWith(`${END}\n`), "END marker bounds the content");
   } finally { restore(); }
 });
 

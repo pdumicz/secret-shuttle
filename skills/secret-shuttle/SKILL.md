@@ -1,7 +1,14 @@
+---
+name: secret-shuttle
+description: Use when an AI coding agent must provision, inject, run, or rotate secrets without ever seeing their plaintext — you work with ss:// refs (like ss://stripe/prod/STRIPE_WEBHOOK_SECRET) while a local daemon resolves the real value at the last possible moment.
+---
+
 # Secret Shuttle
 
 Local-daemon CLI that lets AI coding agents provision and use secrets without ever seeing them.
 You work with refs (`ss://stripe/prod/STRIPE_WEBHOOK_SECRET`); the daemon resolves them at the last possible moment.
+
+> Skills evolve. Treat this on-disk file — and live `status --json` / a command's `next_action` — as the source of truth over anything you remember from an earlier read.
 
 ## 30-second quickstart
 

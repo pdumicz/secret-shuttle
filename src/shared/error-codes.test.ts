@@ -169,12 +169,15 @@ test("registry total entry count (sanity check)", () => {
   // Burst 5 Task 1.1 adds 8 more (command_renamed, provision_mode_conflict,
   // provision_no_mode, session_ttl_exceeds_cap, infer_no_env_example,
   // infer_yml_exists, audit_window_invalid, audit_batch_not_found) = 150 total.
+  // Spec C onboarding adds 1 more (skill_frontmatter_invalid — thrown by
+  // frameSkillForTarget when the bundled SKILL.md frontmatter is absent,
+  // malformed, non-string, blank, or multi-line) = 151 total.
   // Note: daemon_start_failed was removed (P3.1) — it was registered but never
   // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 150, `expected 150 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 151, `expected 151 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -426,5 +429,14 @@ test("error-codes: legacy_key_present has nextAction (mechanical recovery)", () 
   const entry = lookupErrorCode("legacy_key_present");
   assert.ok(entry?.nextAction);
   assert.strictEqual(entry!.nextAction!(""), "secret-shuttle migrate secure-vault");
+});
+
+test("error-codes: skill_frontmatter_invalid → NOT_FOUND, null hint, no automatic nextAction", () => {
+  const entry = lookupErrorCode("skill_frontmatter_invalid");
+  assert.ok(entry, "skill_frontmatter_invalid must be registered");
+  assert.strictEqual(entry.exitCode, EXIT_CODE_NOT_FOUND);
+  assert.strictEqual(entry.hint(""), null);
+  const next = entry.nextAction ? entry.nextAction("") : null;
+  assert.strictEqual(next, null, "no automatic recovery — reinstall is the manual fix");
 });
 

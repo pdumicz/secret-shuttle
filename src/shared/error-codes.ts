@@ -198,6 +198,7 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
   package_json_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   repository_field_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   skill_bundled_file_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
+  skill_frontmatter_invalid: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   template_tmpdir_missing: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   env_file_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
   session_not_found: { exitCode: EXIT_CODE_NOT_FOUND, hint: () => null },
