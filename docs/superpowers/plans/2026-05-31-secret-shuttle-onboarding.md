@@ -12,12 +12,13 @@
 
 ## Scope note: files beyond the spec's Files list
 
-The spec's "Files" section lists SKILL.md, skill-frame.ts, agent.ts, skill-frame.test.ts, agent.test.ts. The spec also introduces a **new** `skill_frontmatter_invalid` ShuttleError and requires that `npm test` stays green. Two existing files therefore must also change, as a direct consequence of those two spec requirements:
+The spec's "Files" section lists SKILL.md, skill-frame.ts, agent.ts, skill-frame.test.ts, agent.test.ts. The spec also introduces a **new** `skill_frontmatter_invalid` ShuttleError and requires that `npm test` stays green. Three existing files therefore must also change, as a direct consequence of those spec requirements:
 
 - **`src/shared/error-codes.ts`** — register `skill_frontmatter_invalid` (otherwise the thrown error silently defaults to exit code 1 / TRANSIENT, which mis-signals a corrupt-package condition as retry-safe).
 - **`src/shared/error-codes.test.ts`** — the registry has a hard-coded count drift-guard (`assert.equal(codes.length, 150)` at the time of writing). Adding one entry makes it 151; the count + rationale comment must update or the suite breaks.
+- **`src/cli/commands/skill-md-shape.test.ts`** — its existing above-the-fold guard locates the body divider via the *first* `---` at line index > 0. Once Task 4 prepends YAML frontmatter to SKILL.md, that guard would lock onto the **closing frontmatter fence** (~line 3) and pass vacuously. To honor "suite stays green" *meaningfully* (not by accident), the guard must be updated to skip both frontmatter fences and measure the real body span, with a deliberately bumped threshold (see Task 4). No other test in that file changes.
 
-These are not scope creep — they are the minimum needed to honor "introduce `skill_frontmatter_invalid`" + "suite stays green". No other behavior in those files changes.
+These are not scope creep — they are the minimum needed to honor "introduce `skill_frontmatter_invalid`" + "suite stays green" once SKILL.md gains frontmatter. No other behavior in those files changes.
 
 ## File Structure
 
@@ -28,6 +29,7 @@ These are not scope creep — they are the minimum needed to honor "introduce `s
 - **Modify `skills/secret-shuttle/SKILL.md`** — prepend `name`/`description` frontmatter; insert the one-line re-read nudge blockquote. No other body change.
 - **Modify `src/shared/error-codes.ts`** — register `skill_frontmatter_invalid`.
 - **Modify `src/shared/error-codes.test.ts`** — bump registry count 150 → 151 + rationale comment + spot-check.
+- **Modify `src/cli/commands/skill-md-shape.test.ts`** — update the above-the-fold guard to skip both YAML frontmatter fences (so it measures the real body span instead of locking onto the closing fence) and bump its documented threshold; see Task 4. No other test in the file changes.
 
 **Task order rationale:** register the error code first (Task 1) so the module that throws it (Tasks 2–3) lands on a green registry; build the pure module before touching the real SKILL.md (Task 4, whose discoverability test goes red until frontmatter is added) and before wiring (Task 5, which would make `agent install` throw at runtime if the real file still lacked frontmatter — Task 4 precedes it). Each task ends on a green suite.
 
@@ -206,13 +208,19 @@ const FRONTMATTER_INVALID =
  */
 export function splitFrontmatter(raw: string): SplitFrontmatterResult {
   const lines = raw.split("\n");
-  if (lines.length === 0 || lines[0].trim() !== "---") {
+  // NOTE: this repo compiles with `noUncheckedIndexedAccess: true`, so every
+  // `lines[i]` is typed `string | undefined`. Bind each element to a checked
+  // local before calling `.trim()` (a bare `lines[i].trim()` would not compile
+  // and would break Step 4's `npm run build`).
+  const first = lines[0];
+  if (first === undefined || first.trim() !== "---") {
     return { data: null, body: raw };
   }
   // Find the closing fence: the next line (index >= 1) that is exactly `---`.
   let closeIdx = -1;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === "---") {
+    const line = lines[i];
+    if (line !== undefined && line.trim() === "---") {
       closeIdx = i;
       break;
     }
@@ -233,7 +241,7 @@ export function splitFrontmatter(raw: string): SplitFrontmatterResult {
   }
   // Body = lines after the closing fence, with leading blank lines trimmed.
   let bodyStart = closeIdx + 1;
-  while (bodyStart < lines.length && lines[bodyStart].trim() === "") {
+  for (let line = lines[bodyStart]; line !== undefined && line.trim() === ""; line = lines[bodyStart]) {
     bodyStart++;
   }
   const body = lines.slice(bodyStart).join("\n");
@@ -362,6 +370,12 @@ test("frameSkillForTarget throws when description is a non-string value (list)",
   assertInvalid("---\nname: secret-shuttle\ndescription:\n  - a\n  - b\n---\n\nbody\n", "list description");
 });
 
+test("frameSkillForTarget throws when description is a non-string value (mapping)", () => {
+  // Spec Testing §5 calls out number/list/mapping; a nested mapping value must
+  // also fail closed (it would otherwise serialize to a non-string `.mdc` desc).
+  assertInvalid("---\nname: secret-shuttle\ndescription:\n  text: ok desc\n---\n\nbody\n", "mapping description");
+});
+
 test("frameSkillForTarget throws when description contains an embedded newline", () => {
   // A YAML block scalar produces a multi-line string value.
   const raw = "---\nname: secret-shuttle\ndescription: |\n  line one\n  line two\n---\n\nbody\n";
@@ -449,8 +463,11 @@ git commit -m "feat(onboarding): add frameSkillForTarget with fail-closed valida
 **Files:**
 - Modify: `skills/secret-shuttle/SKILL.md:1-6`
 - Modify: `src/cli/skill-frame.test.ts` (add the canonical-file discoverability test)
+- Modify: `src/cli/commands/skill-md-shape.test.ts:8-21` (make the above-the-fold guard skip *both* frontmatter fences so it stays meaningful after frontmatter is added)
 
 **Behavior:** Add `name`/`description` frontmatter so Claude Code can auto-load the skill, and insert the one-line re-read nudge. The new discoverability test reads the **real** packaged file through `splitFrontmatter` and fails the suite if a future edit strips the frontmatter.
+
+**Why `skill-md-shape.test.ts` must change (not just pass-by-accident):** that suite's existing above-the-fold guard does `lines.findIndex((l, i) => l.trim() === "---" && i > 0)` to find the body/reference divider. Today (no frontmatter) that divider is the *first* `---` at index > 0, so the ≤65 bound is real. Once this task prepends a frontmatter block, the **closing** frontmatter fence lands at line index 3 and the `findIndex` locks onto *it* instead — making `fenceIdx === 3` trivially satisfy `> 0 && <= 65`. The guard would then pass no matter how bloated the real body grew, silently defeating its purpose. So the guard must be updated to skip both YAML frontmatter fences and measure the actual body divider, with a deliberately reviewed threshold.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -509,15 +526,70 @@ You work with refs (`ss://stripe/prod/STRIPE_WEBHOOK_SECRET`); the daemon resolv
 ## 30-second quickstart
 ```
 
+Then **fix the above-the-fold guard in `src/cli/commands/skill-md-shape.test.ts`** so it stays meaningful after frontmatter exists. Replace the `SKILL.md above-the-fold` test (lines 8-21):
+
+old:
+```typescript
+test("SKILL.md above-the-fold is ≤ 65 lines (≤60 + slack)", async () => {
+  const content = await readFile(SKILL_PATH, "utf8");
+  const lines = content.split("\n");
+  // First `---` line that's NOT the YAML frontmatter opener (line 0).
+  // Using the (l, i) form rather than lines.indexOf(l) > 0, because the
+  // latter would find the first occurrence of the string "---" in the
+  // whole array — that always returns the line we're testing, so the
+  // filter degenerates.
+  const fenceIdx = lines.findIndex((l, i) => l.trim() === "---" && i > 0);
+  assert.ok(
+    fenceIdx > 0 && fenceIdx <= 65,
+    `above-the-fold spans ${fenceIdx} lines (target ≤65)`,
+  );
+});
+```
+
+new:
+```typescript
+test("SKILL.md above-the-fold is ≤ 70 lines (≤60 body + nudge + slack)", async () => {
+  const content = await readFile(SKILL_PATH, "utf8");
+  const lines = content.split("\n");
+  // The file now opens with a YAML frontmatter block (`---` … `---`). We must
+  // skip BOTH frontmatter fences and measure the real body's above-the-fold
+  // span (the body/reference divider), otherwise the guard would lock onto the
+  // CLOSING frontmatter fence (~line 3) and pass vacuously no matter how large
+  // the body grows.
+  let bodyStart = 0;
+  if (lines[0]?.trim() === "---") {
+    const close = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
+    // close === -1 means a malformed (unterminated) frontmatter block — the
+    // skill-frame validation/discoverability tests already fail-closed on that,
+    // so here we just fall back to measuring from the top.
+    if (close > 0) bodyStart = close + 1;
+  }
+  // First `---` divider that appears in the BODY (strictly after the
+  // frontmatter block). This is the genuine above-the-fold boundary.
+  const rel = lines.slice(bodyStart).findIndex((l) => l.trim() === "---");
+  const fenceIdx = rel === -1 ? -1 : rel; // lines of body before the divider
+  assert.ok(
+    fenceIdx > 0 && fenceIdx <= 70,
+    `body above-the-fold spans ${fenceIdx} lines (target ≤70)`,
+  );
+});
+```
+
+This counts body lines *before* the first body `---` divider, so the threshold tracks real body bloat rather than the frontmatter fence.
+
+**Threshold = 70, derived (not arbitrary):** with the frontmatter+nudge inserted, the body's above-the-fold span (counted from the line after the closing frontmatter fence to the first body `---` divider) is **67** lines — the pre-existing ≤60-line above-the-fold *plus* the mandated re-read-nudge blockquote and its surrounding blank line, plus the blank line `splitFrontmatter` would otherwise trim. The old `≤65` bound (≤60 body + 5 slack) is therefore *expected* to fail post-frontmatter; that failure is the legitimate consequence of the spec-required nudge, not body bloat. We bump the documented bound to **70** (67 measured + ~3 slack, mirroring the original "+slack" intent) so the guard still catches *future* body growth.
+
+The spec ([spec line 66](../specs/2026-05-31-secret-shuttle-onboarding-design.md:66)) constrains this task to "**No other body changes**" beyond the one-line nudge, so the threshold MUST be bumped rather than "fixed" by trimming the body — trimming would violate the spec. If a *later* edit pushes the body above-the-fold past 70, that is a genuine bloat signal: shrink the body (in a change whose spec/scope permits it) or get reviewer sign-off to re-bump with fresh rationale. Do **not** paper over it by reverting to the fence-locking form.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test "dist/cli/skill-frame.test.js" "dist/cli/commands/skill-md-shape.test.js"`
-Expected: PASS — the canonical discoverability test is green, and the existing `skill-md-shape.test.ts` stays green (its `findIndex(l.trim()==='---' && i>0)` now locks onto the closing frontmatter fence at line index 3, which is `> 0 && <= 65`).
+Expected: PASS — the canonical discoverability test is green, and the **updated** `skill-md-shape.test.ts` above-the-fold guard now measures the real body span (skipping both frontmatter fences): **67** lines, within the bumped **≤ 70** bound documented above. If it goes red with a span > 70, a *later* body edit (not this task — this task adds only the spec-sanctioned nudge) has bloated the body: shrink it within a scope that permits body edits, or get reviewer sign-off to re-bump the threshold. Do not restore the fence-locking assertion, and do not trim the body to satisfy `≤65` (the spec forbids body changes beyond the nudge here).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add skills/secret-shuttle/SKILL.md src/cli/skill-frame.test.ts
+git add skills/secret-shuttle/SKILL.md src/cli/skill-frame.test.ts src/cli/commands/skill-md-shape.test.ts
 git commit -m "feat(onboarding): add discovery frontmatter + re-read nudge to SKILL.md"
 ```
 
@@ -774,4 +846,4 @@ If the smoke test revealed a discrepancy, fix the source, re-run `npm test`, and
 
 **3. Type consistency:** `splitFrontmatter` returns `SplitFrontmatterResult { data: Record<string, unknown> | null; body: string }` — used identically in Task 2 (impl), Task 3 (`frameSkillForTarget` destructures `{ data, body }`), and Task 4 (test reads `data.name`/`data.description`). `frameSkillForTarget(target: AgentTarget, raw: string): string` signature is identical across Task 2 skeleton, Task 3 impl, and Task 5 call site. `AgentTarget` is the existing union from `agent.ts` (type-only import in `skill-frame.ts`, avoiding a runtime cycle). `buildCursorMdc(description, body)` is private, defined and used only in Task 3. Fixture/body constant naming: `skill-frame.test.ts` uses `FM`/`BODY`; `agent.test.ts` uses `FAKE_SKILL_CONTENT`/`FAKE_BODY` (distinct files, no collision). Error code string `"skill_frontmatter_invalid"` matches between registry (Task 1), throw sites (Tasks 2-3), and tests.
 
-**4. Build-green-at-each-commit:** Task 1 registry stays green. Task 2 lands `splitFrontmatter` + a throwing `frameSkillForTarget` skeleton (build green; split tests pass). Task 3 fills the skeleton (frame tests pass). Task 4 adds real frontmatter (discoverability test goes red→green; `skill-md-shape` stays green). Task 5 wires + updates `agent.test.ts` (red→green). Task 6 full suite. No commit leaves the suite red.
+**4. Build-green-at-each-commit:** Task 1 registry stays green. Task 2 lands `splitFrontmatter` (guarded indexed access — compiles under `noUncheckedIndexedAccess`) + a throwing `frameSkillForTarget` skeleton (build green; split tests pass). Task 3 fills the skeleton (frame tests pass). Task 4 adds real frontmatter (discoverability test goes red→green) **and** updates `skill-md-shape.test.ts`'s above-the-fold guard to skip both frontmatter fences so it measures the real body span instead of vacuously locking onto the closing fence (stays green only if the body is genuinely within budget). Task 5 wires + updates `agent.test.ts` (red→green). Task 6 full suite. No commit leaves the suite red.
