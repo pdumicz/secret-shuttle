@@ -21,13 +21,13 @@ test("SKILL.md above-the-fold is ≤ 70 lines (≤60 body + nudge + slack)", asy
     // so here we just fall back to measuring from the top.
     if (close > 0) bodyStart = close + 1;
   }
-  // First `---` divider that appears in the BODY (strictly after the
-  // frontmatter block). This is the genuine above-the-fold boundary.
-  const rel = lines.slice(bodyStart).findIndex((l) => l.trim() === "---");
-  const fenceIdx = rel === -1 ? -1 : rel; // lines of body before the divider
+  // First `---` divider in the BODY (strictly after the frontmatter block):
+  // its index in the sliced body IS the above-the-fold span. -1 (no divider)
+  // fails the `> 0` check below, which is the correct outcome for that case.
+  const bodySpan = lines.slice(bodyStart).findIndex((l) => l.trim() === "---");
   assert.ok(
-    fenceIdx > 0 && fenceIdx <= 70,
-    `body above-the-fold spans ${fenceIdx} lines (target ≤70)`,
+    bodySpan > 0 && bodySpan <= 70,
+    `body above-the-fold spans ${bodySpan} lines (target ≤70)`,
   );
 });
 
