@@ -70,6 +70,10 @@ test("agentInstallTarget('copilot') writes a frontmatter-stripped body in marker
     assert.ok(out.includes(BEGIN));
     assert.ok(out.includes(FAKE_BODY), "body preserved");
     assert.ok(!out.includes("name: secret-shuttle"), "frontmatter stripped");
+    // A leading `---` fence inside the snippet would betray a verbatim (un-framed) leak.
+    const between = out.slice(out.indexOf(BEGIN) + BEGIN.length, out.indexOf(END));
+    assert.ok(!between.trimStart().startsWith("---"), "no leading frontmatter fence in snippet");
+    assert.ok(out.endsWith(`${END}\n`), "END marker bounds the content");
   } finally { restore(); }
 });
 
