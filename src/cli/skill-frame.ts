@@ -89,7 +89,7 @@ export function frameSkillForTarget(target: AgentTarget, raw: string): string {
   ) {
     throw new ShuttleError("skill_frontmatter_invalid", FRONTMATTER_INVALID);
   }
-  const description = (data.description as string).trim();
+  const description = data.description.trim();
   switch (target) {
     case "claude":
       return raw;

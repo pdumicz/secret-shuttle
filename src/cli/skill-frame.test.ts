@@ -55,6 +55,10 @@ test("splitFrontmatter throws skill_frontmatter_invalid when inner YAML is not a
   );
 });
 
+// The fixture description is deliberately free of YAML-special chars (`:`, `#`,
+// leading `-`), so `yaml` emits it unquoted and this hardcoded byte-exact block
+// stays valid. A description with special chars would be quoted and break the
+// literal equality below — change the fixture and this block together.
 const EXPECTED_MDC_FRONTMATTER = [
   "---",
   "description: Use secret refs without plaintext",
@@ -117,6 +121,12 @@ function assertInvalid(raw: string, msg: string): void {
 
 test("frameSkillForTarget throws when frontmatter is absent", () => {
   assertInvalid("# No frontmatter\nbody\n", "absent frontmatter must fail closed");
+});
+
+test("frameSkillForTarget throws when name key is absent", () => {
+  // Absent key is a distinct input class from blank/non-string: `data.name` is
+  // `undefined`, which the `typeof !== "string"` guard must still reject.
+  assertInvalid("---\ndescription: ok desc\n---\n\nbody\n", "absent name key");
 });
 
 test("frameSkillForTarget throws when name is blank/whitespace", () => {
