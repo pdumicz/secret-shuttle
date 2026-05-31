@@ -5,18 +5,29 @@ import { join } from "node:path";
 
 const SKILL_PATH = join(process.cwd(), "skills/secret-shuttle/SKILL.md");
 
-test("SKILL.md above-the-fold is ≤ 65 lines (≤60 + slack)", async () => {
+test("SKILL.md above-the-fold is ≤ 70 lines (≤60 body + nudge + slack)", async () => {
   const content = await readFile(SKILL_PATH, "utf8");
   const lines = content.split("\n");
-  // First `---` line that's NOT the YAML frontmatter opener (line 0).
-  // Using the (l, i) form rather than lines.indexOf(l) > 0, because the
-  // latter would find the first occurrence of the string "---" in the
-  // whole array — that always returns the line we're testing, so the
-  // filter degenerates.
-  const fenceIdx = lines.findIndex((l, i) => l.trim() === "---" && i > 0);
+  // The file now opens with a YAML frontmatter block (`---` … `---`). We must
+  // skip BOTH frontmatter fences and measure the real body's above-the-fold
+  // span (the body/reference divider), otherwise the guard would lock onto the
+  // CLOSING frontmatter fence (~line 3) and pass vacuously no matter how large
+  // the body grows.
+  let bodyStart = 0;
+  if (lines[0]?.trim() === "---") {
+    const close = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
+    // close === -1 means a malformed (unterminated) frontmatter block — the
+    // skill-frame validation/discoverability tests already fail-closed on that,
+    // so here we just fall back to measuring from the top.
+    if (close > 0) bodyStart = close + 1;
+  }
+  // First `---` divider that appears in the BODY (strictly after the
+  // frontmatter block). This is the genuine above-the-fold boundary.
+  const rel = lines.slice(bodyStart).findIndex((l) => l.trim() === "---");
+  const fenceIdx = rel === -1 ? -1 : rel; // lines of body before the divider
   assert.ok(
-    fenceIdx > 0 && fenceIdx <= 65,
-    `above-the-fold spans ${fenceIdx} lines (target ≤65)`,
+    fenceIdx > 0 && fenceIdx <= 70,
+    `body above-the-fold spans ${fenceIdx} lines (target ≤70)`,
   );
 });
 

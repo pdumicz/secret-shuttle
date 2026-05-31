@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { splitFrontmatter, frameSkillForTarget } from "./skill-frame.js";
 import { ShuttleError } from "../shared/errors.js";
 
@@ -159,4 +161,19 @@ test("frameSkillForTarget throws when description contains an embedded newline",
 
 test("frameSkillForTarget throws on present-but-malformed YAML frontmatter", () => {
   assertInvalid("---\nname: {unterminated\n---\n\nbody\n", "malformed YAML fence");
+});
+
+test("canonical SKILL.md is discoverable: non-empty name + description, description <= 1024", async () => {
+  const skillPath = join(process.cwd(), "skills/secret-shuttle/SKILL.md");
+  const raw = await readFile(skillPath, "utf8");
+  const { data } = splitFrontmatter(raw);
+  assert.ok(data, "canonical SKILL.md must have frontmatter");
+  assert.equal(typeof data.name, "string");
+  assert.ok((data.name as string).trim().length > 0, "name must be non-empty");
+  assert.equal(typeof data.description, "string");
+  const description = (data.description as string).trim();
+  assert.ok(description.length > 0, "description must be non-empty");
+  assert.ok(description.length <= 1024, `description must be <= 1024 chars (got ${description.length})`);
+  // Single-line: no embedded newline (the .mdc single-line contract relies on this).
+  assert.ok(!/[\r\n]/.test(description), "description must be single-line");
 });
