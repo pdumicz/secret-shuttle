@@ -63,10 +63,44 @@ export function splitFrontmatter(raw: string): SplitFrontmatterResult {
   return { data: parsed as Record<string, unknown>, body };
 }
 
+/**
+ * Build the Cursor `.mdc` frontmatter + body. The `.mdc` is a compatibility
+ * surface that must match Cursor's documented rule shape, so the byte layout
+ * (single-line description, blank `globs:`, `alwaysApply: false`, fixed key
+ * order) is the contract — see src/cli/skill-frame.test.ts.
+ */
+function buildCursorMdc(description: string, body: string): string {
+  // yamlStringify gives correct quoting/escaping for the description string;
+  // lineWidth: 0 disables column wrapping so it stays on a single line.
+  const descLine = yamlStringify({ description }, { lineWidth: 0 }).trimEnd();
+  const frontmatter = `---\n${descLine}\nglobs:\nalwaysApply: false\n---\n`;
+  return `${frontmatter}\n${body}`;
+}
+
 export function frameSkillForTarget(target: AgentTarget, raw: string): string {
-  // Implemented in Task 3.
-  void yamlStringify;
-  void target;
-  void raw;
-  throw new ShuttleError("skill_frontmatter_invalid", FRONTMATTER_INVALID);
+  const { data, body } = splitFrontmatter(raw);
+  if (
+    data === null ||
+    typeof data.name !== "string" ||
+    data.name.trim() === "" ||
+    typeof data.description !== "string" ||
+    data.description.trim() === "" ||
+    /[\r\n]/.test(data.description.trim())
+  ) {
+    throw new ShuttleError("skill_frontmatter_invalid", FRONTMATTER_INVALID);
+  }
+  const description = (data.description as string).trim();
+  switch (target) {
+    case "claude":
+      return raw;
+    case "cursor":
+      return buildCursorMdc(description, body);
+    case "codex":
+    case "copilot":
+      return body;
+    default: {
+      const _exhaustive: never = target;
+      throw new ShuttleError("bad_request", `unknown agent target: ${String(_exhaustive)}`);
+    }
+  }
 }
