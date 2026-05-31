@@ -22,7 +22,12 @@ test("e2e: agent install writes each target's file to CWD with correct write mod
   assert.equal(r.status, 0, `agent install claude failed: ${r.stderr}`);
   const claudeFile = path.join(root, ".claude/skills/secret-shuttle/SKILL.md");
   const claudeContent = await readFile(claudeFile, "utf8");
-  assert.ok(claudeContent.startsWith("# Secret Shuttle"), "claude install must write the canonical SKILL.md");
+  // claude framing is wholesale-verbatim: the canonical SKILL.md now leads with
+  // YAML frontmatter (discoverability), so the file starts with `---` and keeps
+  // both the `name:` key and the `# Secret Shuttle` body heading.
+  assert.ok(claudeContent.startsWith("---"), "claude install keeps the SKILL.md frontmatter fence");
+  assert.ok(claudeContent.includes("name: secret-shuttle"), "claude install keeps the skill name frontmatter");
+  assert.ok(claudeContent.includes("# Secret Shuttle"), "claude install keeps the SKILL.md body");
 
   // codex — snippet
   await writeFile(path.join(root, "AGENTS.md"), "USER-SENTINEL-BEFORE\n");
@@ -46,7 +51,14 @@ test("e2e: agent install writes each target's file to CWD with correct write mod
   r = spawnSync("node", [CLI, "agent", "install", "cursor"], { cwd: root, encoding: "utf8" });
   assert.equal(r.status, 0, `agent install cursor failed: ${r.stderr}`);
   const cursorContent = await readFile(path.join(root, ".cursor/rules/secret-shuttle.mdc"), "utf8");
-  assert.ok(cursorContent.startsWith("# Secret Shuttle"), "cursor install must write the canonical SKILL.md");
+  // cursor framing rewrites the skill into Cursor's `.mdc` rule shape: a
+  // `description`/`globs`/`alwaysApply` frontmatter block (NO skill `name:`),
+  // then the body. See frameSkillForTarget in src/cli/skill-frame.ts.
+  assert.ok(cursorContent.startsWith("---\ndescription: "), "cursor install writes the .mdc frontmatter");
+  assert.ok(cursorContent.includes("\nglobs:\n"), "cursor .mdc has a blank globs line");
+  assert.ok(cursorContent.includes("\nalwaysApply: false\n"), "cursor .mdc sets alwaysApply: false");
+  assert.ok(!cursorContent.includes("name: secret-shuttle"), "cursor .mdc strips the skill name frontmatter");
+  assert.ok(cursorContent.includes("# Secret Shuttle"), "cursor install preserves the SKILL.md body");
 
   // copilot — snippet
   r = spawnSync("node", [CLI, "agent", "install", "copilot"], { cwd: root, encoding: "utf8" });
