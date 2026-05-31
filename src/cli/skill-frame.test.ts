@@ -1,7 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { splitFrontmatter, frameSkillForTarget } from "./skill-frame.js";
 import { ShuttleError } from "../shared/errors.js";
 
