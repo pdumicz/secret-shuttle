@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ShuttleError } from "../../shared/errors.js";
 import { writeAgentFile, writeAgentSnippet } from "../agent-writer.js";
+import { frameSkillForTarget } from "../skill-frame.js";
 import { deriveSkillUrl, type RepositoryField } from "../skill-url.js";
 import { daemonRequest } from "../../client/daemon-client.js";
 import { ok, outputJson } from "../../shared/result.js";
@@ -76,12 +77,13 @@ export async function agentInstallTarget(
 ): Promise<void> {
   const spec = TARGETS[target];
   const dest = path.resolve(opts.cwd, spec.destPath);
+  const framed = frameSkillForTarget(target, opts.skillContent);
   if (spec.mode === "wholesale") {
-    await writeAgentFile({ targetPath: dest, content: opts.skillContent });
+    await writeAgentFile({ targetPath: dest, content: framed });
   } else {
     await writeAgentSnippet({
       targetPath: dest,
-      content: opts.skillContent,
+      content: framed,
       beginMarker: BEGIN_MARKER,
       endMarker: END_MARKER,
     });
