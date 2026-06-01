@@ -2,6 +2,8 @@ import type { BootstrapPlan } from "../../cli/bootstrap/yml.js";
 import { resolveDestinationShorthand } from "../../cli/bootstrap/destination-shorthand.js";
 import type { PlanEntry, ResolvedDestination, BootstrapSource } from "./store.js";
 import { buildSecretRef, canonicalEnvironment } from "../../shared/refs.js";
+import { recipeRegistry, type RecipeRegistry } from "../recipes/registry.js";
+import { canonicalHost } from "../recipes/host.js";
 
 interface PlanContext {
   source: string;
@@ -13,11 +15,24 @@ interface VaultLike {
   has(ref: string): boolean;
 }
 
+export interface PlanSelection {
+  recipes?: RecipeRegistry;
+  /** True iff the vendor CLI for this template_id is usable. Default () => true. */
+  isCliConfigured?: (templateId: string) => boolean;
+  /** §200 coverage gate. Default () => false. */
+  coversDestination?: (recipeHost: string, domain: string, shorthand: string) => boolean;
+}
+
 export function computeBootstrapPlan(
   parsed: BootstrapPlan,
   vault: VaultLike,
   ctx: PlanContext,
+  selection: PlanSelection = {},
 ): PlanEntry[] {
+  const recipes = selection.recipes ?? recipeRegistry;
+  const isCliConfigured = selection.isCliConfigured ?? (() => true);
+  const coversDestination = selection.coversDestination ?? (() => false);
+
   const out: PlanEntry[] = [];
   for (const s of parsed.secrets) {
     const ref =
@@ -35,6 +50,14 @@ export function computeBootstrapPlan(
 
     const destinations: ResolvedDestination[] = s.destinations.map((shorthand) => {
       const r = resolveDestinationShorthand(shorthand, s.name);
+      const injectRecipe = recipes.getInject(canonicalHost(r.domain));
+      if (
+        injectRecipe !== undefined &&
+        !isCliConfigured(r.template_id) &&
+        coversDestination(injectRecipe.host, r.domain, shorthand)
+      ) {
+        return { kind: "browser_inject" as const, recipe_host: injectRecipe.host, shorthand, domain: r.domain };
+      }
       return {
         kind: "template" as const,
         shorthand,

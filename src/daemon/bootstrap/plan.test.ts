@@ -1,7 +1,51 @@
 import { test } from "node:test";
 import assert from "node:assert";
+import assert_strict from "node:assert/strict";
 import { computeBootstrapPlan } from "./plan.js";
 import type { BootstrapPlan } from "../../cli/bootstrap/yml.js";
+import { RecipeRegistry } from "../recipes/registry.js";
+import type { InjectRecipe } from "../recipes/types.js";
+
+// ── Selection tests (Task 14) ───────────────────────────────────────────────
+
+const vercelInjectRecipe: InjectRecipe = {
+  kind: "inject", host: "vercel.com",
+  url: "https://vercel.com/acme/app/settings/environment-variables",
+  logged_in_probe: "[data-in]", page_ready_probe: "[data-shell]", logged_out_marker: "[data-login]",
+  field_selector: "#v", submit_selector: "#s", success_text: "Added",
+};
+function reg(): RecipeRegistry { const r = new RecipeRegistry(); r.registerInject(vercelInjectRecipe); return r; }
+
+const parsedSelection: BootstrapPlan = {
+  version: 1,
+  secrets: [{ name: "APP_SECRET", source: { kind: "random_32_bytes" }, destinations: ["vercel:production"] }],
+};
+const vaultEmpty = { has: () => false };
+const ctxProd = { source: "local", environment: "production", force: false };
+
+test("browser_inject chosen when recipe exists AND CLI absent AND destination covered", () => {
+  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => false, coversDestination: () => true });
+  assert_strict.equal(plan[0]!.destinations[0]!.kind, "browser_inject");
+  assert_strict.equal((plan[0]!.destinations[0] as { recipe_host?: string }).recipe_host, "vercel.com");
+});
+test("template kept when destination NOT covered by the recipe URL (recipe exists, CLI absent) — §200 guard", () => {
+  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => false, coversDestination: () => false });
+  assert_strict.equal(plan[0]!.destinations[0]!.kind, "template");
+  assert_strict.equal((plan[0]!.destinations[0] as { template_id?: string }).template_id, "vercel-env-add");
+});
+test("template kept when the CLI IS configured (even though a recipe exists + covered)", () => {
+  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => true, coversDestination: () => true });
+  assert_strict.equal(plan[0]!.destinations[0]!.kind, "template");
+  assert_strict.equal((plan[0]!.destinations[0] as { template_id?: string }).template_id, "vercel-env-add");
+});
+test("template kept when no inject recipe exists (CLI absent + would-be covered)", () => {
+  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: new RecipeRegistry(), isCliConfigured: () => false, coversDestination: () => true });
+  assert_strict.equal(plan[0]!.destinations[0]!.kind, "template");
+});
+test("default (no selection deps) keeps template — safe back-compat (coverage never assumed)", () => {
+  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd);
+  assert_strict.equal(plan[0]!.destinations[0]!.kind, "template");
+});
 
 interface MockVault {
   has(ref: string): boolean;

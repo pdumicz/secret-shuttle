@@ -12,6 +12,8 @@ import type { DaemonServer } from "../../server.js";
 import type { BootstrapBrowserLease, DaemonServices } from "../../services.js";
 import type { ApprovalBinding } from "../../approvals/store.js";
 import type { BatchState, BootstrapStore, PlanEntry } from "../../bootstrap/store.js";
+import { registry as templateRegistry } from "./templates.js";
+import { resolveBinary } from "../../templates/resolve-binary.js";
 
 // Cores from Task I:
 import { generateSecretCore } from "./secrets.js";
@@ -19,6 +21,18 @@ import { revealCaptureCore } from "./reveal-capture.js";
 import { runTemplateCore } from "./templates.js";
 import { planHasProductionDestination, planHasProductionSource, planRequiresHumanPending } from "../../bootstrap/destination-policy.js";
 import { canonicalEnvironment } from "../../../shared/refs.js";
+
+/**
+ * §200 coverage predicate. `coveredScopes` holds `<recipe-host>:<shorthand>` keys.
+ * Host-only entries (no `:shorthand`) NEVER match — coverage is scope-specific.
+ */
+export function destinationCovered(
+  coveredScopes: ReadonlySet<string>,
+  recipeHost: string,
+  shorthand: string,
+): boolean {
+  return coveredScopes.has(`${recipeHost.toLowerCase()}:${shorthand.trim().toLowerCase()}`);
+}
 
 export function registerBootstrapRoutes(
   server: DaemonServer,
@@ -41,11 +55,31 @@ export function registerBootstrapRoutes(
     // Default list() excludes deleted secrets, matching upsertSecret's force check semantics.
     const existingRefs = new Set((await services.vault.list()).map((s) => s.ref));
 
+    // Probe each template's binary once to know if the vendor CLI is available.
+    const cliAvail = new Map<string, boolean>();
+    for (const t of templateRegistry.list()) {
+      let ok = true;
+      try { await resolveBinary(t.binary); } catch { ok = false; }
+      cliAvail.set(t.id, ok);
+    }
+    const isCliConfigured = (templateId: string): boolean => cliAvail.get(templateId) ?? true;
+
+    // §200 scope-specific allowlist: SECRET_SHUTTLE_INJECT_RECIPE_SCOPES is a
+    // comma-separated list of "<recipe-host>:<shorthand>" keys. Host-only entries
+    // are never matched — coverage requires the exact scope.
+    const coveredScopes = new Set(
+      (process.env["SECRET_SHUTTLE_INJECT_RECIPE_SCOPES"] ?? "")
+        .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0),
+    );
+    const coversDestination = (recipeHost: string, _domain: string, shorthand: string): boolean =>
+      destinationCovered(coveredScopes, recipeHost, shorthand);
+
     // Diff against vault — skip secrets already present (unless force).
     const plan = computeBootstrapPlan(
       parsed,
       { has: (ref: string) => existingRefs.has(ref) },
       { force, source: "local", environment },
+      { isCliConfigured, coversDestination },
     );
 
     // Nothing to do: short-circuit with success.
