@@ -399,6 +399,36 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     nextAction: () => "secret-shuttle unlock",
   },
 
+  // ── Recipe capture/inject (per-provider hands-off magic) ────────────────────
+  recipe_selector_ambiguous: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "A recipe selector matched 0 or >1 elements; manual capture/inject needed.",
+  },
+  recipe_capture_failed: {
+    exitCode: EXIT_CODE_TRANSIENT,
+    hint: () => "Recipe ran but the transition gate yielded no value.",
+  },
+  bootstrap_login_required: {
+    exitCode: EXIT_CODE_PERMISSION,
+    hint: () => "Log into the provider in the open Secret Shuttle browser tab, then re-run --continue.",
+  },
+  recipe_page_timeout: {
+    exitCode: EXIT_CODE_TRANSIENT,
+    hint: () => "The recipe page never finished loading (bad URL / changed DOM / network).",
+  },
+  recipe_page_unexpected: {
+    exitCode: EXIT_CODE_CONFLICT,
+    hint: () => "Page loaded but the logged-in scope probe was absent (wrong project/team, permission, or onboarding). Inspect the visible tab.",
+  },
+  recipe_inject_failed: {
+    exitCode: EXIT_CODE_TRANSIENT,
+    hint: () => "Recipe inject submitted but the success text was not observed; retryable.",
+  },
+  recipe_not_found: {
+    exitCode: EXIT_CODE_NOT_FOUND,
+    hint: () => "No recipe is registered for this provider host/direction.",
+  },
+
 };
 
 export function lookupErrorCode(code: string): ErrorCodeEntry | null {

@@ -172,12 +172,15 @@ test("registry total entry count (sanity check)", () => {
   // Spec C onboarding adds 1 more (skill_frontmatter_invalid — thrown by
   // frameSkillForTarget when the bundled SKILL.md frontmatter is absent,
   // malformed, non-string, blank, or multi-line) = 151 total.
+  // Plan 6 Task 1 adds 7 more recipe codes (recipe_selector_ambiguous,
+  // recipe_capture_failed, bootstrap_login_required, recipe_page_timeout,
+  // recipe_page_unexpected, recipe_inject_failed, recipe_not_found) = 158 total.
   // Note: daemon_start_failed was removed (P3.1) — it was registered but never
   // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 151, `expected 151 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 158, `expected 158 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -438,5 +441,20 @@ test("error-codes: skill_frontmatter_invalid → NOT_FOUND, null hint, no automa
   assert.strictEqual(entry.hint(""), null);
   const next = entry.nextAction ? entry.nextAction("") : null;
   assert.strictEqual(next, null, "no automatic recovery — reinstall is the manual fix");
+});
+
+test("recipe error codes are registered", () => {
+  for (const code of [
+    "recipe_selector_ambiguous",
+    "recipe_capture_failed",
+    "bootstrap_login_required",
+    "recipe_page_timeout",
+    "recipe_page_unexpected",
+    "recipe_inject_failed",
+    "recipe_not_found",
+  ]) {
+    const entry = lookupErrorCode(code);
+    assert.ok(entry !== null, `missing ${code}`);
+  }
 });
 
