@@ -137,6 +137,8 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 - Team vaults, cloud sync, MCP server, browser extension
 - Template argv-vs-`--help` gates ([P2b] PENDING): the shipped templates' argv vectors have not been verified against the current `gh` / `wrangler` / `supabase` `--help` output on a per-release basis
 
+> **The honest steady state:** the first time you use a provider, you log in once in the Secret Shuttle browser. After that, one approval ships everything for providers with a recipe (see the coverage matrix above). Providers whose secrets can't be revealed (OpenAI/Anthropic) are human-paste — you supply a key you created; the daemon never reveals it.
+
 ### Provider coverage
 
 What's automated, by provider and direction. Browser recipes drive the page hands-off (one approval); CLI templates push via the vendor CLI. "Real-page verified" is a human-attested dogfood date (CI has no provider creds).
