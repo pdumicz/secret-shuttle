@@ -10,7 +10,7 @@ import { canonicalEnvironment, buildSecretRef } from "../../../shared/refs.js";
 import { SecretValue } from "../../../vault/secret-value.js";
 import { asObject, optApprovalIds, optString, reqString } from "../validate.js";
 import { blankAllPages, disableObservationDomains } from "../../chrome/internal-ops.js";
-import type { Baseline, BackendNodeRef } from "../../chrome/internal-ops.js";
+import { captureWithTransitionGate, withDeadline } from "../../chrome/secret-gates.js";
 import { enforceDomain } from "./secrets.js";
 import { autoResumeBlind } from "../../blind-auto-resume.js";
 import type { BrowserHandle } from "../../browser-handles.js";
@@ -334,69 +334,21 @@ export async function revealCaptureCore(
       let capturedValue = "";
       let hideDone = false;
       try {
-        await withDeadline(
-          (async () => {
-            // §6.1 baseline sample #2: post-sever, immediately pre-reveal-click.
-            const baselinePost = await browser.baselineCandidates({
-              target_id: targetHandle.target_id,
-              backend_node_id: targetHandle.backend_node_id,
-            });
-            // Union the readableFps from both samples: a value script-observable at
-            // EITHER the pre-approval point OR the post-sever point is in the reject set.
-            // entries come from baselinePost (the post-sever/current state) — the
-            // path-keyed safety transition gate must reflect the state at reveal time;
-            // using stale pre-approval entries would reintroduce Finding-2-class staleness.
-            const mergedBaseline: Baseline = {
-              entries: baselinePost.entries,
-              readableFps: Array.from(new Set([...baselinePre.readableFps, ...baselinePost.readableFps])),
-              observable: "", // not used by resolveWithinContainer; daemon-only gate uses baselinePre/baselinePost.observable directly
-            };
-            const revealRef: BackendNodeRef = { target_id: revealHandle.target_id, backend_node_id: revealHandle.backend_node_id };
-            await browser.clickBackendNode(revealRef);
-            // ALL THREE modes go through resolveWithinContainer so the §6.1
-            // per-chosen-candidate safe→revealed gate is enforced uniformly
-            // (defined once / tested once). For `field` the approved field
-            // handle's OWN backend node is the subtree root: the field is its
-            // own sole candidate, so a field that was already script-readable
-            // and UNCHANGED pre-reveal (its baseline entry is `readable`) is
-            // NOT transition-eligible → fail closed (the secret was observable
-            // without blind protection, spec §6.1). A safe→revealed field is
-            // captured. `readBackendNodeValue` is NOT the field-mode path.
-            const res = await browser.resolveWithinContainer(
-              { target_id: targetHandle.target_id, backend_node_id: targetHandle.backend_node_id },
-              captureMode,
-              mergedBaseline,
-            );
-            capturedValue = res.value;
-            // §6.1 authoritative observable-before-blind gate (daemon-only; user-ratified).
-            // If the captured bytes appeared anywhere in EITHER pre-blind sample's
-            // serialized/observable surface, they were script-readable before blind →
-            // fail closed. baselinePre/baselinePost.observable are daemon-only and are
-            // never returned, audited, logged, or persisted.
-            if (
-              capturedValue !== "" &&
-              (baselinePre.observable.includes(capturedValue) || baselinePost.observable.includes(capturedValue))
-            ) {
-              throw new ShuttleError("reveal_no_transition", "Resolved value was observable before blind mode.");
-            }
-            // Hide BEFORE returning so the page is in its proven-clean state.
-            if (hideHandle !== undefined) {
-              await browser.clickBackendNode({ target_id: hideHandle.target_id, backend_node_id: hideHandle.backend_node_id });
-              hideDone = true;
-            } else if (services.cdp !== null) {
-              await blankAllPages(services.cdp);
-              hideDone = true;
-            } else {
-              // No internal CDP in this build → cannot blank. Treat as hidden
-              // only if there is no other neutralization path; the absence proof
-              // (next) is the authoritative gate, and a no-CDP build has no
-              // observable page surface to leak to anyway.
-              hideDone = true;
-            }
-          })(),
+        const gate = await withDeadline(
+          captureWithTransitionGate(browser, services.cdp, {
+            revealRef: { target_id: revealHandle.target_id, backend_node_id: revealHandle.backend_node_id },
+            targetRef: { target_id: targetHandle.target_id, backend_node_id: targetHandle.backend_node_id },
+            captureMode,
+            ...(hideHandle !== undefined
+              ? { hideRef: { target_id: hideHandle.target_id, backend_node_id: hideHandle.backend_node_id } }
+              : {}),
+            baselinePre,
+          }),
           revealDeadlineMs,
           "reveal_capture_timeout",
         );
+        capturedValue = gate.value;
+        hideDone = gate.hideDone;
       } catch {
         // Post-reveal failure (thrown reveal/resolve/read/hide OR the deadline):
         // the secret may be on the page. Proactively neutralize with the SAME
@@ -509,16 +461,4 @@ export async function revealCaptureCore(
       });
     throw err;
   }
-}
-
-// Mirrors inject-submit.ts's withDeadline. Races `p` against a deadline; clears
-// its timer on settle (no leaked timer per successful call). If `p` hangs it
-// stays orphaned but the route fails closed instead of hanging — the post-reveal
-// catch maps the rejection to captured:"unknown" / blind stays active.
-function withDeadline<T>(p: Promise<T>, ms: number, code: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new ShuttleError(code, `Operation exceeded ${ms}ms.`)), ms);
-  });
-  return Promise.race([p, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
