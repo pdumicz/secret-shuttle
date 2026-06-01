@@ -64,7 +64,7 @@ export const stripeCapture: CaptureRecipe = {
   // The "Reveal live key" button for the secret key row. Stripe uses
   // accessible button names containing "Reveal" for the show-key affordance.
   // [best-effort] — consistent with Stripe's accessibility-first dashboard.
-  reveal_selector: "button[aria-label*='Reveal'], button:has-text('Reveal live key')",
+  reveal_selector: "button[aria-label*='Reveal']",
 
   // After reveal, the key value is rendered in a monospace element adjacent
   // to the reveal button. Using container mode (container_selector) since the
@@ -75,7 +75,7 @@ export const stripeCapture: CaptureRecipe = {
   // "Revoke" is separate; Stripe does have a "Hide" control after revealing.
   // The accessible label is typically "Hide live key".
   // [best-effort]
-  hide_selector: "button[aria-label*='Hide'], button:has-text('Hide live key')",
+  hide_selector: "button[aria-label*='Hide']",
 
   ready_timeout_ms: 15000,
 

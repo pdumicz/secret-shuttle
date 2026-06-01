@@ -78,7 +78,7 @@ export const vercelInject: InjectRecipe = {
 
   // The "Save" button. Vercel docs step 6 says "Click Save".
   // [best-effort] — button text "Save" is confirmed from Vercel docs.
-  submit_selector: "button[type='submit']:has-text('Save'), button:has-text('Save')",
+  submit_selector: "button[type='submit']",
 
   // Toast/notification text after a successful save. Vercel shows a success
   // notification. The exact phrasing "Environment Variable added" matches
