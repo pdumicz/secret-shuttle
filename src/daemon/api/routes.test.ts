@@ -136,6 +136,10 @@ function stubBrowser(s: { domain: string; target: string; value: string }): Brow
     readBackendNodeValue: async () => "stub_value",
     baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "" }),
     resolveWithinContainer: async () => ({ value: "stub_value" }),
+    resolveSelectorToHandle: async () => { throw new Error("unused"); },
+    selectorMatchCount: async () => 0,
+    waitForSelector: async () => false,
+    documentHost: async () => "stub.test",
   };
 }
 
@@ -299,6 +303,10 @@ test("inject refuses when target changes after approval (post != pre)", async ()
       readBackendNodeValue: async () => "stub_value",
       baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "" }),
       resolveWithinContainer: async () => ({ value: "stub_value" }),
+      resolveSelectorToHandle: async () => { throw new Error("unused"); },
+      selectorMatchCount: async () => 0,
+      waitForSelector: async () => false,
+      documentHost: async () => "stub.test",
     };
 
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
@@ -489,6 +497,10 @@ test("capture rejects when the focused field changes between approval and captur
       readBackendNodeValue: async () => "stub_value",
       baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "" }),
       resolveWithinContainer: async () => ({ value: "stub_value" }),
+      resolveSelectorToHandle: async () => { throw new Error("unused"); },
+      selectorMatchCount: async () => 0,
+      waitForSelector: async () => false,
+      documentHost: async () => "stub.test",
     };
 
     // Pre-issue an approval bound to FIELD_A (matches the `pre` read).
@@ -974,6 +986,10 @@ test("inject that fails before writing the value auto-resumes (blind mode left O
       readBackendNodeValue: async () => "stub_value",
       baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "" }),
       resolveWithinContainer: async () => ({ value: "stub_value" }),
+      resolveSelectorToHandle: async () => { throw new Error("unused"); },
+      selectorMatchCount: async () => 0,
+      waitForSelector: async () => false,
+      documentHost: async () => "stub.test",
     };
     const r = await call(ctx, "POST", "/v1/secrets/inject", {
       ref: "ss://local/dev/INJ2", domain: "app.example.com", wait_for_approval: false,

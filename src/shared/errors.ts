@@ -61,6 +61,10 @@ export class ShuttleError extends Error {
   }
 }
 
+export function isShuttleError(e: unknown): e is ShuttleError {
+  return e instanceof ShuttleError;
+}
+
 export function assertCondition(
   condition: unknown,
   code: string,

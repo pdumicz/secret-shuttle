@@ -191,6 +191,16 @@ export interface BrowserOps {
   baselineCandidates(ref: BackendNodeRef): Promise<Baseline>;
   /** Post-reveal, daemon-only. Applies the SAME §6.1 per-candidate safe→revealed gate to ALL THREE modes: predicate → transition-eligible filter (drop unchanged-from-readable / still-safe) → exactly one safe→revealed → DOM containment proof → one-shot value read. For `field` the scan is bound to the field's own backend node (the field is its own subtree root / sole candidate) so a field already readable-unchanged pre-reveal fails closed too. Throws fail-closed on any uncertainty. */
   resolveWithinContainer(ref: BackendNodeRef, mode: "field" | "container" | "focused-after-reveal", baseline: Baseline): Promise<{ value: string }>;
+  /** Resolve a selector to element identity on the PUBLIC page chrome. Exactly one
+   *  match required (0/>1 → recipe_selector_ambiguous). Returns identity + fingerprint,
+   *  NEVER values. Same class of info the agent's `mark` exposes. (§2) */
+  resolveSelectorToHandle(target_id: string, selector: string): Promise<BackendNodeRef & { fingerprint: string }>;
+  /** Count of elements matching selector in target's document (for §4 probes / pre-step single-match checks). */
+  selectorMatchCount(target_id: string, selector: string): Promise<number>;
+  /** Poll selectorMatchCount(selector) >= 1 until present or timeoutMs elapses. (§4 page_ready_probe / pre-step wait_for) */
+  waitForSelector(target_id: string, selector: string, timeoutMs: number): Promise<boolean>;
+  /** Live document host of the target (lowercased; caller strips trailing dot). (§1 host revalidation) */
+  documentHost(target_id: string): Promise<string>;
 }
 
 // Daemon-only focused-field/selection reader. Exported so the capture-target-ops
@@ -1570,6 +1580,75 @@ export class CdpBrowserOps implements BrowserOps {
     } catch (err) {
       if (err instanceof ShuttleError) throw err;
       throw new ShuttleError("reveal_resolve_failed", "Resolution failed.");
+    } finally {
+      await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    }
+  }
+
+  async selectorMatchCount(targetId: string, selector: string): Promise<number> {
+    const expr = `document.querySelectorAll(${JSON.stringify(selector)}).length`;
+    return await this.evaluate<number>(targetId, expr);
+  }
+
+  async waitForSelector(targetId: string, selector: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    // poll every 250ms; first check immediate
+    for (;;) {
+      if ((await this.selectorMatchCount(targetId, selector)) >= 1) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  async documentHost(targetId: string): Promise<string> {
+    return (await this.evaluate<string>(targetId, "String(location.host)")).toLowerCase();
+  }
+
+  async resolveSelectorToHandle(targetId: string, selector: string): Promise<BackendNodeRef & { fingerprint: string }> {
+    const count = await this.selectorMatchCount(targetId, selector);
+    if (count !== 1) {
+      throw new ShuttleError("recipe_selector_ambiguous", `Selector ${selector} matched ${count} elements (need exactly 1).`);
+    }
+    const sessionId = await this.attach(targetId);
+    try {
+      // querySelector → DOM node → backendNodeId + a FieldDescriptor for the fingerprint.
+      const ev = await this.cdp.send<{ result: { objectId?: string } }>(
+        "Runtime.evaluate",
+        { expression: `document.querySelector(${JSON.stringify(selector)})`, returnByValue: false },
+        sessionId,
+      );
+      const objectId = ev.result.objectId;
+      if (objectId === undefined) {
+        throw new ShuttleError("recipe_selector_ambiguous", `Selector ${selector} resolved to no node.`);
+      }
+      try {
+        const node = await this.cdp.send<{ nodeId: number }>("DOM.requestNode", { objectId }, sessionId);
+        const desc = await this.cdp.send<{ node: { backendNodeId: number; nodeName: string; attributes?: string[] } }>(
+          "DOM.describeNode", { nodeId: node.nodeId }, sessionId,
+        );
+        const backendNodeId = desc.node.backendNodeId;
+        const attrs = desc.node.attributes ?? [];
+        const attr = (n: string): string | undefined => {
+          const i = attrs.indexOf(n);
+          return i >= 0 ? attrs[i + 1] : undefined;
+        };
+        const attrType = attr("type");
+        const attrName = attr("name");
+        const attrId = attr("id");
+        const tag = desc.node.nodeName.toLowerCase();
+        const field: FieldDescriptor = {
+          tag,
+          ...(attrType !== undefined ? { type: attrType } : {}),
+          ...(attrName !== undefined ? { name: attrName } : {}),
+          ...(attrId !== undefined ? { id: attrId } : {}),
+          editable: tag === "input" || tag === "textarea",
+        };
+        const host = await this.documentHost(targetId);
+        const fingerprint = fieldFingerprint(host, targetId, backendNodeId, field);
+        return { target_id: targetId, backend_node_id: backendNodeId, fingerprint };
+      } finally {
+        await this.cdp.send("Runtime.releaseObject", { objectId }, sessionId).catch(() => undefined);
+      }
     } finally {
       await this.cdp.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
     }

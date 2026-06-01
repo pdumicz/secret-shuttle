@@ -31,6 +31,10 @@ function stub(over: Partial<BrowserOps> = {}): BrowserOps {
     readBackendNodeValue: async () => SECRET,
     baselineCandidates: async () => ({ entries: [], readableFps: [], observable: "" }),
     resolveWithinContainer: async () => ({ value: SECRET }),
+    resolveSelectorToHandle: async () => { throw new Error("unused"); },
+    selectorMatchCount: async () => 0,
+    waitForSelector: async () => false,
+    documentHost: async () => "stub.test",
     ...over,
   };
 }
