@@ -10,6 +10,7 @@ import { writeDaemonAudit } from "../../audit.js";
 import { assertSecretActionAllowed } from "../../../policy/policy.js";
 import { asObject, optApprovalIds, reqString } from "../validate.js";
 import { blankAllPages, disableObservationDomains } from "../../chrome/internal-ops.js";
+import { injectWithSuccessGate, withDeadline } from "../../chrome/secret-gates.js";
 import { enforceDomain } from "./secrets.js";
 import { autoResumeBlind } from "../../blind-auto-resume.js";
 
@@ -169,28 +170,19 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
       // From here the secret is on the page. A failure (incl. a HANG — see
       // withDeadline) MUST NOT auto-resume: blind stays ACTIVE; respond
       // fail-closed (submitted:"unknown").
+      let successObserved = false;
+      let proofPassed = false;
       try {
-        // I3 (Task-6 review carry-forward): injectIntoBackendNode/clickBackendNode
-        // use RAW cdp.send (no internal timeout). A hung CDP frame would never
-        // throw nor resolve → this route would hang forever and the post-write
-        // catch could never fire. Wrap the secret-bearing sequence in an overall
-        // deadline so a hang becomes a caught failure → fail-closed (blind stays
-        // active). Tunable via env for tests; generous default for real use.
-        const injectClickDeadlineMs = Number(process.env.SECRET_SHUTTLE_INJECT_CLICK_DEADLINE_MS) || 30_000;
-        await withDeadline(
-          (async () => {
-            await browser.injectIntoBackendNode(
-              { target_id: fieldHandle.target_id, backend_node_id: fieldHandle.backend_node_id },
-              resolved.value.bytes().toString("utf8"),
-            );
-            await browser.clickBackendNode({
-              target_id: submitHandle.target_id,
-              backend_node_id: submitHandle.backend_node_id,
-            });
-          })(),
-          injectClickDeadlineMs,
-          "inject_click_timeout",
-        );
+        const gate = await injectWithSuccessGate(browser, {
+          fieldRef: { target_id: fieldHandle.target_id, backend_node_id: fieldHandle.backend_node_id },
+          submitRef: { target_id: submitHandle.target_id, backend_node_id: submitHandle.backend_node_id },
+          getValue: () => resolved!.value.bytes().toString("utf8"),
+          domain,
+          successText,
+          successTimeoutMs,
+        });
+        successObserved = gate.successObserved;
+        proofPassed = gate.proofPassed;
       } catch {
         // Post-write failure (thrown inject/click OR the withDeadline timeout):
         // the secret may be on the page from a partial inject, and on the
@@ -221,21 +213,6 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
           submitted: "unknown", secret_ref: meta.ref, domain,
           blind_mode: true, next: "manual_recovery_required", value_visible_to_agent: false,
         };
-      }
-
-      let successObserved = false;
-      try {
-        successObserved = await browser.observeText(domain, successText, successTimeoutMs);
-      } catch {
-        successObserved = false;
-      }
-      let proofPassed = false;
-      if (successObserved) {
-        try {
-          proofPassed = (await browser.proveAbsence(resolved.value.bytes().toString("utf8"))).passed;
-        } catch {
-          proofPassed = false;
-        }
       }
       await services.vault.markUsed(meta.ref).catch(() => undefined);
 
@@ -298,17 +275,4 @@ export function registerInjectSubmit(server: DaemonServer, services: DaemonServi
       resolved?.value.dispose();
     }
   });
-}
-
-// I3 carry-forward helper. Races `p` against a deadline; clears its timer on
-// settle (no leaked 30s timer per successful call). If `p` hangs forever it
-// stays orphaned but the route fails closed instead of hanging — the route's
-// post-write catch maps the rejection to submitted:"unknown" / blind stays
-// active. Defined at module scope (not per-request).
-function withDeadline<T>(p: Promise<T>, ms: number, code: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new ShuttleError(code, `Operation exceeded ${ms}ms.`)), ms);
-  });
-  return Promise.race([p, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }

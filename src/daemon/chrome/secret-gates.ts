@@ -80,3 +80,48 @@ export async function captureWithTransitionGate(
   }
   return { value, hideDone };
 }
+
+export interface InjectGateArgs {
+  fieldRef: BackendNodeRef;
+  submitRef: BackendNodeRef;
+  /** Called once per sink (inject, then proveAbsence) so the caller's SecretValue.bytes()
+   *  is exercised for both — caller owns the SecretValue + disposes it. */
+  getValue: () => string;
+  domain: string;
+  successText: string;
+  successTimeoutMs: number;
+}
+
+/** Factored from inject-submit.ts:180-239. Wraps inject+click in withDeadline (THROWS on
+ *  failure/timeout — caller fail-closes), then observeText + (if observed) proveAbsence.
+ *  Returns { successObserved, proofPassed }. Logic unchanged. */
+export async function injectWithSuccessGate(
+  browser: BrowserOps,
+  args: InjectGateArgs,
+): Promise<{ successObserved: boolean; proofPassed: boolean }> {
+  const { fieldRef, submitRef, getValue, domain, successText, successTimeoutMs } = args;
+  const injectClickDeadlineMs = Number(process.env.SECRET_SHUTTLE_INJECT_CLICK_DEADLINE_MS) || 30_000;
+  await withDeadline(
+    (async () => {
+      await browser.injectIntoBackendNode(fieldRef, getValue());
+      await browser.clickBackendNode(submitRef);
+    })(),
+    injectClickDeadlineMs,
+    "inject_click_timeout",
+  );
+  let successObserved = false;
+  try {
+    successObserved = await browser.observeText(domain, successText, successTimeoutMs);
+  } catch {
+    successObserved = false;
+  }
+  let proofPassed = false;
+  if (successObserved) {
+    try {
+      proofPassed = (await browser.proveAbsence(getValue())).passed;
+    } catch {
+      proofPassed = false;
+    }
+  }
+  return { successObserved, proofPassed };
+}
