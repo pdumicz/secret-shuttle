@@ -30,6 +30,7 @@ import { encryptVault } from "../../vault/crypto.js";
 import { DaemonServices } from "../services.js";
 import { BootstrapStore } from "./store.js";
 import { executeBatch, type ExecutorDeps } from "./executor.js";
+import { RecipeRegistry } from "../recipes/registry.js";
 import { ShuttleError } from "../../shared/errors.js";
 import type {
   BrowserSession,
@@ -263,6 +264,9 @@ async function drainCleanups(): Promise<void> {
 
 // Default deps with no-op stub cores. Capture branch bypasses revealCapture
 // entirely under C11, so the stub here is just a safety net.
+// Inject an empty RecipeRegistry so these tests exercise the human-pending
+// (no-recipe) path regardless of what builtins are registered on the singleton.
+// Tests that want to exercise the recipe path pass their own registry via overrides.
 function makeDeps(services: DaemonServices, overrides: Partial<ExecutorDeps> = {}): ExecutorDeps {
   return {
     generateSecret: (async () => ({ generated: true, secret_ref: "x", name: "x", environment: "production", fingerprint: "fp", value_visible_to_agent: false as const })) as ExecutorDeps["generateSecret"],
@@ -270,6 +274,7 @@ function makeDeps(services: DaemonServices, overrides: Partial<ExecutorDeps> = {
     runTemplate: (async () => ({ executed: true, template_id: "vercel-env-add", secret_ref: "x", binary_path: null, binary_sha256: null, exit_code: 0, value_visible_to_agent: false as const })) as ExecutorDeps["runTemplate"],
     services,
     daemonPortRef: () => 9876,
+    recipes: new RecipeRegistry(), // empty registry: human-pending path, not recipe path
     ...overrides,
   };
 }

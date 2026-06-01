@@ -1,5 +1,6 @@
 import { canonicalHost } from "./host.js";
 import type { CaptureRecipe, InjectRecipe } from "./types.js";
+import { registerBuiltinRecipes } from "./builtin/index.js";
 
 export class RecipeRegistry {
   private readonly capture = new Map<string, CaptureRecipe>();
@@ -16,6 +17,5 @@ export class RecipeRegistry {
 }
 
 // Module-singleton, builtins registered here (mirrors api/routes/templates.ts `registry`).
-// Builtin recipes are added in Task 11 (Stripe capture, Vercel inject).
 export const recipeRegistry = new RecipeRegistry();
-// registerBuiltinRecipes(recipeRegistry);  // ← uncommented in Task 11
+registerBuiltinRecipes(recipeRegistry);
