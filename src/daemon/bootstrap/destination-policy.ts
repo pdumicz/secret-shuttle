@@ -58,11 +58,12 @@ export function planHasProductionDestination(
 }
 
 /**
- * Returns true if any PlanEntry has source.kind === "capture".
+ * Returns true if any PlanEntry uses a source kind that requires the human-pending
+ * capture tab (capture or human_paste).
  *
  * Used by /v1/bootstrap/plan to force a production-class binding (i.e. require
  * a human approval click) whenever the plan contains a capture step, regardless
- * of --environment or destination class. Capture flows are inherently
+ * of --environment or destination class. These flows are inherently
  * interactive — they require the user to navigate a browser tab to the source
  * site so the daemon can read the secret from the visible page. The
  * dev-synth-execute path has no UI surface for this click, so a capture-only
@@ -71,7 +72,7 @@ export function planHasProductionDestination(
  * an explicit /continue step and the hub UI a place to render the capture
  * coordinator card (C14).
  */
-export function planRequiresCapture(
+export function planRequiresHumanPending(
   plan: ReadonlyArray<{ source: { kind: string } }>,
 ): boolean {
   return plan.some(

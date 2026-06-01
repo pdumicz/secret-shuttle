@@ -71,10 +71,11 @@ function parseSource(secretName: string, raw: unknown): BootstrapSource {
     if (typeof s.url !== "string" || s.url.length === 0) {
       fail(`secrets.${secretName}.source: kind=${kind} requires url`);
     }
-    // Strict URL validation. These checks use bootstrap_capture_url_invalid
-    // (not the generic bootstrap_plan_invalid) so the CLI can surface a
-    // targeted hint ("fix the capture URL in your bootstrap yml") without
-    // re-classifying the basic-shape failure above.
+    // Strict URL validation for both capture and human_paste sources.
+    // These checks use bootstrap_capture_url_invalid (not the generic
+    // bootstrap_plan_invalid) so the CLI can surface a targeted hint
+    // ("fix the capture URL in your bootstrap yml") without re-classifying
+    // the basic-shape failure above.
     const result = validateCaptureUrl(s.url);
     if (!result.ok) {
       throw new ShuttleError(

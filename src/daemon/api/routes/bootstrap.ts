@@ -17,7 +17,7 @@ import type { BatchState, BootstrapStore, PlanEntry } from "../../bootstrap/stor
 import { generateSecretCore } from "./secrets.js";
 import { revealCaptureCore } from "./reveal-capture.js";
 import { runTemplateCore } from "./templates.js";
-import { planHasProductionDestination, planHasProductionSource, planRequiresCapture } from "../../bootstrap/destination-policy.js";
+import { planHasProductionDestination, planHasProductionSource, planRequiresHumanPending } from "../../bootstrap/destination-policy.js";
 import { canonicalEnvironment } from "../../../shared/refs.js";
 
 export function registerBootstrapRoutes(
@@ -58,7 +58,7 @@ export function registerBootstrapRoutes(
     // (so we know if the plan contains a capture step) and BEFORE batchId
     // allocation / bootstrapStore.save — a guarded /plan must leave no batch
     // clutter behind. Non-capture plans skip this guard entirely.
-    if (planRequiresCapture(plan)) {
+    if (planRequiresHumanPending(plan)) {
       if (services.blind.current() !== null) {
         throw new ShuttleError(
           "blind_mode_already_active",
@@ -93,7 +93,7 @@ export function registerBootstrapRoutes(
       canonicalEnvironment(environment) === "production" ||
       planHasProductionDestination(plan) ||
       planHasProductionSource(plan) ||
-      planRequiresCapture(plan);
+      planRequiresHumanPending(plan);
     const bindingEnvironment = requiresProductionGate ? "production" : "development";
 
     const binding: ApprovalBinding = {
@@ -277,7 +277,7 @@ export function registerBootstrapRoutes(
     // approval is preserved across the user's `blind end` + retry. Without
     // this ordering, the user would be forced to mint a fresh approval every
     // time they had blind active, which is a terrible UX.
-    if (planRequiresCapture(state.plan)) {
+    if (planRequiresHumanPending(state.plan)) {
       if (services.blind.current() !== null) {
         throw new ShuttleError(
           "blind_mode_already_active",
@@ -290,7 +290,7 @@ export function registerBootstrapRoutes(
     // hasCapture decides whether the outer try/finally must orchestrate the
     // browser lifecycle. Non-capture plans (random_*, existing) skip this
     // entirely — they don't touch Chrome at all.
-    const hasCapture = planRequiresCapture(state.plan);
+    const hasCapture = planRequiresHumanPending(state.plan);
 
     // SYNCHRONOUS bootstrap-browser reservation BEFORE requireApprovals.
     //
