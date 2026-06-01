@@ -3,7 +3,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { attemptRecipeCapture } from "./recipe-capture.js";
 import type { CaptureRecipe } from "../recipes/types.js";
-import { isShuttleError } from "../../shared/errors.js";
 
 const recipe: CaptureRecipe = {
   kind: "capture", host: "stripe.test", url: "https://stripe.test/keys",

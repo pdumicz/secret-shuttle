@@ -37,12 +37,12 @@ export interface RecipeCaptureCtx {
   cdp: unknown; // CdpClient | null
   target_id: string;
   expectedHost: string;
-  services: { blind: { end: () => void }; vault: unknown };
-  entry: { secret: string; ref: string; destinations: { domain: string }[] };
+  services: { blind: { end: () => void } };
+  entry: { ref: string };
   /** Injectable for tests; production callers omit this and the real
    *  cleanupCaptureTarget from executor.ts is used via the closure passed by
    *  runCaptureStep. */
-  cleanupCaptureTarget?: (cdp: unknown, target_id: string) => Promise<{ verified: boolean }>;
+  cleanupCaptureTarget?: (target_id: string) => Promise<{ verified: boolean }>;
 }
 
 /** Secret-bearing pass-through codes: the raw code is surfaced as-is rather than
@@ -57,7 +57,7 @@ export async function attemptRecipeCapture(
   const { browser, cdp, target_id, expectedHost, services, entry } = ctx;
   // The real cleanupCaptureTarget is injected by runCaptureStep as a closure
   // so we never import the private executor function directly.
-  const cleanup = ctx.cleanupCaptureTarget ?? (async () => ({ verified: false }));
+  const cleanup = ctx.cleanupCaptureTarget ?? (async (_tid: string) => ({ verified: false }));
   const captureMode: "field" | "container" = recipe.field_selector !== undefined ? "field" : "container";
   const targetSelector = recipe.field_selector ?? recipe.container_selector!;
 
@@ -162,7 +162,7 @@ export async function attemptRecipeCapture(
 
     // ── Cleanup (§170): a throwing cleanup must not propagate; blind decision
     //    follows the verified flag, not the cleanup error. ──
-    const cleanupResult = await cleanup(cdp, target_id).then(
+    const cleanupResult = await cleanup(target_id).then(
       (r) => ({ verified: r.verified, cleanupReason: null as string | null }),
       (err: unknown) => ({
         verified: false,

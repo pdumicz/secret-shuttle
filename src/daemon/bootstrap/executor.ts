@@ -648,7 +648,7 @@ async function runCaptureStep(
       entry,
       // Inject the real cleanupCaptureTarget as a closure so recipe-capture.ts
       // does not need to import the private function.
-      cleanupCaptureTarget: (_, tid) => cleanupCaptureTarget(cdp, tid as string),
+      cleanupCaptureTarget: (tid: string) => cleanupCaptureTarget(cdp, tid),
     });
     if (r.kind === "outcome") return r.outcome;
     captured = { value: r.value, field_fingerprint: r.field_fingerprint };
