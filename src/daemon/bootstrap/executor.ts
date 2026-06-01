@@ -1,6 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { ShuttleError } from "../../shared/errors.js";
 import { writeDaemonAudit } from "../audit.js";
+import { attemptRecipeCapture } from "./recipe-capture.js";
+import { recipeRegistry } from "../recipes/registry.js";
+import type { RecipeRegistry } from "../recipes/registry.js";
 import {
   openCaptureTarget,
   blankTarget,
@@ -71,6 +74,8 @@ export interface ExecutorDeps {
   runTemplate: TemplateCore;
   services: DaemonServices;
   daemonPortRef: () => number;
+  /** Optional recipe registry override for tests; defaults to the module singleton. */
+  recipes?: RecipeRegistry;
 }
 
 export interface ExecuteResult {
@@ -116,7 +121,7 @@ interface CaptureStepContext {
  * The outer loop branches on .kind exactly once; the rest of the state machine
  * is contained inside runCaptureStep so the outer flow stays linear.
  */
-type CaptureStepOutcome =
+export type CaptureStepOutcome =
   | { kind: "ref"; ref: string }
   | { kind: "continueWith"; stepResult: import("./store.js").StepResult }
   | { kind: "stopWith"; stepResult: import("./store.js").StepResult }
@@ -618,68 +623,96 @@ async function runCaptureStep(
     throw e;
   }
 
-  // ── Step 3-5: register → emit → await ───────────────────────────────────
-  const capture_token = randomBytes(32).toString("base64url");
-
-  // The registry timeout is 5 minutes per the spec (and the C7 default in
-  // the tests). When it fires it rejects the Promise with bootstrap_capture_timeout.
-  const FIVE_MINUTES_MS = 5 * 60 * 1000;
-
-  // SYNCHRONOUS register: returns the Promise without awaiting. This is what
-  // makes the "register THEN emit THEN await" ordering tractable — there is
-  // no microtask between register's return and the SSE emit, so the UI
-  // cannot race the registry.
-  const pending = services.pendingCaptures.register({
-    batchId: ctx.batchId,
-    secretName: entry.secret,
-    capture_token,
-    target_id,
-    expected_host: expectedHost,
-    owner_agent_id: ctx.state.owner_agent_id,
-    timeoutMs: FIVE_MINUTES_MS,
-    onTimeout: () => {
-      // Side-channel hook for audit-on-timeout. We don't need extra work here
-      // because the registry rejects the Promise we await — the failure path
-      // below covers the timeout case the same way as any other rejection.
-    },
-  });
-
-  services.hubBroker.emitBootstrapCaptureStep({
-    batch_id: ctx.batchId,
-    secret_name: entry.secret,
-    url,
-    step_idx: ctx.step_idx,
-    step_total: ctx.step_total,
-    capture_token,
-  }, deps.daemonPortRef());
-
+  // Declarations shared by both recipe and human-pending paths.  Moved up so
+  // the recipe branch can set `captured` and fall through to the same cleanup
+  // + state machine below.
   let captured: { value: string; field_fingerprint: string } | null = null;
   let failureCode: string | null = null;
   let failureMessage: string | null = null;
-  try {
-    captured = await pending;
-  } catch (e) {
-    captured = null;
-    if (e instanceof ShuttleError) {
-      failureCode = e.code;
-      failureMessage = e.message;
-    } else {
-      failureCode = "bootstrap_capture_aborted";
-      failureMessage = e instanceof Error ? e.message : String(e);
+
+  // ── Step 3 (recipe path): attempt hands-off recipe capture ──────────────
+  // If a recipe exists for this host AND the source kind is "capture" (not
+  // human_paste, which Task 10 adds), run the recipe state machine.  On an
+  // outcome (page-state or secret-bearing failure), attemptRecipeCapture owns
+  // the tab/blind lifecycle and returns a ready CaptureStepOutcome.  On a
+  // value, fall through to Steps 6-7 so cleanup + vault upsert reuse the
+  // existing vetted path.
+  const captureRecipe = (deps.recipes ?? recipeRegistry).getCapture(expectedHost);
+  if (entry.source.kind === "capture" && captureRecipe !== undefined) {
+    const r = await attemptRecipeCapture(captureRecipe, {
+      browser: browserSession.browser,
+      cdp,
+      target_id,
+      expectedHost,
+      services,
+      entry,
+      // Inject the real cleanupCaptureTarget as a closure so recipe-capture.ts
+      // does not need to import the private function.
+      cleanupCaptureTarget: (_, tid) => cleanupCaptureTarget(cdp, tid as string),
+    });
+    if (r.kind === "outcome") return r.outcome;
+    captured = { value: r.value, field_fingerprint: r.field_fingerprint };
+  } else {
+    // ── Step 3-5: register → emit → await (human-pending / no-recipe path) ──
+    const capture_token = randomBytes(32).toString("base64url");
+
+    // The registry timeout is 5 minutes per the spec (and the C7 default in
+    // the tests). When it fires it rejects the Promise with bootstrap_capture_timeout.
+    const FIVE_MINUTES_MS = 5 * 60 * 1000;
+
+    // SYNCHRONOUS register: returns the Promise without awaiting. This is what
+    // makes the "register THEN emit THEN await" ordering tractable — there is
+    // no microtask between register's return and the SSE emit, so the UI
+    // cannot race the registry.
+    const pending = services.pendingCaptures.register({
+      batchId: ctx.batchId,
+      secretName: entry.secret,
+      capture_token,
+      target_id,
+      expected_host: expectedHost,
+      owner_agent_id: ctx.state.owner_agent_id,
+      timeoutMs: FIVE_MINUTES_MS,
+      onTimeout: () => {
+        // Side-channel hook for audit-on-timeout. We don't need extra work here
+        // because the registry rejects the Promise we await — the failure path
+        // below covers the timeout case the same way as any other rejection.
+      },
+    });
+
+    services.hubBroker.emitBootstrapCaptureStep({
+      batch_id: ctx.batchId,
+      secret_name: entry.secret,
+      url,
+      step_idx: ctx.step_idx,
+      step_total: ctx.step_total,
+      capture_token,
+    }, deps.daemonPortRef());
+
+    try {
+      captured = await pending;
+    } catch (e) {
+      captured = null;
+      if (e instanceof ShuttleError) {
+        failureCode = e.code;
+        failureMessage = e.message;
+      } else {
+        failureCode = "bootstrap_capture_aborted";
+        failureMessage = e instanceof Error ? e.message : String(e);
+      }
+    } finally {
+      // Drop the pending hub event regardless of outcome — this is the single
+      // authoritative settle point for ALL FIVE state-machine branches
+      // (success+verified, success+cleanup_failed, skip, timeout, abort,
+      // redirect). Token-guarded inside the broker so a rapid-fire next emit
+      // (different capture_token) is not accidentally cleared.
+      //
+      // Without this, a stale capture_step event would replay on hub
+      // reattach and the UI's capture-mode iframe-hide would MASK any fresh
+      // `navigate` event for an unrelated operation. The previous "Option C
+      // (don't clear)" trade-off only considered stale button presses 404'ing
+      // — it missed the iframe-mask interaction.
+      services.hubBroker.clearBootstrapCaptureStep(capture_token);
     }
-  } finally {
-    // Drop the pending hub event regardless of outcome — this is the single
-    // authoritative settle point for ALL FIVE state-machine branches
-    // (success+verified, success+cleanup_failed, skip, timeout, abort,
-    // redirect). Token-guarded inside the broker so a rapid-fire next emit
-    // (different capture_token) is not accidentally cleared.
-    //
-    // Without this, a stale capture_step event would replay on hub
-    // reattach and the UI's capture-mode iframe-hide would MASK any fresh
-    // `navigate` event for an unrelated operation. The previous "Option C
-    // (don't clear)" trade-off only considered stale button presses 404'ing
-    // — it missed the iframe-mask interaction.
-    services.hubBroker.clearBootstrapCaptureStep(capture_token);
   }
 
   // ── Step 6: cleanup ─────────────────────────────────────────────────────
