@@ -85,7 +85,9 @@ export interface InjectGateArgs {
   fieldRef: BackendNodeRef;
   submitRef: BackendNodeRef;
   /** Called once per sink (inject, then proveAbsence) so the caller's SecretValue.bytes()
-   *  is exercised for both — caller owns the SecretValue + disposes it. */
+   *  is exercised for both — caller owns the SecretValue + disposes it.
+   *  A factory (not a pre-computed string) is required so the guard test can assert
+   *  SecretValue.bytes() is called exactly twice — once per sink. */
   getValue: () => string;
   domain: string;
   successText: string;
@@ -94,7 +96,12 @@ export interface InjectGateArgs {
 
 /** Factored from inject-submit.ts:180-239. Wraps inject+click in withDeadline (THROWS on
  *  failure/timeout — caller fail-closes), then observeText + (if observed) proveAbsence.
- *  Returns { successObserved, proofPassed }. Logic unchanged. */
+ *  Returns { successObserved, proofPassed }. Logic unchanged.
+ *
+ *  SAFETY: injectIntoBackendNode/clickBackendNode use raw cdp.send with no internal
+ *  timeout — a hung CDP frame would never throw nor resolve. withDeadline converts
+ *  that hang into a rejection so the caller's post-write catch fires and blind stays
+ *  active (fail-closed). Tunable via SECRET_SHUTTLE_INJECT_CLICK_DEADLINE_MS for tests. */
 export async function injectWithSuccessGate(
   browser: BrowserOps,
   args: InjectGateArgs,
