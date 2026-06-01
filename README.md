@@ -148,7 +148,7 @@ What's automated, by provider and direction. Browser recipes drive the page hand
 | Stripe | capture (secret key) | browser recipe | 🆕 this increment | (set on dogfood) | revealable in dashboard |
 | Supabase | capture (service_role) | browser recipe | ⬜ planned | — | revealable in settings/api |
 | OpenAI / Anthropic | capture | human-paste | n/a | n/a | create-once; cannot be revealed |
-| Vercel | inject (env) | browser recipe **and** CLI (`vercel-env-add`) | CLI shipped; recipe 🆕 this increment | (set on dogfood) | CLI push is the robust, project-general default. The increment-1 recipe targets a **single static project URL** (browser-only users / dogfood project); arbitrary-project support needs the deferred URL-param scheme. |
+| Vercel | inject (env) | browser recipe **and** CLI (`vercel-env-add`) | CLI shipped; recipe ⬜ placeholder (not dogfooded) | — | CLI push is the robust, project-general default. The browser recipe is plumbed end-to-end but its target URL is intentionally a non-resolving placeholder (`vercel.com/TEAM_PLACEHOLDER/PROJECT_PLACEHOLDER/...`) and the destination is gated behind `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES`. A real dogfood project URL plus the scope opt-in must land before the recipe is usable. |
 | GitHub Actions | inject (secret) | CLI (`github-actions-secret-set`) | ✅ shipped | n/a | repo-scoped only |
 | Cloudflare | inject (secret) | CLI (`cloudflare-secret-put`) | ✅ shipped | n/a | |
 | Supabase edge | inject (secret) | CLI (`supabase-edge-secret-set`) | ✅ shipped | n/a | |

@@ -306,12 +306,22 @@ export function registerBootstrapRoutes(
       return { ok: true, batch_status: "completed", ...summarizeFromState(state) };
     }
 
-    // C10: capture-conditional pre-flight blind guard. Runs AFTER owner check
-    // + completed short-circuit, BEFORE requireApprovals — so the minted
-    // approval is preserved across the user's `blind end` + retry. Without
-    // this ordering, the user would be forced to mint a fresh approval every
+    // C10: pre-flight blind guard. Runs AFTER owner check + completed
+    // short-circuit, BEFORE requireApprovals — so the minted approval is
+    // preserved across the user's `blind end` + retry. Without this
+    // ordering, the user would be forced to mint a fresh approval every
     // time they had blind active, which is a terrible UX.
-    if (planRequiresHumanPending(state.plan)) {
+    //
+    // Codex round-2 P1: gate must use `planRequiresBootstrapBrowser`, NOT
+    // `planRequiresHumanPending`. Browser-only inject plans (e.g.
+    // random_32_bytes → vercel.com browser_inject) have a non-human-pending
+    // source but still touch Chrome via `runBrowserInject`, which calls
+    // `services.blind.start(...)`. If an unrelated blind window is already
+    // active, `start` throws, the outer teardown stops the bootstrap-owned
+    // Chrome AND calls `services.blind.end()` on the *unrelated* blind state
+    // (`bootstrap.ts` finally below). Guarding here with the browser-aware
+    // predicate fails BEFORE any browser is spawned or blind is touched.
+    if (planRequiresBootstrapBrowser(state.plan)) {
       if (services.blind.current() !== null) {
         throw new ShuttleError(
           "blind_mode_already_active",
@@ -486,7 +496,23 @@ export function registerBootstrapRoutes(
               (d) => d.error_code !== undefined && PAGE_STATE_CODES.has(d.error_code),
             );
           });
-        if (needsBrowser && !hasPageStateFailure) {
+        // Codex round-2 P1: page-state preservation is too broad on its own.
+        // `recipe-inject.ts` deliberately leaves blind active when a secret-bearing
+        // cleanup couldn't be verified (lines 111 / 135 / 155), relying on this
+        // teardown to kill the renderer. In a multi-destination entry, one
+        // destination can return `bootstrap_login_required` (page-state) while a
+        // later destination returns `recipe_inject_failed` with cleanup unverified
+        // — and on that path, blind remains ACTIVE. The page-state-only check
+        // would skip teardown in that case, leaving a live renderer with a
+        // potentially-rendered secret value still on a closed-but-unverified tab,
+        // violating the "bootstrap-browser teardown kills the renderer" contract.
+        //
+        // Rule: if blind is still active after execute, teardown WINS over
+        // page-state preservation. The renderer must die so the residual value
+        // (if any) cannot be observed by a resumed agent.
+        const blindStillActive = services.blind.current() !== null;
+        const preservePageState = hasPageStateFailure && !blindStillActive;
+        if (needsBrowser && !preservePageState) {
           const { stopped } = await services.stopBootstrapBrowser(batchId);
           if (stopped && services.blind.current() !== null) {
             services.blind.end();
@@ -496,7 +522,7 @@ export function registerBootstrapRoutes(
               actor_agent_id: state.owner_agent_id,
             });
           }
-        } else if (needsBrowser && hasPageStateFailure) {
+        } else if (needsBrowser && preservePageState) {
           // Audit the deliberate skip so it's traceable why the bootstrap
           // browser survived this /continue: the user is mid-recovery.
           await writeDaemonAudit({
@@ -544,6 +570,27 @@ export function registerBootstrapRoutes(
     const callerIsRoot = getAuthContext()?.isRoot === true;
     if (state === null || (!callerIsRoot && state.owner_agent_id !== callerAgentId)) {
       throw new ShuttleError("bootstrap_batch_not_found", `unknown batch_id: ${batchId}`);
+    }
+
+    // Codex round-2 P2: stop any bootstrap-owned browser for THIS batch BEFORE
+    // deleting state. After a page-state failure the outer /continue finally
+    // deliberately keeps the bootstrap browser alive (owner = {kind:"bootstrap",
+    // batchId}) so the user can recover (log in / inspect the tab). If they
+    // choose to abandon instead, deleting batch state without stopping the
+    // browser would leak the Chrome process and orphan its owner tag — the
+    // next batch's `reserveBootstrapBrowser` would see a different bootstrap
+    // owner and reject with `bootstrap_browser_busy`. `stopBootstrapBrowser`
+    // is a no-op when the browser is user-owned or owned by a different batch,
+    // so this only kills what this batch actually owns. If blind is still
+    // active after that stop, end blind too — the renderer is dead.
+    const { stopped } = await services.stopBootstrapBrowser(batchId);
+    if (stopped && services.blind.current() !== null) {
+      services.blind.end();
+      await writeDaemonAudit({
+        action: "blind_auto_resume_after_browser_stop",
+        ok: true,
+        actor_agent_id: state.owner_agent_id,
+      });
     }
 
     await services.bootstrapStore.delete(batchId);
