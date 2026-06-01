@@ -7,11 +7,39 @@ export interface BootstrapSource {
   ref?: string;       // for existing
 }
 
-export interface ResolvedDestination {
-  shorthand: string;
-  template_id: string;
-  template_params: Record<string, string>;
-  domain: string;
+export type ResolvedDestination =
+  | { kind: "template"; template_id: string; template_params: Record<string, string>; shorthand: string; domain: string }
+  | { kind: "browser_inject"; recipe_host: string; url_params?: Record<string, string>; shorthand: string; domain: string };
+  // url_params reserved for deferred URL interpolation (§9); UNUSED in increment 1 — recipes ship a complete static url.
+
+/**
+ * Normalizes a raw persisted destination object into a typed ResolvedDestination.
+ * Exported for use in back-compat tests and any future load path that reads
+ * BatchState from disk without going through the BootstrapStore cache.
+ *
+ * Back-compat rule: entries written before `kind` was introduced have no `kind`
+ * field and must default to `"template"` so existing users' BatchState files
+ * continue to work.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function normalizeDestination(d: any): ResolvedDestination {
+  if (d.kind === "browser_inject") {
+    return {
+      kind: "browser_inject",
+      recipe_host: d.recipe_host as string,
+      ...(d.url_params !== undefined ? { url_params: d.url_params as Record<string, string> } : {}),
+      shorthand: d.shorthand as string,
+      domain: d.domain as string,
+    };
+  }
+  // default (incl. legacy entries missing kind) → template
+  return {
+    kind: "template",
+    template_id: d.template_id as string,
+    template_params: (d.template_params ?? {}) as Record<string, string>,
+    shorthand: d.shorthand as string,
+    domain: d.domain as string,
+  };
 }
 
 export interface PlanEntry {
@@ -78,9 +106,21 @@ export class BootstrapStore {
     const filePath = path.join(this.rootDir, `${batchId}.json`);
     try {
       const raw = await readFile(filePath, "utf8");
-      const parsed = JSON.parse(raw) as BatchState;
-      this.cache.set(batchId, parsed);
-      return parsed;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const parsed = JSON.parse(raw) as any;
+      // Normalize each plan entry's destinations for back-compat: files written
+      // before `kind` was introduced have no `kind` field and must default to
+      // "template" so existing users' BatchState files continue to work.
+      if (Array.isArray(parsed.plan)) {
+        for (const entry of parsed.plan) {
+          if (Array.isArray(entry.destinations)) {
+            entry.destinations = entry.destinations.map(normalizeDestination);
+          }
+        }
+      }
+      const state = parsed as BatchState;
+      this.cache.set(batchId, state);
+      return state;
     } catch {
       return null;
     }

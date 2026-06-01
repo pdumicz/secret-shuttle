@@ -96,6 +96,7 @@ function samplePlan(secretName: string): PlanEntry[] {
       source: { kind: "random_32_bytes" },
       destinations: [
         {
+          kind: "template",
           shorthand: "vercel:production",
           template_id: "vercel-env-add",
           template_params: { name: secretName, environment: "production" },

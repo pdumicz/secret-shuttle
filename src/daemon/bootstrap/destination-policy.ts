@@ -26,6 +26,11 @@ import type { ResolvedDestination } from "./store.js";
  * - Template with no destinationEnvironment: fail closed → prod-class.
  */
 export function isDestinationProductionClass(dest: ResolvedDestination): boolean {
+  // browser_inject destinations interact directly with the live browser, which
+  // is always considered production-class (fail-closed).
+  if (dest.kind !== "template") {
+    return true;
+  }
   // github-actions and supabase: inherently CI/production-affecting regardless of
   // what their destinationEnvironment returns (which is repo/project_ref, not env).
   if (

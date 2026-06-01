@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { BootstrapStore, type BatchState } from "./store.js";
+import { BootstrapStore, normalizeDestination, type BatchState } from "./store.js";
 
 function makeState(id: string): BatchState {
   return {
@@ -94,6 +94,36 @@ test("BootstrapStore: round-trips status='abandoned' through save + get (C8)", a
   const got = await store.get("abandoned-batch");
   assert.ok(got !== null);
   assert.strictEqual(got!.status, "abandoned");
+});
+
+test("normalizeDestination: legacy persisted destination without kind defaults to template", () => {
+  const legacy = {
+    shorthand: "vercel:production",
+    template_id: "vercel-env-add",
+    template_params: { name: "X" },
+    domain: "vercel.com",
+  };
+  const loaded = normalizeDestination(legacy as any);
+  assert.strictEqual(loaded.kind, "template");
+  assert.strictEqual(loaded.shorthand, "vercel:production");
+  if (loaded.kind === "template") {
+    assert.strictEqual(loaded.template_id, "vercel-env-add");
+    assert.deepStrictEqual(loaded.template_params, { name: "X" });
+  }
+});
+
+test("normalizeDestination: browser_inject kind is preserved", () => {
+  const bi = {
+    kind: "browser_inject" as const,
+    recipe_host: "stripe.com",
+    shorthand: "stripe",
+    domain: "stripe.com",
+  };
+  const loaded = normalizeDestination(bi as any);
+  assert.strictEqual(loaded.kind, "browser_inject");
+  if (loaded.kind === "browser_inject") {
+    assert.strictEqual(loaded.recipe_host, "stripe.com");
+  }
 });
 
 test("BootstrapStore.tryAcquireExecutionLock: different batch ids do not collide", () => {

@@ -151,6 +151,7 @@ test("POST /v1/audit/summary: --batch reads BootstrapStore first (source=live)",
           source: { kind: "random_32_bytes" },
           destinations: [
             {
+              kind: "template",
               shorthand: "vercel:production",
               template_id: "vercel",
               template_params: { env: "production", key: "FOO" },
@@ -211,6 +212,7 @@ test("POST /v1/audit/summary: --batch live state emits status=ok/failed/pending 
           source: { kind: "random_32_bytes" },
           destinations: [
             {
+              kind: "template",
               shorthand: "vercel:production",
               template_id: "vercel-env-add",
               template_params: { name: "OK_SECRET", environment: "production" },
@@ -224,6 +226,7 @@ test("POST /v1/audit/summary: --batch live state emits status=ok/failed/pending 
           source: { kind: "random_64_bytes" },
           destinations: [
             {
+              kind: "template",
               shorthand: "vercel:production",
               template_id: "vercel-env-add",
               template_params: { name: "FAIL_SECRET", environment: "production" },
@@ -237,6 +240,7 @@ test("POST /v1/audit/summary: --batch live state emits status=ok/failed/pending 
           source: { kind: "random_32_bytes" },
           destinations: [
             {
+              kind: "template",
               shorthand: "github-actions:prod",
               template_id: "github-actions-secret-set",
               template_params: { name: "PENDING_SECRET", environment: "production" },

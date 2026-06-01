@@ -284,7 +284,7 @@ async function saveCapturePlan(store: BootstrapStore, opts: {
 }): Promise<void> {
   const secret = opts.secret ?? "STRIPE_KEY";
   const destinations = (opts.destinations ?? 1) > 0
-    ? [{ shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" }]
+    ? [{ kind: "template" as const, shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" }]
     : [];
   await store.save({
     batch_id: opts.batchId,
@@ -420,7 +420,7 @@ test("capture branch: SUCCESS + cleanup NOT verified → blind stays active + cl
     approval_id: "a",
     plan_file_path: "/tmp",
     plan: [
-      { secret: "STRIPE_KEY", ref: "ss://local/prod/STRIPE_KEY", source: { kind: "capture", url: "https://dashboard.stripe.com/login" }, destinations: [{ shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" }] },
+      { secret: "STRIPE_KEY", ref: "ss://local/prod/STRIPE_KEY", source: { kind: "capture", url: "https://dashboard.stripe.com/login" }, destinations: [{ kind: "template", shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" }] },
       { secret: "SECOND_SECRET", ref: "ss://local/prod/SECOND_SECRET", source: { kind: "random_32_bytes" }, destinations: [] },
     ],
     step_results: {},

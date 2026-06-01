@@ -846,6 +846,18 @@ async function runDestinationSteps(
 ): Promise<Array<{ destination: string; ok: boolean; error_code?: string; message?: string }>> {
   const results: Array<{ destination: string; ok: boolean; error_code?: string; message?: string }> = [];
   for (const dest of destinations) {
+    if (dest.kind !== "template") {
+      // browser_inject destinations are dispatched by Task 9's runBrowserInject.
+      // Until that lands, surface as a clear not-implemented error rather than
+      // silently succeeding or crashing.
+      results.push({
+        destination: dest.shorthand,
+        ok: false,
+        error_code: "browser_inject_not_implemented",
+        message: `browser_inject destination "${dest.shorthand}" requires Task 9 dispatcher (not yet implemented)`,
+      });
+      continue;
+    }
     try {
       const result = await deps.runTemplate(
         deps.services,

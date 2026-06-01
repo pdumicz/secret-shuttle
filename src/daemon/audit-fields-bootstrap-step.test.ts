@@ -113,8 +113,8 @@ test("bootstrap_step audit row (success): carries batch_id, source_kind, destina
         ref: "ss://local/production/STRIPE_KEY",
         source: { kind: "random_32_bytes" },
         destinations: [
-          { shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" },
-          { shorthand: "github:production", template_id: "gh-secret-set", template_params: {}, domain: "github.com" },
+          { kind: "template", shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" },
+          { kind: "template", shorthand: "github:production", template_id: "gh-secret-set", template_params: {}, domain: "github.com" },
         ],
       },
     ],
@@ -153,8 +153,8 @@ test("bootstrap_step audit row (partial failure): destinations_ok_count + destin
         ref: "ss://local/production/STRIPE_KEY",
         source: { kind: "random_64_bytes" },
         destinations: [
-          { shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" },
-          { shorthand: "github:production", template_id: "gh-secret-set", template_params: {}, domain: "github.com" },
+          { kind: "template", shorthand: "vercel:production", template_id: "vercel-env-add", template_params: {}, domain: "vercel.com" },
+          { kind: "template", shorthand: "github:production", template_id: "gh-secret-set", template_params: {}, domain: "github.com" },
         ],
       },
     ],

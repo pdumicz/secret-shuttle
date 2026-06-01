@@ -233,6 +233,7 @@ async function seedBatch(services: DaemonServices, opts: SeedOpts): Promise<void
     source: { kind: "capture", url: "https://dashboard.stripe.com/apikeys" },
     destinations: [
       {
+        kind: "template",
         shorthand: "vercel:production",
         template_id: "vercel-env-add",
         template_params: { name: "CAP_KEY", environment: "production" },
@@ -246,6 +247,7 @@ async function seedBatch(services: DaemonServices, opts: SeedOpts): Promise<void
     source: { kind: "random_32_bytes" },
     destinations: [
       {
+        kind: "template",
         shorthand: "vercel:production",
         template_id: "vercel-env-add",
         template_params: { name: "RND_KEY", environment: "production" },

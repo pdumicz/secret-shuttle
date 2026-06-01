@@ -10,6 +10,7 @@ function entry(overrides: Partial<PlanEntry> = {}): PlanEntry {
     source: { kind: "random_32_bytes" },
     destinations: [
       {
+        kind: "template",
         shorthand: "vercel:production",
         template_id: "vercel-env-add",
         template_params: { name: "STRIPE_KEY", environment: "production" },
@@ -41,8 +42,8 @@ test("single PlanEntry → one exact-ref pattern", () => {
 test("same ref pushed to two vercel environments → two patterns with different environment values", () => {
   const e: PlanEntry = entry({
     destinations: [
-      { shorthand: "vercel:production", template_id: "vercel-env-add", template_params: { name: "STRIPE_KEY", environment: "production" }, domain: "vercel.com" },
-      { shorthand: "vercel:preview",    template_id: "vercel-env-add", template_params: { name: "STRIPE_KEY", environment: "preview"   }, domain: "vercel.com" },
+      { kind: "template", shorthand: "vercel:production", template_id: "vercel-env-add", template_params: { name: "STRIPE_KEY", environment: "production" }, domain: "vercel.com" },
+      { kind: "template", shorthand: "vercel:preview",    template_id: "vercel-env-add", template_params: { name: "STRIPE_KEY", environment: "preview"   }, domain: "vercel.com" },
     ],
   });
   const r = inferSessionPatternFromPlan([e]);
@@ -53,9 +54,9 @@ test("same ref pushed to two vercel environments → two patterns with different
 
 test("two refs aliased onto same destination name → two exact-ref patterns (NOT one glob)", () => {
   const a: PlanEntry = { ...entry(), ref: "ss://stripe/prod/X", secret: "X",
-    destinations: [{ shorthand: "vercel:production", template_id: "vercel-env-add", template_params: { name: "API_KEY", environment: "production" }, domain: "vercel.com" }] };
+    destinations: [{ kind: "template", shorthand: "vercel:production", template_id: "vercel-env-add", template_params: { name: "API_KEY", environment: "production" }, domain: "vercel.com" }] };
   const b: PlanEntry = { ...entry(), ref: "ss://stripe/prod/Y", secret: "Y",
-    destinations: [{ shorthand: "vercel:production", template_id: "vercel-env-add", template_params: { name: "API_KEY", environment: "production" }, domain: "vercel.com" }] };
+    destinations: [{ kind: "template", shorthand: "vercel:production", template_id: "vercel-env-add", template_params: { name: "API_KEY", environment: "production" }, domain: "vercel.com" }] };
   const r = inferSessionPatternFromPlan([a, b]);
   assert.equal(r.patterns.length, 2);
   const refs = r.patterns.map((p) => p.ref_glob).sort();
@@ -68,8 +69,8 @@ test("two refs aliased onto same destination name → two exact-ref patterns (NO
 test("template not in DESTINATION_DEFINING_PARAMS → destination excluded", () => {
   const e = entry({
     destinations: [
-      { shorthand: "railway:production", template_id: "railway-variable-set", template_params: { name: "X" }, domain: "railway.app" },
-      { shorthand: "vercel:production",  template_id: "vercel-env-add",       template_params: { name: "STRIPE_KEY", environment: "production" }, domain: "vercel.com" },
+      { kind: "template", shorthand: "railway:production", template_id: "railway-variable-set", template_params: { name: "X" }, domain: "railway.app" },
+      { kind: "template", shorthand: "vercel:production",  template_id: "vercel-env-add",       template_params: { name: "STRIPE_KEY", environment: "production" }, domain: "vercel.com" },
     ],
   });
   const r = inferSessionPatternFromPlan([e]);
@@ -85,7 +86,7 @@ test("template not in DESTINATION_DEFINING_PARAMS → destination excluded", () 
 test("all destinations unregistered → empty patterns array, excluded list non-empty", () => {
   const e = entry({
     destinations: [
-      { shorthand: "railway:production", template_id: "railway-variable-set", template_params: { name: "X" }, domain: "railway.app" },
+      { kind: "template", shorthand: "railway:production", template_id: "railway-variable-set", template_params: { name: "X" }, domain: "railway.app" },
     ],
   });
   const r = inferSessionPatternFromPlan([e]);
@@ -111,7 +112,7 @@ test("registered template with MISSING defining param → excluded with reason m
   // silently widen consent.
   const e = entry({
     destinations: [
-      { shorthand: "vercel:?", template_id: "vercel-env-add",
+      { kind: "template", shorthand: "vercel:?", template_id: "vercel-env-add",
         template_params: { name: "STRIPE_KEY" }, // environment missing
         domain: "vercel.com" },
     ],
@@ -129,7 +130,7 @@ test("registered template with MISSING defining param → excluded with reason m
 test("registered template with EMPTY-STRING defining param → also excluded", () => {
   const e = entry({
     destinations: [
-      { shorthand: "vercel:?", template_id: "vercel-env-add",
+      { kind: "template", shorthand: "vercel:?", template_id: "vercel-env-add",
         template_params: { name: "STRIPE_KEY", environment: "" },
         domain: "vercel.com" },
     ],

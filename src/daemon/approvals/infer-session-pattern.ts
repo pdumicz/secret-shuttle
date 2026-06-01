@@ -30,6 +30,11 @@ export function inferSessionPatternFromPlan(plan: PlanEntry[], ttl_ms: number = 
 
   for (const entry of plan) {
     for (const dest of entry.destinations) {
+      // browser_inject destinations do not map to template sessions; exclude
+      // them (fail-closed) until a dedicated session-pattern shape lands.
+      if (dest.kind !== "template") {
+        continue;
+      }
       const definingKeys = destinationDefiningParamsFor(dest.template_id);
       if (definingKeys === null) {
         excluded.push({ secret: entry.secret, ref: entry.ref, destination: dest, reason: "template_unregistered", template_id: dest.template_id });

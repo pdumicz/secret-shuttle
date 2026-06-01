@@ -7,6 +7,7 @@ import type { ResolvedDestination } from "./store.js";
 
 test("isDestinationProductionClass: vercel:production → true", () => {
   const dest: ResolvedDestination = {
+    kind: "template",
     shorthand: "vercel:production",
     template_id: "vercel-env-add",
     template_params: { name: "MY_SECRET", environment: "production" },
@@ -17,6 +18,7 @@ test("isDestinationProductionClass: vercel:production → true", () => {
 
 test("isDestinationProductionClass: vercel:development → false", () => {
   const dest: ResolvedDestination = {
+    kind: "template",
     shorthand: "vercel:development",
     template_id: "vercel-env-add",
     template_params: { name: "MY_SECRET", environment: "development" },
@@ -27,6 +29,7 @@ test("isDestinationProductionClass: vercel:development → false", () => {
 
 test("isDestinationProductionClass: vercel:preview → false", () => {
   const dest: ResolvedDestination = {
+    kind: "template",
     shorthand: "vercel:preview",
     template_id: "vercel-env-add",
     template_params: { name: "MY_SECRET", environment: "preview" },
@@ -37,6 +40,7 @@ test("isDestinationProductionClass: vercel:preview → false", () => {
 
 test("isDestinationProductionClass: cloudflare:production → true", () => {
   const dest: ResolvedDestination = {
+    kind: "template",
     shorthand: "cloudflare:production",
     template_id: "cloudflare-secret-put",
     template_params: { name: "MY_SECRET", env: "production" },
@@ -47,6 +51,7 @@ test("isDestinationProductionClass: cloudflare:production → true", () => {
 
 test("isDestinationProductionClass: cloudflare:dev → false", () => {
   const dest: ResolvedDestination = {
+    kind: "template",
     shorthand: "cloudflare:dev",
     template_id: "cloudflare-secret-put",
     template_params: { name: "MY_SECRET", env: "dev" },
@@ -58,6 +63,7 @@ test("isDestinationProductionClass: cloudflare:dev → false", () => {
 test("isDestinationProductionClass: cloudflare with empty env (default prod) → true", () => {
   // No `env` field: cloudflare's destinationEnvironment returns "production" when env is unset/empty.
   const dest: ResolvedDestination = {
+    kind: "template",
     shorthand: "cloudflare:production",
     template_id: "cloudflare-secret-put",
     template_params: { name: "MY_SECRET" }, // no env field
@@ -68,6 +74,7 @@ test("isDestinationProductionClass: cloudflare with empty env (default prod) →
 
 test("isDestinationProductionClass: github-actions:any/repo → true (always)", () => {
   const dest: ResolvedDestination = {
+    kind: "template",
     shorthand: "github-actions:owner/repo",
     template_id: "github-actions-secret-set",
     template_params: { name: "MY_SECRET", repo: "owner/repo" },
@@ -78,6 +85,7 @@ test("isDestinationProductionClass: github-actions:any/repo → true (always)", 
 
 test("isDestinationProductionClass: supabase:any-project → true (always)", () => {
   const dest: ResolvedDestination = {
+    kind: "template",
     shorthand: "supabase:myproject",
     template_id: "supabase-edge-secret-set",
     template_params: { name: "MY_SECRET", project_ref: "myproject" },
@@ -88,6 +96,7 @@ test("isDestinationProductionClass: supabase:any-project → true (always)", () 
 
 test("isDestinationProductionClass: unknown template_id → true (fail closed)", () => {
   const dest: ResolvedDestination = {
+    kind: "template",
     shorthand: "unknown:scope",
     template_id: "nonexistent-template-xyz",
     template_params: { name: "MY_SECRET" },
@@ -103,12 +112,14 @@ test("planHasProductionDestination: mixed plan with one prod dest → true", () 
     {
       destinations: [
         {
+          kind: "template",
           shorthand: "vercel:development",
           template_id: "vercel-env-add",
           template_params: { name: "A", environment: "development" },
           domain: "vercel.com",
         } as ResolvedDestination,
         {
+          kind: "template",
           shorthand: "vercel:production",
           template_id: "vercel-env-add",
           template_params: { name: "A", environment: "production" },
@@ -125,6 +136,7 @@ test("planHasProductionDestination: all-dev plan → false", () => {
     {
       destinations: [
         {
+          kind: "template",
           shorthand: "vercel:development",
           template_id: "vercel-env-add",
           template_params: { name: "A", environment: "development" },
@@ -135,6 +147,7 @@ test("planHasProductionDestination: all-dev plan → false", () => {
     {
       destinations: [
         {
+          kind: "template",
           shorthand: "vercel:preview",
           template_id: "vercel-env-add",
           template_params: { name: "B", environment: "preview" },

@@ -123,6 +123,10 @@ test("computeBootstrapPlan: destination shorthand resolved into ResolvedDestinat
   };
   const result = computeBootstrapPlan(parsed, emptyVault, { force: false, source: "local", environment: "production" });
   assert.strictEqual(result[0]!.destinations.length, 2);
-  assert.strictEqual(result[0]!.destinations[0]!.template_id, "vercel-env-add");
-  assert.strictEqual(result[0]!.destinations[1]!.template_id, "github-actions-secret-set");
+  const dest0 = result[0]!.destinations[0]!;
+  const dest1 = result[0]!.destinations[1]!;
+  assert.strictEqual(dest0.kind, "template");
+  assert.strictEqual(dest1.kind, "template");
+  if (dest0.kind === "template") assert.strictEqual(dest0.template_id, "vercel-env-add");
+  if (dest1.kind === "template") assert.strictEqual(dest1.template_id, "github-actions-secret-set");
 });

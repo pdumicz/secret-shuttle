@@ -36,6 +36,7 @@ export function computeBootstrapPlan(
     const destinations: ResolvedDestination[] = s.destinations.map((shorthand) => {
       const r = resolveDestinationShorthand(shorthand, s.name);
       return {
+        kind: "template" as const,
         shorthand,
         template_id: r.template_id,
         template_params: r.template_params,

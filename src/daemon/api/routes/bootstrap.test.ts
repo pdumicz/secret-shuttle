@@ -424,6 +424,7 @@ test("POST /v1/bootstrap/continue: retry after failed_partial does NOT require f
           source: { kind: "random_32_bytes" },
           destinations: [
             {
+              kind: "template",
               shorthand: "vercel:production",
               template_id: "vercel-env-add",
               template_params: { name: "RETRY_KEY", environment: "production" },
@@ -800,6 +801,7 @@ test("POST /v1/bootstrap/continue: cached failed_partial response surfaces per-d
           source: { kind: "random_32_bytes" },
           destinations: [
             {
+              kind: "template",
               shorthand: "vercel:production",
               template_id: "vercel-env-add",
               template_params: { name: "STRIPE_KEY", environment: "production" },
@@ -1085,6 +1087,7 @@ test("POST /v1/bootstrap/continue: concurrent calls on same batch → second get
           source: { kind: "random_32_bytes" },
           destinations: [
             {
+              kind: "template",
               shorthand: "vercel:production",
               template_id: "vercel-env-add",
               template_params: { name: "LOCK_KEY", environment: "production" },
@@ -1143,6 +1146,7 @@ test("POST /v1/bootstrap/continue: after lock release, retry succeeds", async ()
           source: { kind: "random_32_bytes" },
           destinations: [
             {
+              kind: "template",
               shorthand: "vercel:development",
               template_id: "vercel-env-add",
               template_params: { name: "RELEASE_KEY", environment: "development" },
@@ -1194,6 +1198,7 @@ test("POST /v1/bootstrap/continue: status in_progress on disk + empty in-memory 
           source: { kind: "random_32_bytes" },
           destinations: [
             {
+              kind: "template",
               shorthand: "vercel:development",
               template_id: "vercel-env-add",
               template_params: { name: "CRASH_KEY", environment: "development" },
