@@ -1,18 +1,15 @@
+import { canonicalHost } from "./host.js";
 import type { CaptureRecipe, InjectRecipe } from "./types.js";
-
-function canon(host: string): string {
-  return host.trim().toLowerCase().replace(/\.$/, "");
-}
 
 export class RecipeRegistry {
   private readonly capture = new Map<string, CaptureRecipe>();
   private readonly inject = new Map<string, InjectRecipe>();
 
-  registerCapture(r: CaptureRecipe): void { this.capture.set(canon(r.host), r); }
-  registerInject(r: InjectRecipe): void { this.inject.set(canon(r.host), r); }
+  registerCapture(r: CaptureRecipe): void { this.capture.set(canonicalHost(r.host), r); }
+  registerInject(r: InjectRecipe): void { this.inject.set(canonicalHost(r.host), r); }
 
-  getCapture(host: string): CaptureRecipe | undefined { return this.capture.get(canon(host)); }
-  getInject(host: string): InjectRecipe | undefined { return this.inject.get(canon(host)); }
+  getCapture(host: string): CaptureRecipe | undefined { return this.capture.get(canonicalHost(host)); }
+  getInject(host: string): InjectRecipe | undefined { return this.inject.get(canonicalHost(host)); }
 
   listCapture(): CaptureRecipe[] { return [...this.capture.values()]; }
   listInject(): InjectRecipe[] { return [...this.inject.values()]; }

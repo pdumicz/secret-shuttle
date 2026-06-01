@@ -1,11 +1,10 @@
 // src/daemon/recipes/page-state.ts
+import { canonicalHost } from "./host.js";
 import { ShuttleError } from "../../shared/errors.js"; // match the real path/export
 import type { BrowserOps } from "../chrome/internal-ops.js";
 import type { RecipeBase } from "./types.js";
 
 export type PageState = "ready" | "logged_out" | "timeout" | "unexpected";
-
-function canon(host: string): string { return host.trim().toLowerCase().replace(/\.$/, ""); }
 
 /** §4 staged detection, evaluated in order, BEFORE resolving any recipe selector. */
 export async function detectPageState(browser: BrowserOps, targetId: string, recipe: RecipeBase): Promise<PageState> {
@@ -36,9 +35,9 @@ export function pageStateError(state: Exclude<PageState, "ready">, recipe: Recip
  *  page that drifted to a non-loaded/timeout state is surfaced as `recipe_page_timeout`,
  *  not a misleading scope/login error. */
 export async function recheckPageScope(browser: BrowserOps, targetId: string, recipe: RecipeBase): Promise<void> {
-  const host = canon(await browser.documentHost(targetId));
-  if (host !== canon(recipe.host)) {
-    throw new ShuttleError("recipe_page_unexpected", `Recipe drifted off-host: now ${host}, expected ${canon(recipe.host)}.`);
+  const host = canonicalHost(await browser.documentHost(targetId));
+  if (host !== canonicalHost(recipe.host)) {
+    throw new ShuttleError("recipe_page_unexpected", `Recipe drifted off-host: now ${host}, expected ${canonicalHost(recipe.host)}.`);
   }
   const state = await detectPageState(browser, targetId, recipe);
   if (state !== "ready") throw pageStateError(state, recipe);
