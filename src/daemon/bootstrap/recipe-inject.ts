@@ -53,12 +53,17 @@ export async function runBrowserInject(recipe: InjectRecipe, ref: string, deps: 
 
     resolved = await services.vault.resolveSecret(ref);
 
+    // Single factory — all three sinks (gate's inject, gate's proveAbsence, and the
+    // no-success-text proveAbsence below) call through here so bytes() is exercised
+    // consistently and the getValue contract in InjectGateArgs is honoured.
+    const getValue = () => resolved!.value.bytes().toString("utf8");
+
     let gate: { successObserved: boolean; proofPassed: boolean };
     try {
       gate = await injectWithSuccessGate(browser, {
         fieldRef: { target_id: fieldRef.target_id, backend_node_id: fieldRef.backend_node_id },
         submitRef: { target_id: submitRef.target_id, backend_node_id: submitRef.backend_node_id },
-        getValue: () => resolved!.value.bytes().toString("utf8"),
+        getValue,
         domain: recipe.host,
         successText: recipe.success_text,
         successTimeoutMs: SUCCESS_TIMEOUT_DEFAULT_MS,
@@ -77,7 +82,7 @@ export async function runBrowserInject(recipe: InjectRecipe, ref: string, deps: 
       services.blind.end();
       return { ok: true };
     }
-    const proof = await browser.proveAbsence(resolved!.value.bytes().toString("utf8")).catch(() => ({ passed: false }));
+    const proof = await browser.proveAbsence(getValue()).catch(() => ({ passed: false }));
     await cleanup(cdp, target_id).catch(() => undefined);
     services.blind.end();
     return { ok: false, error_code: "recipe_inject_failed", message: `Inject to ${recipe.host}: success text not observed (absence_proof ${proof.passed ? "passed" : "failed"}). Retryable.` };

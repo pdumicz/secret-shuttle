@@ -23,12 +23,12 @@ function makeDeps(over: { present: Set<string>; successObserved?: boolean; proof
     injectIntoBackendNode: async () => { if (over.injectThrow) throw new Error("inject boom"); events.push("inject"); return {} as any; },
     clickBackendNode: async () => { events.push("submit"); },
     observeText: async () => over.successObserved ?? false,
-    proveAbsence: async () => ({ passed: over.proofPassed ?? false }),
+    proveAbsence: async () => { events.push("proveAbsence"); return { passed: over.proofPassed ?? false }; },
   } as any;
   const blind = { start: () => events.push("blind.start"), end: () => events.push("blind.end") };
   const services = {
     blind,
-    vault: { resolveSecret: async () => ({ value: { bytes: () => Buffer.from("v_secret"), dispose: () => undefined } }), markUsed: async () => undefined },
+    vault: { resolveSecret: async () => ({ value: { bytes: () => Buffer.from("v_secret"), dispose: () => undefined } }), markUsed: async () => { events.push("markUsed"); } },
     browserSession: { browser, cdp: {}, proxy: { severAgentConnections: () => undefined } },
   } as any;
   return { events, deps: { services, daemonPortRef: () => 1, openCaptureTarget: async () => ({ target_id: over.openTargetId ?? "t" }), cleanupCaptureTarget: async () => { events.push("cleanup(close)"); return { verified: true }; } } as any };
@@ -47,6 +47,7 @@ test("no success_text => recipe_inject_failed, proveAbsence run, blind ended, re
   assert.equal(r.ok, false);
   assert.equal(r.error_code, "recipe_inject_failed");
   assert.ok(events.includes("blind.end"));
+  assert.ok(events.includes("proveAbsence"));
 });
 
 test("login wall => bootstrap_login_required, tab LEFT OPEN, blind ended", async () => {
@@ -54,5 +55,18 @@ test("login wall => bootstrap_login_required, tab LEFT OPEN, blind ended", async
   const r = await runBrowserInject(recipe, "ss://stripe/prod/X", deps);
   assert.equal(r.error_code, "bootstrap_login_required");
   assert.ok(!events.includes("cleanup(close)"));
+  assert.ok(events.includes("blind.end"));
+});
+
+test("inject/click throw => recipe_inject_failed, markUsed fired, tab closed, blind ended", async () => {
+  const { events, deps } = makeDeps({ present: new Set(["[data-shell]", "[data-in]", "#val", "#save"]), injectThrow: true });
+  const r = await runBrowserInject(recipe, "ss://stripe/prod/X", deps);
+  assert.equal(r.ok, false);
+  assert.equal(r.error_code, "recipe_inject_failed");
+  // §6: markUsed must fire before cleanup so the secret is invalidated even on throw
+  assert.ok(events.includes("markUsed"));
+  // tab is disposable — cleanup must run
+  assert.ok(events.includes("cleanup(close)"));
+  // blind always ended before return
   assert.ok(events.includes("blind.end"));
 });
