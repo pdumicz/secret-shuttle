@@ -81,6 +81,36 @@ export function planRequiresHumanPending(
 }
 
 /**
+ * Returns true if a plan needs the bootstrap browser session for its run.
+ *
+ * Two independent reasons to need a browser:
+ * - The plan has a human-pending source (capture or human_paste): the daemon must
+ *   open a visible tab for the user to reveal / paste the secret.
+ * - The plan has a browser_inject destination: the daemon must drive the inject
+ *   recipe in a logged-in bootstrap browser. This case can occur even when ALL
+ *   sources are non-interactive (e.g. random_32_bytes + browser_inject — the
+ *   Vercel browser-only path), so checking source kinds alone is insufficient.
+ *
+ * Used by /v1/bootstrap/continue to (a) reserve the bootstrap browser slot before
+ * approvals are consumed, (b) ensure the browser is up before runBrowserInject
+ * fires, and (c) tear it down in the outer finally. Without this predicate
+ * covering browser_inject destinations, a `browser_inject` plan with a non-capture
+ * source would never spawn Chrome and runBrowserInject would fail closed with
+ * bootstrap_plan_invalid (the "browser_inject requires a browser session" guard).
+ */
+export function planRequiresBootstrapBrowser(
+  plan: ReadonlyArray<{
+    source: { kind: string };
+    destinations: ReadonlyArray<ResolvedDestination>;
+  }>,
+): boolean {
+  if (planRequiresHumanPending(plan)) return true;
+  return plan.some((entry) =>
+    entry.destinations.some((dest) => dest.kind === "browser_inject"),
+  );
+}
+
+/**
  * Returns true if any PlanEntry's ref resolves to the production environment.
  *
  * Used by /v1/bootstrap/plan to elevate the bootstrap binding's approval gate

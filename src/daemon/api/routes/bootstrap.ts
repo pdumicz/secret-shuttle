@@ -19,7 +19,7 @@ import { resolveBinary } from "../../templates/resolve-binary.js";
 import { generateSecretCore } from "./secrets.js";
 import { revealCaptureCore } from "./reveal-capture.js";
 import { runTemplateCore } from "./templates.js";
-import { planHasProductionDestination, planHasProductionSource, planRequiresHumanPending } from "../../bootstrap/destination-policy.js";
+import { planHasProductionDestination, planHasProductionSource, planRequiresBootstrapBrowser, planRequiresHumanPending } from "../../bootstrap/destination-policy.js";
 import { canonicalEnvironment } from "../../../shared/refs.js";
 
 /**
@@ -320,11 +320,20 @@ export function registerBootstrapRoutes(
       }
     }
 
-    // C12: capture plans need a browser session for the duration of the run.
-    // hasCapture decides whether the outer try/finally must orchestrate the
-    // browser lifecycle. Non-capture plans (random_*, existing) skip this
-    // entirely — they don't touch Chrome at all.
-    const hasCapture = planRequiresHumanPending(state.plan);
+    // C12: bootstrap plans that touch Chrome — either a human-pending source
+    // (capture / human_paste) OR a browser_inject destination — need a browser
+    // session for the duration of the run. `needsBrowser` decides whether the
+    // outer try/finally must orchestrate the browser lifecycle. Pure non-capture
+    // template-only plans (random_*/existing → CLI push) skip this entirely.
+    //
+    // Why both source AND destination matter: the browser-only Vercel inject
+    // path can plan a `random_32_bytes` source + a `browser_inject` Vercel
+    // destination. The source is not human-pending, but the destination still
+    // needs a logged-in bootstrap browser. A source-only check (the old
+    // planRequiresHumanPending) would skip the reservation + ensure + teardown
+    // for that plan, and runBrowserInject would fail closed with
+    // `bootstrap_plan_invalid` because services.browserSession is null.
+    const needsBrowser = planRequiresBootstrapBrowser(state.plan);
 
     // SYNCHRONOUS bootstrap-browser reservation BEFORE requireApprovals.
     //
@@ -356,7 +365,7 @@ export function registerBootstrapRoutes(
     // owned by a different batch — same semantics as the old precheck, just
     // unified through one primitive.
     let lease: BootstrapBrowserLease | null = null;
-    if (hasCapture) {
+    if (needsBrowser) {
       lease = services.reserveBootstrapBrowser(batchId);
     }
 
@@ -420,7 +429,7 @@ export function registerBootstrapRoutes(
         // reservation above already guards against cross-batch collisions —
         // ensureBootstrapBrowser itself also honors the reservation as
         // defense-in-depth.
-        if (hasCapture) {
+        if (needsBrowser) {
           await services.ensureBootstrapBrowser(batchId);
         }
 
@@ -450,7 +459,34 @@ export function registerBootstrapRoutes(
         // rendering process is dead, there is nothing left to observe.
         // stopBootstrapBrowser is a no-op for user-owned sessions, so user
         // `browser start` survives this finally untouched.
-        if (hasCapture) {
+        //
+        // §5 / §6 page-state recovery preservation: when a recipe attempt ended
+        // with a page-state failure (bootstrap_login_required,
+        // recipe_page_timeout, recipe_page_unexpected), the executor left the
+        // visible provider tab OPEN as the documented recovery surface — the
+        // user is told to "log into <host> in the open window" / "check the
+        // open window" and re-run --continue. Closing the bootstrap browser
+        // here would defeat that contract by killing the tab the user was
+        // instructed to act on. Re-read state from disk (the executor saved
+        // before returning) and skip teardown when any source step OR any
+        // destination push produced one of those codes. Cookies persist in
+        // the bootstrap profile, so the user's next /continue reuses the
+        // same logged-in session.
+        const PAGE_STATE_CODES = new Set([
+          "bootstrap_login_required",
+          "recipe_page_timeout",
+          "recipe_page_unexpected",
+        ]);
+        const finalState = await services.bootstrapStore.get(batchId);
+        const hasPageStateFailure =
+          finalState !== null &&
+          Object.values(finalState.step_results).some((r) => {
+            if (r.error_code !== undefined && PAGE_STATE_CODES.has(r.error_code)) return true;
+            return (r.destinations_pushed ?? []).some(
+              (d) => d.error_code !== undefined && PAGE_STATE_CODES.has(d.error_code),
+            );
+          });
+        if (needsBrowser && !hasPageStateFailure) {
           const { stopped } = await services.stopBootstrapBrowser(batchId);
           if (stopped && services.blind.current() !== null) {
             services.blind.end();
@@ -460,6 +496,14 @@ export function registerBootstrapRoutes(
               actor_agent_id: state.owner_agent_id,
             });
           }
+        } else if (needsBrowser && hasPageStateFailure) {
+          // Audit the deliberate skip so it's traceable why the bootstrap
+          // browser survived this /continue: the user is mid-recovery.
+          await writeDaemonAudit({
+            action: "bootstrap_browser_preserved_for_page_state_recovery",
+            ok: true,
+            actor_agent_id: state.owner_agent_id,
+          });
         }
         // Lock release LAST — after browser cleanup. A retry after release must
         // see a clean services.browserSession === null (or the user's session,

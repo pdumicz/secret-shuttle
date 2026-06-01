@@ -49,10 +49,28 @@ export const vercelInject: InjectRecipe = {
   kind: "inject",
   host: "vercel.com",
 
-  // PLACEHOLDER URL — replace <team> and <project> with real slugs.
-  // Per spec §10/§Future: static dogfood URL for increment 1.
-  // Example: https://vercel.com/acme-team/my-app/settings/environment-variables
-  url: "https://vercel.com/~/settings/environment-variables",
+  // PLACEHOLDER URL — NEEDS REAL DOGFOOD PROJECT URL before any production use.
+  //
+  // Per spec §198, increment-1 inject recipes bake in a single, fully-specified
+  // project URL (e.g. https://vercel.com/<real-team>/<real-project>/settings/environment-variables).
+  // No real dogfood project has been committed yet, so this URL is intentionally
+  // BROKEN with explicit placeholder segments — any /continue that reaches a
+  // browser_inject for this recipe will land on a "team not found"/404 page,
+  // detectPageState will fail (logged_out_marker, recipe_page_timeout, or
+  // recipe_page_unexpected depending on Vercel's 404 surface), and the recipe
+  // returns a clear page-state error before ever resolving field/submit selectors.
+  //
+  // Belt-and-braces: even with this URL, the destination is *never* auto-selected
+  // because `destinationCovered` (src/daemon/api/routes/bootstrap.ts) requires an
+  // explicit `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES=<recipe-host>:<shorthand>`
+  // opt-in. With the env unset (the default for every non-dogfood install) this
+  // recipe is unreachable from the plan path. So this URL is dormant until BOTH:
+  //   (1) it is replaced with the real dogfood team+project path, AND
+  //   (2) the operator allowlists the exact `vercel.com:<shorthand>` scope.
+  //
+  // To dogfood: replace TEAM_PLACEHOLDER and PROJECT_PLACEHOLDER with the actual
+  // Vercel team slug and project name AND update `verified_against_real_page`.
+  url: "https://vercel.com/TEAM_PLACEHOLDER/PROJECT_PLACEHOLDER/settings/environment-variables",
 
   // Present on any Vercel dashboard page load. The skip-nav anchor is
   // injected by Vercel's Geist shell on every page — confirmed from login
