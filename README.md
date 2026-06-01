@@ -135,8 +135,23 @@ Templates run vetted binaries with `shell: false`, absolute paths only, and neve
 
 - Hardware-backed key storage (HSM / Secure Enclave) — note: OS-keychain key storage *does* ship (see `keychain enable` above); this entry is only the hardware-backed tier
 - Team vaults, cloud sync, MCP server, browser extension
-- Real-page browser gates ([P2a] PENDING): treat Stripe `reveal-capture` and Vercel `inject-submit` as best-effort until each provider's manual gate outcome is recorded — the absence proof stays conservatively fail-closed regardless, so "best-effort" means "auto-resume may not succeed on every page", not "the secret may leak"
 - Template argv-vs-`--help` gates ([P2b] PENDING): the shipped templates' argv vectors have not been verified against the current `gh` / `wrangler` / `supabase` `--help` output on a per-release basis
+
+### Provider coverage
+
+What's automated, by provider and direction. Browser recipes drive the page hands-off (one approval); CLI templates push via the vendor CLI. "Real-page verified" is a human-attested dogfood date (CI has no provider creds).
+
+| Provider | Direction | Mechanism | Status | Real-page verified | Notes |
+|---|---|---|---|---|---|
+| Stripe | capture (secret key) | browser recipe | 🆕 this increment | (set on dogfood) | revealable in dashboard |
+| Supabase | capture (service_role) | browser recipe | ⬜ planned | — | revealable in settings/api |
+| OpenAI / Anthropic | capture | human-paste | n/a | n/a | create-once; cannot be revealed |
+| Vercel | inject (env) | browser recipe **and** CLI (`vercel-env-add`) | CLI shipped; recipe 🆕 this increment | (set on dogfood) | CLI push is the robust, project-general default. The increment-1 recipe targets a **single static project URL** (browser-only users / dogfood project); arbitrary-project support needs the deferred URL-param scheme. |
+| GitHub Actions | inject (secret) | CLI (`github-actions-secret-set`) | ✅ shipped | n/a | repo-scoped only |
+| Cloudflare | inject (secret) | CLI (`cloudflare-secret-put`) | ✅ shipped | n/a | |
+| Supabase edge | inject (secret) | CLI (`supabase-edge-secret-set`) | ✅ shipped | n/a | |
+
+The absence proof stays conservatively fail-closed for every mechanism — "best-effort" means "auto-resume may not succeed on every page", never "the secret may leak". Every new provider is a new row.
 - Deferred provider templates (`github-actions-env-secret-set`, `github-actions-org-secret-set`, `railway-variable-set`, `netlify-env-set`, `clerk-env-set`) — see [docs/templates-deferred.md](docs/templates-deferred.md) for the reason and re-open criteria
 - Signed desktop binaries
 - Secret export workflows (rotation and `.env` import ship; export does not)
