@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { ShuttleError } from "../../shared/errors.js";
 import { writeDaemonAudit } from "../audit.js";
 import { attemptRecipeCapture } from "./recipe-capture.js";
+import { runBrowserInject } from "./recipe-inject.js";
 import { recipeRegistry } from "../recipes/registry.js";
 import type { RecipeRegistry } from "../recipes/registry.js";
 import {
@@ -846,18 +847,17 @@ async function runDestinationSteps(
 ): Promise<Array<{ destination: string; ok: boolean; error_code?: string; message?: string }>> {
   const results: Array<{ destination: string; ok: boolean; error_code?: string; message?: string }> = [];
   for (const dest of destinations) {
-    if (dest.kind !== "template") {
-      // browser_inject destinations are dispatched by Task 9's runBrowserInject.
-      // Until that lands, surface as a clear not-implemented error rather than
-      // silently succeeding or crashing.
-      results.push({
-        destination: dest.shorthand,
-        ok: false,
-        error_code: "browser_inject_not_implemented",
-        message: `browser_inject destination "${dest.shorthand}" requires Task 9 dispatcher (not yet implemented)`,
-      });
+    if (dest.kind === "browser_inject") {
+      const recipe = (deps.recipes ?? recipeRegistry).getInject(dest.recipe_host);
+      if (recipe === undefined) {
+        results.push({ destination: dest.shorthand, ok: false, error_code: "recipe_not_found", message: `no inject recipe for ${dest.recipe_host}` });
+        continue;
+      }
+      const r = await runBrowserInject(recipe, ref, deps);
+      results.push({ destination: dest.shorthand, ok: r.ok, ...(r.error_code ? { error_code: r.error_code } : {}), ...(r.message ? { message: r.message } : {}) });
       continue;
     }
+    // dest.kind === "template" — existing CLI push (unchanged)
     try {
       const result = await deps.runTemplate(
         deps.services,

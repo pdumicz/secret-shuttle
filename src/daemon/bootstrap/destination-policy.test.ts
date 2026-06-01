@@ -237,3 +237,8 @@ test("planRequiresCapture: false when all entries have other kinds (random/exist
 test("planRequiresCapture: empty plan returns false", () => {
   assert.strictEqual(planRequiresCapture([]), false);
 });
+
+test("isDestinationProductionClass: browser_inject → true (always prod-class, fail-closed)", () => {
+  const dest = { kind: "browser_inject" as const, recipe_host: "stripe.com", shorthand: "stripe", domain: "stripe.com" };
+  assert.equal(isDestinationProductionClass(dest), true);
+});
