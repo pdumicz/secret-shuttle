@@ -1,12 +1,9 @@
 // src/daemon/bootstrap/recipe-inject.ts
 import { ShuttleError } from "../../shared/errors.js";
 import { disableObservationDomains } from "../chrome/internal-ops.js";
-import { openCaptureTarget } from "../chrome/capture-target-ops.js";
 import {
-  blankTarget,
-  closeTarget,
-  getTargetURL,
-  listTargets,
+  openCaptureTarget,
+  cleanupCaptureTarget,
 } from "../chrome/capture-target-ops.js";
 import { injectWithSuccessGate } from "../chrome/secret-gates.js";
 import { detectPageState, pageStateError, recheckPageScope, runPreSteps } from "../recipes/page-state.js";
@@ -15,45 +12,6 @@ import type { CdpClient } from "../chrome/cdp-client.js";
 
 const PAGE_STATE_CODES = new Set(["bootstrap_login_required", "recipe_page_timeout", "recipe_page_unexpected"]);
 const SUCCESS_TIMEOUT_DEFAULT_MS = 15_000; // mirror inject-submit.ts
-
-/**
- * Local cleanup: blank → verify → close → verify. Returns { verified }.
- * Mirrors the private cleanupCaptureTarget in executor.ts; kept here so
- * recipe-inject.ts is self-contained and doesn't import executor internals.
- */
-async function localCleanupCaptureTarget(
-  cdp: CdpClient,
-  target_id: string,
-): Promise<{ verified: boolean }> {
-  try {
-    await blankTarget(cdp, target_id);
-  } catch {
-    // target may already be closed — confirmed below
-  }
-  try {
-    const url = await getTargetURL(cdp, target_id);
-    if (url !== "about:blank") {
-      const targets = await listTargets(cdp);
-      if (targets.some((t) => t.target_id === target_id)) {
-        // still alive but not blank — not verified
-        return { verified: false };
-      }
-    }
-  } catch {
-    // getTargetURL throws when target is gone — treat as closed/verified
-  }
-  try {
-    await closeTarget(cdp, target_id);
-  } catch {
-    // ignore — may already be closed
-  }
-  try {
-    const targets = await listTargets(cdp);
-    return { verified: !targets.some((t) => t.target_id === target_id) };
-  } catch {
-    return { verified: false };
-  }
-}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function runBrowserInject(recipe: InjectRecipe, ref: string, deps: any): Promise<{ ok: boolean; error_code?: string; message?: string }> {
@@ -65,7 +23,7 @@ export async function runBrowserInject(recipe: InjectRecipe, ref: string, deps: 
   const browser = browserSession.browser;
   const cdp = browserSession.cdp;
   const open: (cdp: CdpClient, url: string) => Promise<{ target_id: string }> = deps.openCaptureTarget ?? openCaptureTarget;
-  const cleanup: (cdp: CdpClient, target_id: string) => Promise<{ verified: boolean }> = deps.cleanupCaptureTarget ?? localCleanupCaptureTarget;
+  const cleanup: (cdp: CdpClient, target_id: string) => Promise<{ verified: boolean }> = deps.cleanupCaptureTarget ?? cleanupCaptureTarget;
 
   services.blind.start(recipe.host, "browser_inject");
   await disableObservationDomains(cdp).catch(() => undefined);

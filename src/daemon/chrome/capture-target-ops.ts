@@ -325,3 +325,79 @@ export async function listTargets(cdp: CdpClient): Promise<TargetSummary[]> {
     .filter((t) => t.type === "page")
     .map((t) => ({ target_id: t.targetId, url: t.url }));
 }
+
+/**
+ * Cleanup helper (C11 spec §3): blank the target → verify blank → close → verify close.
+ *
+ * The "verified" boolean is the entire cleanup outcome the executor cares
+ * about: it gates auto-resume of blind mode (verified ⇒ safe to resume; not
+ * verified ⇒ leave blind active so a residual on-page value can't be observed
+ * by the resumed agent).
+ *
+ * Verification semantics:
+ *   - After blankTarget: re-read the URL via getTargetURL. The target is
+ *     considered blank iff the URL is "about:blank" OR the target is no
+ *     longer in listTargets (Chrome closed it under us, e.g. user manually
+ *     closed the tab while the executor was awaiting the capture).
+ *   - After closeTarget: re-read listTargets. The target is considered
+ *     closed iff its id is absent.
+ *
+ * Any throw from blankTarget/closeTarget/getTargetURL/listTargets is treated
+ * as "not verified" — the cleanup couldn't prove the page is clean, so we
+ * must fail closed.
+ */
+export async function cleanupCaptureTarget(cdp: CdpClient, target_id: string): Promise<{ verified: boolean }> {
+  // Step 1 — blank, then verify blank.
+  let blankVerified = false;
+  try {
+    await blankTarget(cdp, target_id);
+  } catch {
+    // navigate may fail if the target was closed externally — treat as
+    // implicitly clean only if listTargets confirms the target is gone.
+  }
+  try {
+    const url = await getTargetURL(cdp, target_id);
+    if (url === "about:blank") {
+      blankVerified = true;
+    } else {
+      // The target may have been closed externally — check listTargets.
+      const targets = await listTargets(cdp);
+      if (!targets.some((t) => t.target_id === target_id)) {
+        blankVerified = true;
+      }
+    }
+  } catch {
+    // getTargetURL throws when the target no longer exists. Confirm via
+    // listTargets so we don't pessimistically fail on a benign close.
+    try {
+      const targets = await listTargets(cdp);
+      if (!targets.some((t) => t.target_id === target_id)) {
+        blankVerified = true;
+      }
+    } catch {
+      blankVerified = false;
+    }
+  }
+
+  if (!blankVerified) {
+    return { verified: false };
+  }
+
+  // Step 2 — close, then verify close.
+  try {
+    await closeTarget(cdp, target_id);
+  } catch {
+    // closeTarget may throw if Chrome already discarded the target. Verify
+    // via listTargets regardless.
+  }
+  try {
+    const targets = await listTargets(cdp);
+    if (!targets.some((t) => t.target_id === target_id)) {
+      return { verified: true };
+    }
+    return { verified: false };
+  } catch {
+    // listTargets failure means we can't prove the target is gone → fail closed.
+    return { verified: false };
+  }
+}
