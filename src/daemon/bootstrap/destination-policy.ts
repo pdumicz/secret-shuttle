@@ -74,7 +74,9 @@ export function planHasProductionDestination(
 export function planRequiresCapture(
   plan: ReadonlyArray<{ source: { kind: string } }>,
 ): boolean {
-  return plan.some((entry) => entry.source.kind === "capture");
+  return plan.some(
+    (entry) => entry.source.kind === "capture" || entry.source.kind === "human_paste",
+  );
 }
 
 /**

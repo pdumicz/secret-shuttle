@@ -10,6 +10,7 @@
 
 export type InferredSource =
   | { kind: "capture"; url: string }
+  | { kind: "human_paste"; url: string }   // create-once / unrevealable: human supplies a key they made; daemon never reveals
   | { kind: "random_32_bytes" }
   | { kind: "random_64_bytes" }  // forward-compat: union member; no rule emits this today
   /**
@@ -44,11 +45,11 @@ const RULES: readonly Rule[] = [
   },
   {
     test: (n) => n === "OPENAI_API_KEY",
-    source: { kind: "capture", url: "https://platform.openai.com/api-keys" },
+    source: { kind: "human_paste", url: "https://platform.openai.com/api-keys" },
   },
   {
     test: (n) => n === "ANTHROPIC_API_KEY",
-    source: { kind: "capture", url: "https://console.anthropic.com/settings/keys" },
+    source: { kind: "human_paste", url: "https://console.anthropic.com/settings/keys" },
   },
   {
     test: (n) => n.startsWith("CLERK_"),

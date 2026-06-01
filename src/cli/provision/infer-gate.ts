@@ -21,6 +21,7 @@ export interface InferredPlanEntry {
   ref: string;
   source:
     | { kind: "capture"; url?: string }
+    | { kind: "human_paste"; url?: string }
     | { kind: "random_32_bytes" }
     | { kind: "random_64_bytes" }
     | { kind: "existing"; placeholder: boolean; ref?: string }
@@ -48,17 +49,17 @@ export function isInferYmlExecutable(entries: InferredPlanEntry[]): InferGateRes
 
   for (const e of entries) {
     if (e.source.kind === "unknown") {
-      issues.push({ secret: e.secret, issue: "source: unknown — pick a kind (capture, random_32_bytes, existing)" });
+      issues.push({ secret: e.secret, issue: "source: unknown — pick a kind (capture, human_paste, random_32_bytes, existing)" });
       continue;
     }
-    if (e.source.kind === "capture") {
+    if (e.source.kind === "capture" || e.source.kind === "human_paste") {
       if (typeof e.source.url !== "string" || e.source.url.length === 0) {
-        issues.push({ secret: e.secret, issue: "capture source missing required url" });
+        issues.push({ secret: e.secret, issue: `${e.source.kind} source missing required url` });
         continue;
       }
       const urlCheck = validateCaptureUrl(e.source.url);
       if (!urlCheck.ok) {
-        issues.push({ secret: e.secret, issue: `capture url invalid: ${urlCheck.reason}` });
+        issues.push({ secret: e.secret, issue: `${e.source.kind} url invalid: ${urlCheck.reason}` });
         continue;
       }
     }

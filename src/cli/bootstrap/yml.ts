@@ -5,6 +5,7 @@ import { parseSecretRef } from "../../shared/refs.js";
 
 export type BootstrapSource =
   | { kind: "capture"; url: string; expected_host: string }
+  | { kind: "human_paste"; url: string; expected_host: string }
   | { kind: "random_32_bytes" }
   | { kind: "random_64_bytes" }
   | { kind: "existing"; ref: string };
@@ -66,9 +67,9 @@ function parseSource(secretName: string, raw: unknown): BootstrapSource {
   }
   const s = raw as Record<string, unknown>;
   const kind = s.kind;
-  if (kind === "capture") {
+  if (kind === "capture" || kind === "human_paste") {
     if (typeof s.url !== "string" || s.url.length === 0) {
-      fail(`secrets.${secretName}.source: kind=capture requires url`);
+      fail(`secrets.${secretName}.source: kind=${kind} requires url`);
     }
     // Strict URL validation. These checks use bootstrap_capture_url_invalid
     // (not the generic bootstrap_plan_invalid) so the CLI can surface a
@@ -81,7 +82,7 @@ function parseSource(secretName: string, raw: unknown): BootstrapSource {
         `secrets.${secretName}.source.url ${result.reason}`,
       );
     }
-    return { kind: "capture", url: s.url, expected_host: result.host };
+    return { kind, url: s.url, expected_host: result.host };
   }
   if (kind === "random_32_bytes") return { kind: "random_32_bytes" };
   if (kind === "random_64_bytes") return { kind: "random_64_bytes" };
@@ -112,7 +113,7 @@ function parseSource(secretName: string, raw: unknown): BootstrapSource {
     return { kind: "existing", ref: parsed.ref };
   }
   fail(
-    `secrets.${secretName}.source.kind: unknown "${String(kind)}" (allowed: capture, random_32_bytes, random_64_bytes, existing)`,
+    `secrets.${secretName}.source.kind: unknown "${String(kind)}" (allowed: capture, human_paste, random_32_bytes, random_64_bytes, existing)`,
   );
 }
 

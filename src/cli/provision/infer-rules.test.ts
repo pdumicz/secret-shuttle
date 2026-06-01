@@ -26,16 +26,27 @@ test("SUPABASE_SERVICE_ROLE → capture from supabase api page", () => {
   });
 });
 
-test("OPENAI_API_KEY → capture from platform.openai", () => {
+test("OpenAI/Anthropic keys infer human_paste (no reveal, not capture)", () => {
+  for (const name of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]) {
+    const s = inferSourceForName(name);
+    assert.equal(s.kind, "human_paste", `${name} should be human_paste, got ${s.kind}`);
+  }
+});
+
+test("Stripe stays capture (revealable in dashboard)", () => {
+  assert.equal(inferSourceForName("STRIPE_SECRET_KEY").kind, "capture");
+});
+
+test("OPENAI_API_KEY → human_paste with platform.openai url", () => {
   assert.deepEqual(inferSourceForName("OPENAI_API_KEY"), {
-    kind: "capture",
+    kind: "human_paste",
     url: "https://platform.openai.com/api-keys",
   });
 });
 
-test("ANTHROPIC_API_KEY → capture from anthropic console", () => {
+test("ANTHROPIC_API_KEY → human_paste with anthropic console url", () => {
   assert.deepEqual(inferSourceForName("ANTHROPIC_API_KEY"), {
-    kind: "capture",
+    kind: "human_paste",
     url: "https://console.anthropic.com/settings/keys",
   });
 });

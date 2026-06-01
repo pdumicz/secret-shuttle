@@ -244,7 +244,7 @@ function refFor(name: string, source: InferredSource): string {
   }
   // Convention: vault refs use lower-case provider; "stripe", "supabase", "openai", etc.
   // For random/capture we still pick a reasonable namespace.
-  if (source.kind === "capture" && typeof source.url === "string") {
+  if ((source.kind === "capture" || source.kind === "human_paste") && typeof source.url === "string") {
     const host = new URL(source.url).host;
     const providerHint = host.split(".").slice(-2, -1)[0] ?? "local";
     return `ss://${providerHint}/prod/${name}`;
@@ -266,6 +266,9 @@ function renderYml(entries: InferredPlanEntry[]): string {
     // source
     if (e.source.kind === "unknown") {
       lines.push(`    source: { kind: unknown }  # TODO: change to capture/random_32_bytes/existing`);
+    } else if (e.source.kind === "human_paste") {
+      const url = (e.source as { url?: string }).url ?? "";
+      lines.push(`    source: { kind: human_paste, url: "${url}" }  # you supply this key; Secret Shuttle never reveals it`);
     } else if (e.source.kind === "capture") {
       const url = (e.source as any).url;
       if (url) {

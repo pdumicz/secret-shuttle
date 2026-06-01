@@ -2,8 +2,8 @@ import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface BootstrapSource {
-  kind: "capture" | "random_32_bytes" | "random_64_bytes" | "existing";
-  url?: string;       // for capture
+  kind: "capture" | "human_paste" | "random_32_bytes" | "random_64_bytes" | "existing";
+  url?: string;       // for capture / human_paste
   ref?: string;       // for existing
 }
 

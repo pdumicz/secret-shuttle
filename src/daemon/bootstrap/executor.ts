@@ -171,7 +171,10 @@ export async function executeBatch(
     // and whether the failure was an explicit abort). The state machine
     // lives in `runCaptureStep`; the outer loop only branches on its
     // outcome.
-    if (entry.source.kind === "capture" && prior?.ref === undefined) {
+    if (
+      (entry.source.kind === "capture" || entry.source.kind === "human_paste") &&
+      prior?.ref === undefined
+    ) {
       const ctx: CaptureStepContext = {
         state,
         batchId,
