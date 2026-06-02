@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+_No changes yet._
+
+## 0.5.0 — 2026-06-02
+
 ### Added — Recipe URL interpolation
 
 - **`browser_inject` recipe URL is now templatable.** Recipe `url` carries `{name}` placeholders (e.g., `https://vercel.com/{team}/{project}/settings/environment-variables`); users supply `url_params: { team, project }` per destination in their yml. The Vercel inject recipe flips from a `TEAM_PLACEHOLDER`/`PROJECT_PLACEHOLDER` literal URL to the templated form — addressable for any user's Vercel team+project (selectors still pending real-page dogfood; URL addressability is decoupled).

@@ -36,7 +36,7 @@ export function buildProgram(): Command {
     .description(
       "Local-daemon CLI for AI coding agents.\nAGENT QUICKSTART: read skills/secret-shuttle/SKILL.md or run `secret-shuttle help`.",
     )
-    .version("0.4.0");
+    .version("0.5.0");
 
   program.addCommand(initCommand());
   program.addCommand(browserCommand());
