@@ -5,11 +5,11 @@
   "homepage": "https://github.com/pdumicz/secret-shuttle",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pdumicz/secret-shuttle.git"
+    "url": "git+https://github.com/pdumicz/secret-shuttle.git"
   },
   "type": "module",
   "bin": {
-    "secret-shuttle": "./dist/cli/index.js"
+    "secret-shuttle": "dist/cli/index.js"
   },
   "files": [
     "dist",
