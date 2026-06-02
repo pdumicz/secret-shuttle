@@ -172,12 +172,19 @@ export function registerBootstrapRoutes(
       }
       let result: Awaited<ReturnType<typeof executeBatch>>;
       try {
+        // Thread the same recipe registry override into the executor that we
+        // gave the planner (line 60). Without this, an injected non-default
+        // registry that produced a `browser_inject` destination would execute
+        // against the module singleton and surface `recipe_not_found` (or, in
+        // a name-collision case, run the wrong recipe). `exactOptionalPropertyTypes`
+        // is true, so only set the key when defined.
         const deps: ExecutorDeps = {
           generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
           revealCapture: revealCaptureCore as ExecutorDeps["revealCapture"],
           runTemplate: runTemplateCore as ExecutorDeps["runTemplate"],
           services,
           daemonPortRef,
+          ...(services.recipes !== undefined ? { recipes: services.recipes } : {}),
         };
         result = await executeBatch(services.bootstrapStore, batchId, deps);
       } finally {
@@ -421,13 +428,19 @@ export function registerBootstrapRoutes(
           await services.ensureBootstrapBrowser(batchId);
         }
 
-        // Execute the plan.
+        // Execute the plan. Thread the same recipe registry override the
+        // planner used (line 60) so a /continue against an injected non-default
+        // registry doesn't fall back to the module singleton and surface
+        // `recipe_not_found` for `browser_inject` destinations the planner had
+        // already resolved. `exactOptionalPropertyTypes` is true, so only set
+        // the key when defined.
         const deps: ExecutorDeps = {
           generateSecret: generateSecretCore as ExecutorDeps["generateSecret"],
           revealCapture: revealCaptureCore as ExecutorDeps["revealCapture"],
           runTemplate: runTemplateCore as ExecutorDeps["runTemplate"],
           services,
           daemonPortRef,
+          ...(services.recipes !== undefined ? { recipes: services.recipes } : {}),
         };
         const result = await executeBatch(services.bootstrapStore, batchId, deps);
         // Burst 5 §4 Task 4.5: surface batch_status + an agent-actionable

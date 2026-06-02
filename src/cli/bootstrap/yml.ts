@@ -157,12 +157,16 @@ function parseDestinations(secretName: string, raw: unknown): { shorthand: strin
     if (obj.url_params === null || typeof obj.url_params !== "object" || Array.isArray(obj.url_params)) {
       fail(`${path}.url_params: must be a mapping of string → string`);
     }
-    const urlParams: Record<string, string> = {};
+    // Use a null-prototype object so a user-supplied `__proto__` key is
+    // preserved as an own property instead of silently mutating the prototype
+    // chain or being dropped. The placeholder grammar allows `{__proto__}`
+    // and the spec says params are arbitrary string keys.
+    const urlParams = Object.create(null) as Record<string, string>;
     for (const [k, v] of Object.entries(obj.url_params as Record<string, unknown>)) {
       if (typeof v !== "string") {
         fail(`${path}.url_params.${k}: value must be a string (got ${typeof v})`);
       }
-      urlParams[k] = v;
+      Object.defineProperty(urlParams, k, { value: v, enumerable: true, writable: true, configurable: true });
     }
     out.push({ shorthand: obj.shorthand, url_params: urlParams });
   }
