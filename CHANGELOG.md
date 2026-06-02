@@ -2,7 +2,24 @@
 
 ## Unreleased
 
-_No changes yet._
+### Added — Recipe URL interpolation
+
+- **`browser_inject` recipe URL is now templatable.** Recipe `url` carries `{name}` placeholders (e.g., `https://vercel.com/{team}/{project}/settings/environment-variables`); users supply `url_params: { team, project }` per destination in their yml. The Vercel inject recipe flips from a `TEAM_PLACEHOLDER`/`PROJECT_PLACEHOLDER` literal URL to the templated form — addressable for any user's Vercel team+project (selectors still pending real-page dogfood; URL addressability is decoupled).
+- **yml destination grammar extended.** Each entry in `destinations:` is now EITHER a string shorthand (back-compat, identical behavior) OR a `{ shorthand, url_params? }` object. Unknown object keys, missing/non-string `shorthand`, non-mapping `url_params`, and non-string `url_params` values all fail-closed with `bootstrap_plan_invalid`.
+- **`recipe_url_params_missing` error code.** Thrown by the new `interpolateUrl` helper when any `{name}` placeholder has no own-property non-empty string in `params` (covers missing keys, inherited properties like `toString`, non-strings, and empty strings — empty strings would otherwise produce malformed URL path segments). `runBrowserInject` converts the throw into a per-destination `{ ok: false, error_code }` so a bad `url_params` on destination N reports as a destination-N failure without aborting destinations N+1…M. Interpolation runs BEFORE any browser side-effect (no `blind.start`, no `open`, no CDP filtering) so a config-only failure cannot leave a half-state.
+
+### Removed — `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES` allowlist (cleanup)
+
+- The env-var allowlist Burst 8 Task 14 introduced (§200 scope-specific coverage guard) is gone. It existed to prevent the static-URL recipe from silently pushing a user's secret into the dogfood project URL. With URL interpolation, the recipe addresses the user's actual project — or fails-closed with `recipe_url_params_missing`. The hazard is structurally closed; the gate became friction.
+- Files affected: `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES` env read in `src/daemon/api/routes/bootstrap.ts`, the `destinationCovered` helper + its tests, `PlanSelection.coversDestination`, and the §200 host-only-insufficient plan test — all removed.
+
+### Behavior change (string-form yml + Vercel CLI absent)
+
+Before this release, a string-form `vercel:<env>` destination with the Vercel CLI absent would either (a) be kept on the CLI template path by `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES` (and then fail later with a CLI-missing error) or (b) return `browser_inject_not_implemented` from the Burst 8 stub. After this release, the same destination selects `browser_inject` and fails-closed with `recipe_url_params_missing` because the string form supplies no `url_params`.
+
+**Two ways to fix an existing setup:**
+1. Install + authenticate the vendor CLI (`vercel login`) so the template path activates as before. OR
+2. Convert the destination to object form and supply the params: `{ shorthand: "vercel:production", url_params: { team: "acme", project: "my-app" } }` so the browser recipe routes correctly.
 
 ## 0.4.0 — 2026-06-02
 
