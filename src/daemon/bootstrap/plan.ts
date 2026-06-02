@@ -17,10 +17,9 @@ interface VaultLike {
 
 export interface PlanSelection {
   recipes?: RecipeRegistry;
-  /** True iff the vendor CLI for this template_id is usable. Default () => true. */
+  /** True iff the vendor CLI for this template_id is usable. Default () => true
+   *  preserves today's CLI-always behavior (never auto-picks browser_inject). */
   isCliConfigured?: (templateId: string) => boolean;
-  /** §200 coverage gate. Default () => false. */
-  coversDestination?: (recipeHost: string, domain: string, shorthand: string) => boolean;
 }
 
 export function computeBootstrapPlan(
@@ -31,7 +30,6 @@ export function computeBootstrapPlan(
 ): PlanEntry[] {
   const recipes = selection.recipes ?? recipeRegistry;
   const isCliConfigured = selection.isCliConfigured ?? (() => true);
-  const coversDestination = selection.coversDestination ?? (() => false);
 
   const out: PlanEntry[] = [];
   for (const s of parsed.secrets) {
@@ -40,28 +38,26 @@ export function computeBootstrapPlan(
         ? s.source.ref
         : buildSecretRef(ctx.source, canonicalEnvironment(ctx.environment), s.name);
 
-    // The vault.has() diff only makes sense for source kinds that *create* a new
-    // secret (random_*, capture). For source: existing the ref is in the vault
-    // by definition — the entire purpose is to push the existing secret to its
-    // destinations. Skipping it would drop all destinations silently.
     if (s.source.kind !== "existing" && !ctx.force && vault.has(ref)) {
       continue;
     }
 
     const destinations: ResolvedDestination[] = s.destinations.map((entry) => {
-      const shorthand = entry.shorthand;
-      const r = resolveDestinationShorthand(shorthand, s.name);
+      const r = resolveDestinationShorthand(entry.shorthand, s.name);
       const injectRecipe = recipes.getInject(canonicalHost(r.domain));
-      if (
-        injectRecipe !== undefined &&
-        !isCliConfigured(r.template_id) &&
-        coversDestination(injectRecipe.host, r.domain, shorthand)
-      ) {
-        return { kind: "browser_inject" as const, recipe_host: injectRecipe.host, shorthand, domain: r.domain };
+      if (injectRecipe !== undefined && !isCliConfigured(r.template_id)) {
+        return {
+          kind: "browser_inject" as const,
+          recipe_host: injectRecipe.host,
+          shorthand: entry.shorthand,
+          domain: r.domain,
+          // OMIT url_params when undefined (§3 rule). Spread-on-defined idiom.
+          ...(entry.url_params !== undefined ? { url_params: entry.url_params } : {}),
+        };
       }
       return {
         kind: "template" as const,
-        shorthand,
+        shorthand: entry.shorthand,
         template_id: r.template_id,
         template_params: r.template_params,
         domain: r.domain,
@@ -73,10 +69,6 @@ export function computeBootstrapPlan(
       ref,
       source: { ...s.source } as BootstrapSource,
       destinations,
-      // Only set force when the entry would have been filtered out without
-      // --force. For source: existing, force is irrelevant (no generation runs).
-      // For sources that create a secret: force=true only when the ref already
-      // exists in the vault and the user passed --force; otherwise omit.
       ...(s.source.kind !== "existing" && ctx.force && vault.has(ref) ? { force: true } : {}),
     });
   }

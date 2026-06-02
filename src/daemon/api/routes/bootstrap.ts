@@ -22,18 +22,6 @@ import { runTemplateCore } from "./templates.js";
 import { planHasProductionDestination, planHasProductionSource, planRequiresBootstrapBrowser, planRequiresHumanPending } from "../../bootstrap/destination-policy.js";
 import { canonicalEnvironment } from "../../../shared/refs.js";
 
-/**
- * §200 coverage predicate. `coveredScopes` holds `<recipe-host>:<shorthand>` keys.
- * Host-only entries (no `:shorthand`) NEVER match — coverage is scope-specific.
- */
-export function destinationCovered(
-  coveredScopes: ReadonlySet<string>,
-  recipeHost: string,
-  shorthand: string,
-): boolean {
-  return coveredScopes.has(`${recipeHost.toLowerCase()}:${shorthand.trim().toLowerCase()}`);
-}
-
 export function registerBootstrapRoutes(
   server: DaemonServer,
   services: DaemonServices,
@@ -64,22 +52,12 @@ export function registerBootstrapRoutes(
     }
     const isCliConfigured = (templateId: string): boolean => cliAvail.get(templateId) ?? true;
 
-    // §200 scope-specific allowlist: SECRET_SHUTTLE_INJECT_RECIPE_SCOPES is a
-    // comma-separated list of "<recipe-host>:<shorthand>" keys. Host-only entries
-    // are never matched — coverage requires the exact scope.
-    const coveredScopes = new Set(
-      (process.env["SECRET_SHUTTLE_INJECT_RECIPE_SCOPES"] ?? "")
-        .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0),
-    );
-    const coversDestination = (recipeHost: string, _domain: string, shorthand: string): boolean =>
-      destinationCovered(coveredScopes, recipeHost, shorthand);
-
     // Diff against vault — skip secrets already present (unless force).
     const plan = computeBootstrapPlan(
       parsed,
       { has: (ref: string) => existingRefs.has(ref) },
       { force, source: "local", environment },
-      { isCliConfigured, coversDestination },
+      { isCliConfigured },
     );
 
     // Nothing to do: short-circuit with success.

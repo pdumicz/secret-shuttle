@@ -1744,20 +1744,3 @@ secrets:
   });
 });
 
-// ── Task 14: destinationCovered unit tests (§200 scope-specific allowlist) ──
-
-import { destinationCovered } from "./bootstrap.js";
-
-test("scope-specific opt-in covers exactly the named scope", () => {
-  const scopes = new Set(["vercel.com:vercel:production"]);
-  assert.equal(destinationCovered(scopes, "vercel.com", "vercel:production"), true);
-});
-test("host-only opt-in is INSUFFICIENT — bare host never covers any scope (§200 guard)", () => {
-  const scopes = new Set(["vercel.com"]);
-  assert.equal(destinationCovered(scopes, "vercel.com", "vercel:production"), false);
-  assert.equal(destinationCovered(scopes, "vercel.com", "vercel:preview"), false);
-});
-test("a named scope does NOT leak to a sibling scope on the same host", () => {
-  const scopes = new Set(["vercel.com:vercel:production"]);
-  assert.equal(destinationCovered(scopes, "vercel.com", "vercel:preview"), false);
-});

@@ -23,28 +23,67 @@ const parsedSelection: BootstrapPlan = {
 const vaultEmpty = { has: () => false };
 const ctxProd = { source: "local", environment: "production", force: false };
 
-test("browser_inject chosen when recipe exists AND CLI absent AND destination covered", () => {
-  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => false, coversDestination: () => true });
+test("browser_inject chosen when recipe exists AND CLI absent", () => {
+  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => false });
   assert_strict.equal(plan[0]!.destinations[0]!.kind, "browser_inject");
   assert_strict.equal((plan[0]!.destinations[0] as { recipe_host?: string }).recipe_host, "vercel.com");
 });
-test("template kept when destination NOT covered by the recipe URL (recipe exists, CLI absent) — §200 guard", () => {
-  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => false, coversDestination: () => false });
+test("template kept when the CLI IS configured (even though a recipe exists)", () => {
+  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => true });
   assert_strict.equal(plan[0]!.destinations[0]!.kind, "template");
   assert_strict.equal((plan[0]!.destinations[0] as { template_id?: string }).template_id, "vercel-env-add");
 });
-test("template kept when the CLI IS configured (even though a recipe exists + covered)", () => {
-  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => true, coversDestination: () => true });
-  assert_strict.equal(plan[0]!.destinations[0]!.kind, "template");
-  assert_strict.equal((plan[0]!.destinations[0] as { template_id?: string }).template_id, "vercel-env-add");
-});
-test("template kept when no inject recipe exists (CLI absent + would-be covered)", () => {
-  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: new RecipeRegistry(), isCliConfigured: () => false, coversDestination: () => true });
+test("template kept when no inject recipe exists (CLI absent)", () => {
+  const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd, { recipes: new RecipeRegistry(), isCliConfigured: () => false });
   assert_strict.equal(plan[0]!.destinations[0]!.kind, "template");
 });
-test("default (no selection deps) keeps template — safe back-compat (coverage never assumed)", () => {
+test("default (no selection deps) keeps template — safe back-compat (CLI defaults to configured)", () => {
   const plan = computeBootstrapPlan(parsedSelection, vaultEmpty, ctxProd);
   assert_strict.equal(plan[0]!.destinations[0]!.kind, "template");
+});
+
+test("url_params from object-form yml destination flows onto browser_inject variant", () => {
+  const parsed: BootstrapPlan = {
+    version: 1,
+    secrets: [{
+      name: "APP_SECRET",
+      source: { kind: "random_32_bytes" },
+      destinations: [{ shorthand: "vercel:production", url_params: { team: "acme", project: "my-app" } }],
+    }],
+  };
+  const plan = computeBootstrapPlan(parsed, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => false });
+  assert.equal(plan[0]!.destinations[0]!.kind, "browser_inject");
+  assert.deepEqual((plan[0]!.destinations[0] as { url_params?: Record<string, string> }).url_params, { team: "acme", project: "my-app" });
+});
+
+test("string-form yml destination → browser_inject variant with url_params field ABSENT (not {}; §3 OMITTED rule)", () => {
+  const parsed: BootstrapPlan = {
+    version: 1,
+    secrets: [{
+      name: "APP_SECRET",
+      source: { kind: "random_32_bytes" },
+      destinations: [{ shorthand: "vercel:production" }],
+    }],
+  };
+  const plan = computeBootstrapPlan(parsed, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => false });
+  const dest = plan[0]!.destinations[0]!;
+  assert.equal(dest.kind, "browser_inject");
+  // Critical: url_params must NOT be a key on the object at all (not {}). Distinguishes
+  // "user supplied none" from "user supplied empty record".
+  assert.equal("url_params" in dest, false, "url_params must be OMITTED on the persisted variant");
+});
+
+test("string-form destination → template variant when CLI configured (unchanged behavior)", () => {
+  const parsed: BootstrapPlan = {
+    version: 1,
+    secrets: [{
+      name: "APP_SECRET",
+      source: { kind: "random_32_bytes" },
+      destinations: [{ shorthand: "vercel:production" }],
+    }],
+  };
+  const plan = computeBootstrapPlan(parsed, vaultEmpty, ctxProd, { recipes: reg(), isCliConfigured: () => true });
+  assert.equal(plan[0]!.destinations[0]!.kind, "template");
 });
 
 interface MockVault {
