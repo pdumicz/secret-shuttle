@@ -6,7 +6,7 @@ _No changes yet._
 
 ## 0.4.0 — 2026-06-02
 
-First publish to npm (`secret-shuttle@beta`). Bundles two burst-level efforts:
+First publish to npm. Bundles two burst-level efforts:
 
 ### Added (Burst 8 — Honest Hands-Off Magic Path)
 

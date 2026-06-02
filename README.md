@@ -33,12 +33,10 @@ context — that's the gap this closes.
 ## 30-Second Install
 
 ```bash
-npx secret-shuttle@beta init
+npx secret-shuttle init
 ```
 
 This starts the local daemon and walks you through creating a vault passphrase in a local web window that only the daemon owns — the CLI never reads it. (Touch ID isn't a first-run prompt: it's how *later* unlocks work once the vault key is enrolled in the OS keychain. `init` enrols the keychain by default when it creates the vault — pass `--no-keychain` to opt out, or run `secret-shuttle keychain enable` later.) After `init` completes the daemon is running and you are ready to use the CLI or hand it to an agent.
-
-> **Why `@beta`?** Secret Shuttle is published to npm under the `beta` dist-tag (`npm install secret-shuttle@beta`). The CLI, vault, and CLI-template push paths (Vercel / GitHub Actions / Cloudflare / Supabase) are production-ready. The browser-recipe path (Stripe capture, Vercel inject) is plumbed end-to-end and gated behind `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES` — but its selectors and the Vercel target URL are pending real-page dogfood verification (the recipes ship with explicit placeholder markers). See the Provider coverage matrix below.
 
 ## For Agents
 

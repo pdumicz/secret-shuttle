@@ -13,8 +13,8 @@ You work with refs (`ss://stripe/prod/STRIPE_WEBHOOK_SECRET`); the daemon resolv
 ## 30-second quickstart
 
 ```bash
-# One-time per project (beta release — published as secret-shuttle@beta on npm):
-npx secret-shuttle@beta init
+# One-time per project:
+npx secret-shuttle init
 
 # Provision an entire project's secrets in one approval:
 secret-shuttle provision --infer
