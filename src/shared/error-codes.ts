@@ -428,6 +428,10 @@ const REGISTRY: Record<string, ErrorCodeEntry> = {
     exitCode: EXIT_CODE_NOT_FOUND,
     hint: () => "No recipe is registered for this provider host/direction.",
   },
+  recipe_url_params_missing: {
+    exitCode: EXIT_CODE_USAGE,
+    hint: () => "Add the missing url_params to the destination in your yml.",
+  },
 
 };
 

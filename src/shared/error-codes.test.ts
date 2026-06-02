@@ -175,12 +175,13 @@ test("registry total entry count (sanity check)", () => {
   // Plan 6 Task 1 adds 7 more recipe codes (recipe_selector_ambiguous,
   // recipe_capture_failed, bootstrap_login_required, recipe_page_timeout,
   // recipe_page_unexpected, recipe_inject_failed, recipe_not_found) = 158 total.
+  // Plan 7 Task 1 adds 1 more recipe code (recipe_url_params_missing) = 159 total.
   // Note: daemon_start_failed was removed (P3.1) — it was registered but never
   // thrown; init startup failures surface daemon_start_timeout instead.
   // Catches accidental duplicate keys, dropped entries, or unreviewed
   // expansions.
   const codes = listKnownErrorCodes();
-  assert.equal(codes.length, 158, `expected 158 registry entries, got ${codes.length}`);
+  assert.equal(codes.length, 159, `expected 159 registry entries, got ${codes.length}`);
 
   // Spot-check a representative slice — one entry per exit-code class.
   for (const c of ["daemon_not_running", "missing_param", "secret_not_found", "approval_denied", "secret_exists"]) {
@@ -452,6 +453,7 @@ test("recipe error codes are registered", () => {
     "recipe_page_unexpected",
     "recipe_inject_failed",
     "recipe_not_found",
+    "recipe_url_params_missing",
   ]) {
     const entry = lookupErrorCode(code);
     assert.ok(entry !== null, `missing ${code}`);
