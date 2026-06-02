@@ -36,19 +36,23 @@ Today destinations are parsed as a list of strings (`destinations: ["vercel:prod
 
 ```yaml
 secrets:
-  - name: STRIPE_SECRET_KEY
+  STRIPE_SECRET_KEY:
     source: { kind: capture, url: "https://dashboard.stripe.com/apikeys" }
     destinations:
-      - vercel:production                                                       # string form (back-compat) — empty url_params
+      - vercel:production                                                       # string form (back-compat) — url_params absent
       - shorthand: vercel:preview                                                # object form
         url_params: { team: "acme", project: "my-app" }
 ```
 
-**Parser rule:** string ⇒ `{shorthand, url_params: {}}`. Object ⇒ `{shorthand: required, url_params: optional}`. Object without `url_params` is identical to the string form for the same shorthand. Object with extra unknown keys → `bootstrap_plan_invalid` (the error code `yml.ts`'s `fail()` already throws for every other yml-structural error) — fail loud, don't silently drop unrecognized fields.
+(The top-level `secrets` mapping shape — keyed by secret name — is the existing yml schema; this spec only extends the per-entry `destinations` list grammar.)
 
-**Parser-side type change.** Today `BootstrapPlanSecret.destinations` is `string[]` (yml.ts:16). After this spec it becomes `{ shorthand: string; url_params?: Record<string, string> }[]` — yml strings are normalized to objects at parse time so downstream consumers (`computeBootstrapPlan` + everything below) see a uniform shape and never branch on input form. Field name `shorthand` mirrors the existing `ResolvedDestination.shorthand` so renames stay consistent across the bootstrap pipeline.
+**Parser rule:** string ⇒ `{ shorthand }` (no `url_params` key). Object ⇒ `{shorthand: required, url_params: optional}`. Object without `url_params` is identical to the string form for the same shorthand. Object with extra unknown keys → `bootstrap_plan_invalid` (the error code `yml.ts`'s `fail()` already throws for every other yml-structural error) — fail loud, don't silently drop unrecognized fields.
+
+**Parser-side type change.** Today `BootstrapPlanSecret.destinations` is `string[]` (yml.ts:16). After this spec it becomes `{ shorthand: string; url_params?: Record<string, string> }[]` — yml strings are normalized to objects at parse time so downstream consumers (`computeBootstrapPlan` + everything below) see a uniform shape and never branch on input form. `url_params` is OMITTED (not normalized to `{}`) when absent so the persisted batch state stays minimal and "user supplied params" remains distinguishable from "user supplied none". Field name `shorthand` mirrors the existing `ResolvedDestination.shorthand` so renames stay consistent across the bootstrap pipeline.
 
 **`url_params` value shape:** `Record<string, string>`. Keys and values are arbitrary strings the user controls. Validation is "is it a string?"; the recipe's URL placeholders dictate which keys actually matter at substitution time. Extra keys in `url_params` that the recipe doesn't reference are silently ignored (forward-compat at the substitution layer: a recipe gaining a new placeholder doesn't break users who pre-supplied an unused key). Note the asymmetry: extras INSIDE `url_params` are silent (substitution-time forward-compat), extras at the DESTINATION-OBJECT level are loud (`bootstrap_plan_invalid` — destination grammar is closed-vocabulary).
+
+**Parser-side schema validation for `url_params`.** The yml parser MUST reject malformed `url_params` at parse time with `bootstrap_plan_invalid` — schema validation belongs in the parser, not deferred to the runtime helper. Reject: `url_params` that is not a plain mapping (e.g., a string, a number, a list); any member value whose `typeof` is not `"string"` (numbers, booleans, nulls, nested mappings, lists). The `interpolateUrl` helper's defensive hasOwn + typeof checks (§5) are a belt-and-suspenders runtime guard against unexpected shapes (e.g., programmatically constructed plans, future callers), NOT a substitute for upfront schema rejection. See §9 for the yml parser rejection tests.
 
 ## §4 Pipeline (data flow)
 
@@ -68,18 +72,24 @@ local ResolvedDestination { template_id, template_params, domain }
    │       → { kind: "template", template_id, template_params, shorthand, domain }
 store.ts ResolvedDestination (the union)
    │
-   ▼ runDestinationSteps → runBrowserInject(recipe, ref, deps) (recipe-inject.ts)
+   ▼ runDestinationSteps → runBrowserInject(recipe, dest, ref, deps) (recipe-inject.ts)
+   │      (executor signature gains `dest` so it can read `dest.url_params`)
    │
    ▼ interpolateUrl(recipe.url, dest.url_params ?? {})  (NEW — recipes/url-template.ts)
-   │    on missing placeholder → throw ShuttleError("recipe_url_params_missing", ...)
+   │    on missing placeholder → return { ok: false, error_code: "recipe_url_params_missing", message }
+   │    (caller short-circuits BEFORE any side-effect; see "Failure-reporting boundary" below)
 interpolatedUrl
    │
    ▼ open(cdp, interpolatedUrl)  (existing)
 ```
 
+**Executor-boundary change.** `runBrowserInject`'s signature gains the `dest` (ResolvedDestination — `browser_inject` variant) parameter so it can read `dest.url_params`. The current signature `runBrowserInject(recipe, ref, deps)` becomes `runBrowserInject(recipe, dest, ref, deps)`. Call site in `runDestinationSteps` passes the already-resolved `dest` it's iterating; no new lookup needed.
+
+**Failure-reporting boundary.** `interpolateUrl` itself throws `ShuttleError("recipe_url_params_missing", …)` (it's a pure helper — throwing is the simplest contract). `runBrowserInject` calls `interpolateUrl` BEFORE any side-effect (`blind.start`, `disableObservationDomains`, `severAgentConnections`, `open`) and converts that throw into a per-destination `{ ok: false, error_code: "recipe_url_params_missing", message }` result. This preserves the destination-loop pattern: a bad `url_params` on destination N reports as a destination-N failure and does NOT abort destinations N+1…M. The recipe-inject tests assert (a) the structured `{ ok: false, error_code }` return shape, (b) zero side-effect markers (no `blind.start` event, no `open` call, no CDP filtering applied) when the interpolation fails.
+
 **Naming-overlap note.** `destination-shorthand.ts` exports a LOCAL `ResolvedDestination` interface (no `kind`, no `shorthand`) that is structurally different from `store.ts`'s `ResolvedDestination` discriminated union. The Task 8 (Burst 8) code-quality reviewer flagged this as a confusing-but-harmless pre-existing collision. This spec does not rename either — keeping the diff focused — but the plan can note it as a deferred cleanup.
 
-**Key invariant:** interpolation runs BEFORE `open(cdp, ...)` and BEFORE any blind/CDP setup (`blind.start`, `disableObservationDomains`, `severAgentConnections`). A missing-param failure surfaces as a clean config error with NO browser side-effects (no tab opens, no blind starts, no CDP filtering applied). Fail-closed by construction. The recipe-inject tests must assert this ordering, not just the throw.
+**Key invariant:** interpolation runs BEFORE `open(cdp, ...)` and BEFORE any blind/CDP setup (`blind.start`, `disableObservationDomains`, `severAgentConnections`). A missing-param failure surfaces as a clean config error with these specific NO side-effects: no tab opens, no blind starts, no CDP filtering applied. The observable bootstrap browser (if one was pre-reserved by the outer bootstrap route) is untouched. Fail-closed by construction. The recipe-inject tests must assert this ordering and side-effect absence, not just the `{ ok: false }` return.
 
 ## §5 The `interpolateUrl` module (`src/daemon/recipes/url-template.ts`)
 
@@ -90,12 +100,21 @@ import { ShuttleError } from "../../shared/errors.js";
 
 /**
  * Substitute `{name}` placeholders in `template` from `params`. Throws
- * `recipe_url_params_missing` if any placeholder has no value in `params`.
+ * `recipe_url_params_missing` if any placeholder has no own-property string
+ * value in `params` (missing keys, inherited properties, non-strings, and
+ * empty strings all count as "missing" — see below).
  *
  * Placeholder grammar: `\{([a-zA-Z_][a-zA-Z0-9_]*)\}` — alphanumeric +
  * underscore, must start with letter or underscore. Same identifier shape as a
  * JavaScript variable, so authors can pick names without worrying about regex
  * escapes or URL-encoding edge cases.
+ *
+ * Validation rule: a placeholder counts as supplied only if `params` has its
+ * OWN property (`Object.prototype.hasOwnProperty`) and the value's `typeof`
+ * is `"string"` AND the string is non-empty. This blocks accidental matches
+ * against inherited members like `toString`/`constructor`, non-string values
+ * the parser shouldn't have let through but we don't trust, and empty strings
+ * (which would produce a malformed URL path segment like `https://vercel.com//my-app/...`).
  *
  * Extra keys in `params` that don't appear in `template` are silently ignored
  * (forward-compat: a recipe author can add a new placeholder later without
@@ -108,8 +127,9 @@ export function interpolateUrl(template: string, params: Record<string, string>)
   const placeholderRe = /\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g;
   const missing: string[] = [];
   const out = template.replace(placeholderRe, (_, name: string) => {
-    const v = params[name];
-    if (v === undefined) {
+    const hasOwn = Object.prototype.hasOwnProperty.call(params, name);
+    const v = hasOwn ? (params as Record<string, unknown>)[name] : undefined;
+    if (!hasOwn || typeof v !== "string" || v === "") {
       missing.push(name);
       return "";
     }
@@ -180,26 +200,34 @@ Add to `src/shared/error-codes.ts`:
 recipe_url_params_missing: { exitCode: EXIT_CODE_USAGE, hint: () => "Add the missing url_params to the destination in your yml." },
 ```
 
-**Category:** USAGE (the user can fix it by editing their yml; not transient; not retryable without action). Matches the existing `bootstrap_yml_invalid` / `bootstrap_capture_url_invalid` pattern.
+**Category:** USAGE (the user can fix it by editing their yml; not transient; not retryable without action). Matches the existing `bootstrap_plan_invalid` / `bootstrap_capture_url_invalid` pattern.
 
 ## §9 Tests
 
 **New:**
-- `src/daemon/recipes/url-template.test.ts` — happy path (one + multiple placeholders + repeated placeholder), missing-key error (one + multiple missing, asserts both names appear in the message), `encodeURIComponent` is applied (input with `/` and space round-trips correctly), no-placeholder template returns input unchanged.
-- `src/daemon/bootstrap/recipe-inject.test.ts` — add: (a) success case with `url_params` substitution (assert the `open` call sees the interpolated URL), (b) missing-param fail-closed case (assert `recipe_url_params_missing` thrown BEFORE any `blind.start` / `open` side-effect).
-- `src/daemon/bootstrap/plan.test.ts` — destination object with `url_params` ⇒ ends up on the `browser_inject` variant with the same params; destination string ⇒ `url_params` absent / empty.
-- `src/cli/bootstrap/yml.test.ts` — object form parses correctly with `url_params`; string form back-compat; object with unknown extra keys → `bootstrap_yml_invalid`.
+- `src/daemon/recipes/url-template.test.ts` — happy path (one + multiple placeholders + repeated placeholder), missing-key error (one + multiple missing, asserts both names appear in the message), inherited-property name is treated as missing (e.g., placeholder `{toString}` does not match `Object.prototype.toString`), non-string value treated as missing, empty-string value treated as missing (asserts the malformed-URL hazard is blocked), `encodeURIComponent` is applied (input with `/` and space round-trips correctly), no-placeholder template returns input unchanged.
+- `src/daemon/bootstrap/recipe-inject.test.ts` — add: (a) success case with `url_params` substitution (assert the `open` call sees the interpolated URL), (b) missing-param fail-closed case (assert `runBrowserInject` returns `{ ok: false, error_code: "recipe_url_params_missing", message }` BEFORE any `blind.start` / `disableObservationDomains` / `severAgentConnections` / `open` side-effect — inspect the recorded events array for the absence of those markers).
+- `src/daemon/bootstrap/plan.test.ts` — destination object with `url_params` ⇒ ends up on the `browser_inject` variant with the same params; destination string ⇒ `url_params` field absent (NOT `{}`; see §3's OMITTED rule).
+- `src/cli/bootstrap/yml.test.ts` — object form parses correctly with `url_params`; string form back-compat; object with unknown extra keys → `bootstrap_plan_invalid` (matches §3 — `yml.ts`'s `fail()` throws `bootstrap_plan_invalid` for every other yml-structural error); object missing `shorthand` field → `bootstrap_plan_invalid`; object `shorthand` as a non-string (number, boolean, null, list, mapping) → `bootstrap_plan_invalid`; object `shorthand` as an empty string → `bootstrap_plan_invalid` (matches string-form validation rigor); `url_params` as a non-mapping (string, number, list) → `bootstrap_plan_invalid`; `url_params` member with a non-string value (number, boolean, null, nested mapping, list) → `bootstrap_plan_invalid`. These parser rejection tests enforce the §3 schema and ensure the `interpolateUrl` defensive checks are not the only line of defense.
 
 **Dropped:**
 - `src/daemon/api/routes/bootstrap.test.ts` — the 3 `destinationCovered` tests.
 - `src/daemon/bootstrap/plan.test.ts` — the host-only-insufficient §200 test.
 
-**Existing tests stay green:** the back-compat string-form yml continues to parse and produce unchanged plans for users who don't add `url_params`.
+**Existing tests stay green for the common case:** the back-compat string-form yml continues to parse, and for users with the CLI configured (the dominant path today) plans are unchanged.
+
+**Documented behavior change (string-form + no CLI).** With the §7 gate reduced to `injectRecipe !== undefined && !isCliConfigured(...)`, an existing string-form destination for a host with an inject recipe (today: only `vercel`) now selects `browser_inject` whenever the CLI is absent. Before this spec, the §200 `coversDestination` allowlist kept those cases on the template path (which itself would fail later with a CLI-missing error). After this spec, the same destination selects `browser_inject` and fails-closed at `runBrowserInject` with `recipe_url_params_missing` because the string form supplies no `url_params`.
+
+This is an intended consequence of removing §200 — the failure mode shifts from "CLI not configured" to "URL params not supplied" — but it IS a user-visible change. Recovery (either path resolves it):
+1. Install + configure the vendor CLI (e.g., `vercel login`) so the template path activates again. OR
+2. Convert the destination to object form and supply `url_params: { team, project }` so the inject recipe routes correctly.
+
+The CHANGELOG entry (§10) must call this out as a behavior change with the two recovery paths spelled out. Any existing tests that asserted "string-form vercel destination on a no-CLI host stays on template" must be updated to assert the new selection + error code instead.
 
 ## §10 Docs
 
 **`README.md` provider matrix (line ~146-147 — the Vercel row):**
-- Status: `CLI shipped; recipe 🆕 ready to use — set url_params: {team, project} in yml` (replaces the "placeholder (not dogfooded)" caveat).
+- Status: `CLI shipped; browser recipe URL-configurable — set url_params: {team, project} in yml (selectors still best-effort, pending dogfood)`. The URL is now addressable for any team/project, but the inject selectors have not yet been verified against a real Vercel page (§6 keeps `verified_against_real_page: "2026-06-01-needs-dogfood"`), so phrase the status as "available / configurable" rather than "ready to use" until that verification lands.
 - Notes column drops the `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES` sentence. The dogfood-pending caveat stays (selectors are still best-effort).
 
 **`README.md`:** anywhere `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES` is mentioned — gone.
@@ -225,7 +253,7 @@ recipe_url_params_missing: { exitCode: EXIT_CODE_USAGE, hint: () => "Add the mis
 
 A `provision --continue` against a yml with a `browser_inject` destination AND `url_params: { team: "<real-team>", project: "<real-project>" }`:
 - Opens `https://vercel.com/<real-team>/<real-project>/settings/environment-variables` in the bootstrap browser (verified by reading `open(cdp, ...)`'s URL arg in a test, AND by an actual dogfood run once selectors are verified).
-- Without `url_params`: throws `recipe_url_params_missing` BEFORE `blind.start` / `open` / `severAgentConnections`. Verified by a test that asserts the throw and inspects the events array for the absence of any side-effect markers.
+- Without `url_params` (or with an empty-string value like `team: ""`): `runBrowserInject` returns `{ ok: false, error_code: "recipe_url_params_missing", message }` BEFORE `blind.start` / `open` / `severAgentConnections`. Verified by a test that asserts the structured result and inspects the events array for the absence of any side-effect markers; the destination loop reports the failure for THIS destination and continues with N+1.
 - `npm test`: 1712+ pass / 0 fail / 18 skipped (baseline preserved + new tests).
 - `git grep SECRET_SHUTTLE_INJECT_RECIPE_SCOPES`: empty (cleanup complete).
 - README Vercel-row status updated.
