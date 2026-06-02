@@ -777,7 +777,7 @@ async function runDestinationSteps(
         results.push({ destination: dest.shorthand, ok: false, error_code: "recipe_not_found", message: `no inject recipe for ${dest.recipe_host}` });
         continue;
       }
-      const r = await runBrowserInject(recipe, ref, deps);
+      const r = await runBrowserInject(recipe, dest, ref, deps);
       results.push({ destination: dest.shorthand, ok: r.ok, ...(r.error_code ? { error_code: r.error_code } : {}), ...(r.message ? { message: r.message } : {}) });
       continue;
     }

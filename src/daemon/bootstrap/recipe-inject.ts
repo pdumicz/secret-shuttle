@@ -7,8 +7,12 @@ import {
 } from "../chrome/capture-target-ops.js";
 import { injectWithSuccessGate } from "../chrome/secret-gates.js";
 import { detectPageState, pageStateError, recheckPageScope, runPreSteps } from "../recipes/page-state.js";
+import { interpolateUrl } from "../recipes/url-template.js";
 import type { InjectRecipe } from "../recipes/types.js";
 import type { CdpClient } from "../chrome/cdp-client.js";
+import type { ResolvedDestination } from "./store.js";
+
+type BrowserInjectDest = Extract<ResolvedDestination, { kind: "browser_inject" }>;
 
 const PAGE_STATE_CODES = new Set(["bootstrap_login_required", "recipe_page_timeout", "recipe_page_unexpected"]);
 const SUCCESS_TIMEOUT_DEFAULT_MS = 15_000; // mirror inject-submit.ts
@@ -48,7 +52,19 @@ async function cleanupAndEndBlind(
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function runBrowserInject(recipe: InjectRecipe, ref: string, deps: any): Promise<{ ok: boolean; error_code?: string; message?: string }> {
+export async function runBrowserInject(recipe: InjectRecipe, dest: BrowserInjectDest, ref: string, deps: any): Promise<{ ok: boolean; error_code?: string; message?: string }> {
+  // INTERPOLATE FIRST — before any side-effect. Convert the helper's throw into a
+  // structured per-destination failure so the destination loop continues.
+  let interpolatedUrl: string;
+  try {
+    interpolatedUrl = interpolateUrl(recipe.url, dest.url_params ?? {});
+  } catch (e) {
+    if (e instanceof ShuttleError && e.code === "recipe_url_params_missing") {
+      return { ok: false, error_code: e.code, message: e.message };
+    }
+    throw e;
+  }
+
   const { services } = deps;
   const browserSession = services.browserSession;
   if (browserSession === null || browserSession === undefined) {
@@ -58,14 +74,15 @@ export async function runBrowserInject(recipe: InjectRecipe, ref: string, deps: 
   const cdp = browserSession.cdp;
   const open: (cdp: CdpClient, url: string) => Promise<{ target_id: string }> = deps.openCaptureTarget ?? openCaptureTarget;
   const cleanup: (cdp: CdpClient, target_id: string) => Promise<{ verified: boolean }> = deps.cleanupCaptureTarget ?? cleanupCaptureTarget;
+  const disableObservationDomainsImpl: (cdp: CdpClient) => Promise<void> = deps.disableObservationDomains ?? disableObservationDomains;
 
   services.blind.start(recipe.host, "browser_inject");
-  await disableObservationDomains(cdp).catch(() => undefined);
+  await disableObservationDomainsImpl(cdp).catch(() => undefined);
   browserSession.proxy?.severAgentConnections();
 
   let target_id: string;
   try {
-    target_id = (await open(cdp, recipe.url)).target_id;
+    target_id = (await open(cdp, interpolatedUrl)).target_id;
   } catch (e) {
     services.blind.end();
     return { ok: false, error_code: e instanceof ShuttleError ? e.code : "unexpected_error", message: e instanceof Error ? e.message : String(e) };
