@@ -175,8 +175,26 @@ test("multiple missing keys → all named in the message (unique, no duplicates)
   );
 });
 
-test("inherited property is treated as missing (no prototype pollution)", () => {
-  // {toString} placeholder must NOT pick up Object.prototype.toString
+test("inherited property is treated as missing (no prototype pollution) — string-valued proto", () => {
+  // CRITICAL: this test must use a STRING-valued inherited property. Using
+  // `{toString}` on `{}` would pass even for a broken implementation that
+  // checked only `typeof v === "string"` (Object.prototype.toString is a
+  // function, so the typeof guard already rejects it). To actually prove the
+  // `Object.prototype.hasOwnProperty` guard is in place, the inherited value
+  // must itself be a string — then ONLY hasOwnProperty discriminates.
+  const proto = { team: "INHERITED_ACME" };
+  const params = Object.create(proto) as Record<string, string>;
+  assert.throws(
+    () => interpolateUrl("/{team}", params),
+    (e: unknown) => isShuttleError(e) && e.code === "recipe_url_params_missing" && /team/.test(e.message),
+  );
+});
+
+test("inherited property is treated as missing (no prototype pollution) — toString function", () => {
+  // Defense-in-depth: {toString} on {} must also throw. (The string-valued
+  // proto test above is the one that actually proves hasOwnProperty is used;
+  // this one is kept because the spec calls out `toString`/`constructor` by
+  // name as the motivating attack surface.)
   assert.throws(
     () => interpolateUrl("/{toString}", {}),
     (e: unknown) => isShuttleError(e) && e.code === "recipe_url_params_missing",
@@ -263,7 +281,7 @@ export function interpolateUrl(template: string, params: Record<string, string>)
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test "dist/daemon/recipes/url-template.test.js"`
-Expected: PASS (10 tests).
+Expected: PASS (11 tests — happy-path × 4, encodeURIComponent, missing × 2, inherited × 2 (string-valued proto + toString), non-string, empty).
 
 - [ ] **Step 5: Commit**
 
@@ -362,7 +380,7 @@ secrets:
   );
 });
 
-test("destination object shorthand as non-string → bootstrap_plan_invalid", () => {
+test("destination object shorthand as non-string (number) → bootstrap_plan_invalid", () => {
   const yml = `
 version: 1
 secrets:
@@ -385,6 +403,132 @@ secrets:
     source: { kind: random_32_bytes }
     destinations:
       - shorthand: ""
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+// Shorthand member: full non-string rejection matrix (spec §9 calls these out by name).
+test("destination object shorthand as boolean → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: true
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination object shorthand as null → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: null
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination object shorthand as list → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: [vercel, production]
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination object shorthand as mapping → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: { provider: vercel, env: production }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+// Shorthand member: full non-string rejection matrix when the destination entry is
+// itself a YAML shorthand (the string-form back-compat path). The parser must reject
+// list / mapping / number / boolean / null at the entry level too, not just inside
+// the object form. (Empty-string string entry is already covered by the
+// "string entries must be non-empty" check in parseDestinations.)
+test("destination entry as bare number (e.g. `- 42`) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - 42
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination entry as bare boolean (e.g. `- true`) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - true
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination entry as bare null (e.g. `- ~`) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - ~
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination entry as bare list → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - [vercel, production]
 `;
   assert.throws(
     () => parseBootstrapYml(yml),
@@ -433,6 +577,89 @@ secrets:
     destinations:
       - shorthand: vercel:production
         url_params: { team: true }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+// url_params top-level: must be a mapping. String is covered above; add number, list.
+test("url_params as non-mapping (number) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: 42
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("url_params as non-mapping (list) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: [team, project]
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+// url_params member: full non-string rejection matrix (spec §9). Number + boolean
+// already covered above; add null, nested mapping, list.
+test("url_params member with null value → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: { team: null }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("url_params member with nested mapping value → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: { team: { nested: acme } }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("url_params member with list value → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: { team: [a, b] }
 `;
   assert.throws(
     () => parseBootstrapYml(yml),
@@ -534,7 +761,7 @@ For each site the compiler flags: make the smallest change that compiles (don't 
 - [ ] **Step 6: Run the full suite (regression check)**
 
 Run: `npm test`
-Expected: PASS — baseline at start of Burst 9 is 1712 pass / 0 fail / 18 skipped; after Tasks 1+2+3 it should be 1712 + (10 url-template tests + 10 new yml tests + 1 error-code test) ≈ 1733 pass.
+Expected: PASS — baseline at start of Burst 9 is 1712 pass / 0 fail / 18 skipped; after Tasks 1+2+3 it should be 1712 + (11 url-template tests + 23 new yml tests + 1 error-code test) ≈ 1747 pass. (Plan-r1 added: 1 url-template hasOwnProperty test + 11 yml rejection-matrix tests covering shorthand boolean/null/list/mapping at both entry and object levels, plus url_params number/list/null/nested-mapping/list. Plan-r2 adds: 2 more shorthand entry-level rejection tests not present in prior count.)
 
 - [ ] **Step 7: Commit**
 
@@ -548,6 +775,8 @@ git commit -m "feat(yml): destinations accept string OR { shorthand, url_params?
 ## Task 4: §200 cleanup + `url_params` flow-through in `computeBootstrapPlan`
 
 This is one coherent change: drop the `coversDestination` allowlist machinery from both the plan and the route, AND wire `url_params` from the parsed yml destination through onto the `browser_inject` variant. Splitting plan.ts and bootstrap.ts across two commits would leave the build broken between them (PlanSelection field removed in one commit but still passed in the other).
+
+> **Atomicity requirement — Tasks 4, 5, 6 MUST land together as a single deployable unit.** Task 4 removes the `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES` allowlist that today blocks the no-CLI Vercel string-form path from selecting `browser_inject` against the static-placeholder URL. The safety argument only holds once Task 5 (interpolation runs BEFORE any side-effect, fail-closed on missing params) AND Task 6 (Vercel URL flips to `{team}/{project}` placeholders) are also in place — otherwise the intermediate state lets a no-CLI Vercel destination select `browser_inject` while the recipe still has the static dogfood URL. The per-task commits in this plan are LOCAL checkpoints only. Do NOT cut a release, push to main, or otherwise deploy after Tasks 4 / 4-5 alone. Either land Tasks 4-6 as a single squashed merge, or hold the branch unmerged until Task 6 commits.
 
 **Files:**
 - Modify: `src/daemon/bootstrap/plan.ts`
@@ -744,10 +973,10 @@ Remove the `import { destinationCovered } from "./bootstrap.js"` line at the top
 Run: `npm run typecheck && npm run build && SECRET_SHUTTLE_NO_OPEN_URL=1 node --test "dist/daemon/bootstrap/plan.test.js" "dist/daemon/api/routes/bootstrap.test.js"`
 Expected: PASS.
 
-- [ ] **Step 8: Run the full suite (catch anything else that relied on the gate)**
+- [ ] **Step 8: Run the full suite (plan-level selection tests only)**
 
 Run: `npm test`
-Expected: PASS. Watch for any test elsewhere that asserted "string-form vercel destination on no-CLI host stays on template" — per spec §9 "Documented behavior change", those expectations have shifted. Such a test would now fail with the destination resolving to `browser_inject`. Update it to assert the new selection + the eventual `recipe_url_params_missing` failure (Task 5 wires that up). If the existing test is purely about plan-time selection (no actual `runBrowserInject` call), just update the expected `kind` to `"browser_inject"` and don't add a Task-5-dependent assertion.
+Expected: PASS for plan-level selection tests. Watch for any test elsewhere that asserted "string-form vercel destination on no-CLI host stays on template" — per spec §9 "Documented behavior change", those expectations have shifted. Such a test would now fail with the destination resolving to `browser_inject`. For plan-time-only tests (no actual `runBrowserInject` call), just update the expected `kind` to `"browser_inject"` — do NOT add assertions about the eventual `recipe_url_params_missing` failure yet (Task 5 wires interpolation; Task 6 flips the Vercel URL to a templated form where the error becomes possible). Executor/e2e tests that exercise the full stack will update when Task 5 lands interpolation and Task 6 lands the placeholder URL.
 
 - [ ] **Step 9: Commit**
 
@@ -774,7 +1003,7 @@ const dest = { kind: "browser_inject" as const, recipe_host: recipe.host, shorth
 // then: await runBrowserInject(recipe, dest, "ss://stripe/prod/X", deps);
 ```
 
-The existing tests don't supply `url_params`, so `dest.url_params` is undefined. For those tests to keep passing, the recipe.url must have NO placeholders (Task 7 flips Vercel's URL to `{team}/{project}` — but the test fixture in recipe-inject.test.ts defines its OWN `recipe` constant with a placeholder-free URL like `https://vercel.test/env`, so no interpolation needed). Verify by reading the file's recipe fixture and confirming the URL has no `{name}` tokens.
+The existing tests don't supply `url_params`, so `dest.url_params` is undefined. For those tests to keep passing, the recipe.url must have NO placeholders (Task 6 flips Vercel's URL to `{team}/{project}` — but the test fixture in recipe-inject.test.ts defines its OWN `recipe` constant with a placeholder-free URL like `https://vercel.test/env`, so no interpolation needed). Verify by reading the file's recipe fixture and confirming the URL has no `{name}` tokens.
 
 - [ ] **Step 2: Add 2 new tests**
 
@@ -815,6 +1044,13 @@ test("missing url_params: fail-closed with recipe_url_params_missing + ZERO side
     ...recipe,
     url: "https://vercel.test/{team}/{project}/env",
   };
+  // makeDeps must record EVERY side-effect surface runBrowserInject reaches before
+  // the open() call: blind.start, disableObservationDomains, severAgentConnections,
+  // openCaptureTarget. The spec (§5 / interpolation-first guarantee) requires
+  // interpolation to throw BEFORE any of these fire. See the makeDeps update in
+  // Step 0 below — recordable markers are: "blind.start", "blind.end", "open",
+  // "severAgentConnections", "disableObservationDomains", "cleanup(close)",
+  // "inject", "submit", "proveAbsence", "markUsed".
   const { events, deps } = makeDeps({ present: new Set() });
   const dest = {
     kind: "browser_inject" as const,
@@ -828,18 +1064,34 @@ test("missing url_params: fail-closed with recipe_url_params_missing + ZERO side
   assert.equal(r.error_code, "recipe_url_params_missing");
   assert.match(r.message ?? "", /team/); // both missing placeholders named in the message
   assert.match(r.message ?? "", /project/);
-  // CRITICAL: zero browser side-effects. The events fixture records "blind.start",
-  // "blind.end", "open" etc. None should be present.
+  // CRITICAL: zero browser side-effects on the interpolation-fail path. Assert
+  // absence for EVERY surface reached before open() in recipe-inject.ts. The spec
+  // requires absence of: blind.start, disableObservationDomains (CDP filter),
+  // severAgentConnections (proxy sever), openCaptureTarget (tab open), and any
+  // downstream marker. Listing them explicitly — not "etc." — so a regression that
+  // adds a new pre-interpolation side-effect surface fails this test loudly.
   assert.equal(events.includes("blind.start"), false, "blind.start must NOT fire on interpolation failure");
   assert.equal(events.includes("blind.end"), false, "blind.end must NOT fire on interpolation failure");
-  assert.equal(events.includes("cleanup(close)"), false, "no cleanup should fire");
-  // Also no open marker if the fixture records open calls. Inspect the test file's
-  // makeDeps to confirm which markers exist; assert absence for each one that would
-  // indicate a side-effect (open, severAgentConnections, disableObservationDomains).
+  assert.equal(events.includes("disableObservationDomains"), false, "CDP observation filter must NOT be installed");
+  assert.equal(events.includes("severAgentConnections"), false, "proxy sever must NOT be invoked");
+  assert.equal(events.includes("open"), false, "openCaptureTarget must NOT fire");
+  assert.equal(events.includes("cleanup(close)"), false, "cleanup must NOT fire (no target was opened)");
+  assert.equal(events.includes("inject"), false, "secret must NOT have been written into the page");
+  assert.equal(events.includes("submit"), false, "save must NOT have been clicked");
 });
 ```
 
-(The exact assertion strings — `"blind.start"` etc. — must match what the test fixture's `makeDeps` records. Read the file to confirm the marker spelling before committing the test.)
+> **Step 0 prerequisite — update `makeDeps` fixture so the absence assertions are meaningful.** Today's fixture in `src/daemon/bootstrap/recipe-inject.test.ts` records `blind.start`, `blind.end`, `inject`, `submit`, `proveAbsence`, `markUsed`, and `cleanup(close)` — but `openCaptureTarget`, `severAgentConnections`, and `disableObservationDomains` are silent (open is `async () => ({ target_id: ... })`, sever is `() => undefined`, and the disable call is a module-level import). For the zero-side-effects test to actually prove absence (vs vacuously pass), the fixture needs to record those three. Edit `makeDeps` and `recipe-inject.ts` as follows BEFORE writing the new tests:
+>
+> 1. **`openCaptureTarget`** — wrap to push `"open"`:
+>    `openCaptureTarget: async () => { events.push("open"); return { target_id: over.openTargetId ?? "t" }; }`
+> 2. **`severAgentConnections`** — wrap to push `"severAgentConnections"`:
+>    `browserSession.proxy.severAgentConnections = () => { events.push("severAgentConnections"); }`
+> 3. **`disableObservationDomains`** — make it injectable: add a `disableObservationDomains?: (cdp: CdpClient) => Promise<void>` field to the `deps` type. Default to the real import in `recipe-inject.ts` with: `const disableObservationDomainsImpl = deps.disableObservationDomains ?? disableObservationDomains;` at the top of `runBrowserInject`, then call `await disableObservationDomainsImpl(cdp).catch(() => undefined)` in place of the direct call. In the test fixture's `makeDeps`, provide a wrapper that pushes `"disableObservationDomains"` to events before calling the real import. This mirrors the `open`/`cleanup` pattern already in the file and is < 5 lines of refactor.
+>
+> Update the existing tests' assertions if any of them relied on the OLD silent `open` (they assert `events.includes("cleanup(close)")` etc., which is unaffected, but double-check `npm run typecheck && node --test` after the fixture change).
+>
+> All marker strings used in the absence assertions below (`"open"`, `"severAgentConnections"`, `"disableObservationDomains"`) must match what the updated `makeDeps` pushes.
 
 - [ ] **Step 3: Run to verify the new tests fail**
 
@@ -1037,7 +1289,7 @@ git commit -m "docs: README provider matrix + CHANGELOG for recipe URL interpola
 - [ ] **Full suite green:**
 
 Run: `npm test`
-Expected: PASS. Baseline at start of Burst 9 was 1712 / 0 / 18; after this plan expect ≈1735 / 0 / 18 (added: 10 url-template + 10 yml + 1 error-code + 3 plan + 2 recipe-inject ≈ 26; dropped: 3 destinationCovered + 1 §200 plan = 4; net ≈ +22).
+Expected: PASS. Baseline at start of Burst 9 was 1712 / 0 / 18; after this plan expect ≈1748 / 0 / 18 (added: 11 url-template + 23 yml + 1 error-code + 3 plan + 2 recipe-inject ≈ 40; dropped: 3 destinationCovered + 1 §200 plan = 4; net ≈ +36).
 
 - [ ] **§200 leftovers fully gone:**
 
