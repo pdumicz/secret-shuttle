@@ -187,7 +187,10 @@ test("spawnAndStream: stdin is closed (Plan 3 scope) — child sees EOF on read"
       process.stdin.on('data', (d) => { bytes += d.length; });
       process.stdin.on('end', () => { console.log('eof', bytes); process.exit(0); });
     `],
-    env: { ...process.env },
+    // NO_COLOR=1 / FORCE_COLOR=0 stop the child's console.log from ANSI-coloring
+    // the numeric `bytes` value when the parent terminal is a TTY (the assertion
+    // below compares against the plain string "eof 0").
+    env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
     cwd: process.cwd(),
     outputWriter: w,
   });
