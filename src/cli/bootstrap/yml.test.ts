@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { parseBootstrapYml } from "./yml.js";
-import { ShuttleError } from "../../shared/errors.js";
+import { ShuttleError, isShuttleError } from "../../shared/errors.js";
 
 test("parseBootstrapYml: valid plan with all source kinds", () => {
   const yml = `
@@ -426,4 +426,370 @@ secrets:
     );
     assert.strictEqual(source.expected_host, "dashboard.stripe.com");
   }
+});
+
+// ── Destination string/object form (Task 3) ──────────────────────────────────
+
+test("destination string form back-compat: parses to { shorthand } with url_params omitted", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - vercel:production
+`;
+  const parsed = parseBootstrapYml(yml);
+  const dest = parsed.secrets[0]!.destinations[0]!;
+  assert.equal(dest.shorthand, "vercel:production");
+  assert.equal("url_params" in dest, false, "url_params must be OMITTED (not {}) for string form");
+});
+
+test("destination object form: parses with url_params", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:preview
+        url_params: { team: acme, project: my-app }
+`;
+  const parsed = parseBootstrapYml(yml);
+  const dest = parsed.secrets[0]!.destinations[0]!;
+  assert.equal(dest.shorthand, "vercel:preview");
+  assert.deepEqual(dest.url_params, { team: "acme", project: "my-app" });
+});
+
+test("destination object without url_params: same shape as string form (url_params absent)", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+`;
+  const parsed = parseBootstrapYml(yml);
+  const dest = parsed.secrets[0]!.destinations[0]!;
+  assert.equal(dest.shorthand, "vercel:production");
+  assert.equal("url_params" in dest, false);
+});
+
+test("destination object with unknown extra key → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        bogus: yes
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination object missing shorthand → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - url_params: { team: acme }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination object shorthand as non-string (number) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: 42
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination object shorthand as empty string → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: ""
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+// Shorthand member: full non-string rejection matrix (spec §9 calls these out by name).
+test("destination object shorthand as boolean → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: true
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination object shorthand as null → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: null
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination object shorthand as list → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: [vercel, production]
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination object shorthand as mapping → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: { provider: vercel, env: production }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+// Shorthand member: full non-string rejection matrix when the destination entry is
+// itself a YAML shorthand (the string-form back-compat path). The parser must reject
+// list / mapping / number / boolean / null at the entry level too, not just inside
+// the object form. (Empty-string string entry is already covered by the
+// "string entries must be non-empty" check in parseDestinations.)
+test("destination entry as bare number (e.g. `- 42`) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - 42
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination entry as bare boolean (e.g. `- true`) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - true
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination entry as bare null (e.g. `- ~`) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - ~
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("destination entry as bare list → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - [vercel, production]
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("url_params as non-mapping (string) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: "not a mapping"
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("url_params member with non-string value (number) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: { team: 42 }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("url_params member with non-string value (boolean) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: { team: true }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+// url_params top-level: must be a mapping. String is covered above; add number, list.
+test("url_params as non-mapping (number) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: 42
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("url_params as non-mapping (list) → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: [team, project]
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+// url_params member: full non-string rejection matrix (spec §9). Number + boolean
+// already covered above; add null, nested mapping, list.
+test("url_params member with null value → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: { team: null }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("url_params member with nested mapping value → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: { team: { nested: acme } }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
+});
+
+test("url_params member with list value → bootstrap_plan_invalid", () => {
+  const yml = `
+version: 1
+secrets:
+  X:
+    source: { kind: random_32_bytes }
+    destinations:
+      - shorthand: vercel:production
+        url_params: { team: [a, b] }
+`;
+  assert.throws(
+    () => parseBootstrapYml(yml),
+    (e: unknown) => isShuttleError(e) && e.code === "bootstrap_plan_invalid",
+  );
 });

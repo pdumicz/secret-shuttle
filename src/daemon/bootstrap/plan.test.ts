@@ -18,7 +18,7 @@ function reg(): RecipeRegistry { const r = new RecipeRegistry(); r.registerInjec
 
 const parsedSelection: BootstrapPlan = {
   version: 1,
-  secrets: [{ name: "APP_SECRET", source: { kind: "random_32_bytes" }, destinations: ["vercel:production"] }],
+  secrets: [{ name: "APP_SECRET", source: { kind: "random_32_bytes" }, destinations: [{ shorthand: "vercel:production" }] }],
 };
 const vaultEmpty = { has: () => false };
 const ctxProd = { source: "local", environment: "production", force: false };
@@ -56,7 +56,7 @@ test("computeBootstrapPlan: empty vault, all secrets need creation", () => {
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
-      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: ["vercel:production"] },
+      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: [{ shorthand: "vercel:production" }] },
     ],
   };
   const result = computeBootstrapPlan(parsed, emptyVault, { force: false, source: "local", environment: "production" });
@@ -69,7 +69,7 @@ test("computeBootstrapPlan: secret already in vault → skipped (no --force)", (
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
-      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: ["vercel:production"] },
+      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: [{ shorthand: "vercel:production" }] },
     ],
   };
   const vault: MockVault = { has: (ref) => ref === "ss://local/prod/API_KEY" };
@@ -81,7 +81,7 @@ test("computeBootstrapPlan: --force re-plans even when present", () => {
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
-      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: ["vercel:production"] },
+      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: [{ shorthand: "vercel:production" }] },
     ],
   };
   const vault: MockVault = { has: (ref) => ref === "ss://local/prod/API_KEY" };
@@ -93,7 +93,7 @@ test("computeBootstrapPlan: source: existing — included even when ref IS in th
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
-      { name: "FOO", source: { kind: "existing", ref: "ss://upstream/prod/FOO" }, destinations: ["vercel:production"] },
+      { name: "FOO", source: { kind: "existing", ref: "ss://upstream/prod/FOO" }, destinations: [{ shorthand: "vercel:production" }] },
     ],
   };
   // The existing ref IS in the vault — that's the whole point of "existing".
@@ -109,7 +109,7 @@ test("computeBootstrapPlan: source: existing — included when ref is NOT in vau
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
-      { name: "FOO", source: { kind: "existing", ref: "ss://upstream/prod/FOO" }, destinations: ["vercel:production"] },
+      { name: "FOO", source: { kind: "existing", ref: "ss://upstream/prod/FOO" }, destinations: [{ shorthand: "vercel:production" }] },
     ],
   };
   const result = computeBootstrapPlan(parsed, { has: () => false }, { force: false, source: "local", environment: "production" });
@@ -124,7 +124,7 @@ test("computeBootstrapPlan: --force sets force: true on entries that would be fi
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
-      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: ["vercel:production"] },
+      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: [{ shorthand: "vercel:production" }] },
     ],
   };
   const vault: MockVault = { has: (ref) => ref === "ss://local/prod/API_KEY" };
@@ -137,7 +137,7 @@ test("computeBootstrapPlan: --force on a secret that is NOT in the vault → for
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
-      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: ["vercel:production"] },
+      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: [{ shorthand: "vercel:production" }] },
     ],
   };
   const result = computeBootstrapPlan(parsed, { has: () => false }, { force: true, source: "local", environment: "production" });
@@ -149,7 +149,7 @@ test("computeBootstrapPlan: --force is irrelevant for source: existing", () => {
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
-      { name: "FOO", source: { kind: "existing", ref: "ss://upstream/prod/FOO" }, destinations: ["vercel:production"] },
+      { name: "FOO", source: { kind: "existing", ref: "ss://upstream/prod/FOO" }, destinations: [{ shorthand: "vercel:production" }] },
     ],
   };
   const vault: MockVault = { has: () => true };
@@ -162,7 +162,7 @@ test("computeBootstrapPlan: destination shorthand resolved into ResolvedDestinat
   const parsed: BootstrapPlan = {
     version: 1,
     secrets: [
-      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: ["vercel:production", "github-actions:owner/repo"] },
+      { name: "API_KEY", source: { kind: "random_32_bytes" }, destinations: [{ shorthand: "vercel:production" }, { shorthand: "github-actions:owner/repo" }] },
     ],
   };
   const result = computeBootstrapPlan(parsed, emptyVault, { force: false, source: "local", environment: "production" });

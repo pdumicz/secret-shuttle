@@ -13,7 +13,7 @@ export type BootstrapSource =
 export interface BootstrapPlanSecret {
   name: string;
   source: BootstrapSource;
-  destinations: string[]; // shorthand strings (resolved later by destination-shorthand.ts)
+  destinations: { shorthand: string; url_params?: Record<string, string> }[];
 }
 
 export interface BootstrapPlan {
@@ -118,19 +118,53 @@ function parseSource(secretName: string, raw: unknown): BootstrapSource {
   );
 }
 
-function parseDestinations(secretName: string, raw: unknown): string[] {
+function parseDestinations(secretName: string, raw: unknown): { shorthand: string; url_params?: Record<string, string> }[] {
   if (!Array.isArray(raw)) {
     fail(`secrets.${secretName}.destinations: must be an array`);
   }
   if (raw.length === 0) {
     fail(`secrets.${secretName}.destinations: must have at least one entry`);
   }
-  const out: string[] = [];
-  for (const d of raw) {
-    if (typeof d !== "string" || d.length === 0) {
-      fail(`secrets.${secretName}.destinations: entries must be non-empty strings`);
+  const out: { shorthand: string; url_params?: Record<string, string> }[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const d = raw[i];
+    const path = `secrets.${secretName}.destinations[${i}]`;
+    if (typeof d === "string") {
+      if (d.length === 0) {
+        fail(`${path}: string entries must be non-empty`);
+      }
+      out.push({ shorthand: d });
+      continue;
     }
-    out.push(d);
+    if (d === null || typeof d !== "object" || Array.isArray(d)) {
+      fail(`${path}: must be a string shorthand or a mapping with { shorthand, url_params? }`);
+    }
+    const obj = d as Record<string, unknown>;
+    // Closed-vocabulary: only `shorthand` and `url_params` allowed.
+    const allowedKeys = new Set(["shorthand", "url_params"]);
+    for (const k of Object.keys(obj)) {
+      if (!allowedKeys.has(k)) {
+        fail(`${path}: unknown key "${k}" (allowed: shorthand, url_params)`);
+      }
+    }
+    if (typeof obj.shorthand !== "string" || obj.shorthand.length === 0) {
+      fail(`${path}.shorthand: must be a non-empty string`);
+    }
+    if (obj.url_params === undefined) {
+      out.push({ shorthand: obj.shorthand });
+      continue;
+    }
+    if (obj.url_params === null || typeof obj.url_params !== "object" || Array.isArray(obj.url_params)) {
+      fail(`${path}.url_params: must be a mapping of string → string`);
+    }
+    const urlParams: Record<string, string> = {};
+    for (const [k, v] of Object.entries(obj.url_params as Record<string, unknown>)) {
+      if (typeof v !== "string") {
+        fail(`${path}.url_params.${k}: value must be a string (got ${typeof v})`);
+      }
+      urlParams[k] = v;
+    }
+    out.push({ shorthand: obj.shorthand, url_params: urlParams });
   }
   return out;
 }

@@ -48,7 +48,8 @@ export function computeBootstrapPlan(
       continue;
     }
 
-    const destinations: ResolvedDestination[] = s.destinations.map((shorthand) => {
+    const destinations: ResolvedDestination[] = s.destinations.map((entry) => {
+      const shorthand = entry.shorthand;
       const r = resolveDestinationShorthand(shorthand, s.name);
       const injectRecipe = recipes.getInject(canonicalHost(r.domain));
       if (
