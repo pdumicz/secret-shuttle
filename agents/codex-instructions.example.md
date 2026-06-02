@@ -2,10 +2,10 @@
 
 When handling secrets, route the secret moment through Secret Shuttle.
 
-Setup before the first secret operation:
+Setup before the first secret operation (Secret Shuttle is published to npm under the `beta` dist-tag):
 
 ```bash
-npx secret-shuttle init
+npx secret-shuttle@beta init
 ```
 
 Do:

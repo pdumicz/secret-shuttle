@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+_No changes yet._
+
+## 0.4.0 — 2026-06-02
+
+First publish to npm (`secret-shuttle@beta`). Bundles two burst-level efforts:
+
+### Added (Burst 8 — Honest Hands-Off Magic Path)
+
+- **Per-provider browser recipes (Stripe capture + Vercel inject):** the daemon can now drive specific provider pages hands-off, reusing the existing blind / transition-gate / absence-proof cores from `reveal-capture` and `inject-submit` (factored into `chrome/secret-gates.ts` as `captureWithTransitionGate` + `injectWithSuccessGate`). A new `recipes` subsystem (`src/daemon/recipes/`) defines `CaptureRecipe` / `InjectRecipe` types, a `RecipeRegistry`, staged page-state detection (`page_ready_probe` → `logged_out_marker` → `logged_in_probe`), and the safety contract that pre-steps must be single-match, non-secret-bearing, and revalidate scope after each step.
+- **`browser_inject` destination kind (`ResolvedDestination` discriminated union):** plan-construction picks `browser_inject` only when (a) an inject recipe exists, (b) the vendor CLI binary is absent from `$PATH`, AND (c) the destination is in an explicit scope-specific `host:shorthand` allowlist via `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES` (default empty → CLI-always, identical to today's behavior).
+- **`human_paste` source kind:** OpenAI / Anthropic keys (create-once, unrevealable) relabeled from `capture` to `human_paste` to stop the magic-path-implied lie. Same human-pending tab flow as `capture`; the `kind === "capture"`-only recipe gate ensures `human_paste` never auto-attempts a recipe.
+- **7 new error codes:** `recipe_selector_ambiguous`, `recipe_capture_failed`, `bootstrap_login_required`, `recipe_page_timeout`, `recipe_page_unexpected`, `recipe_inject_failed`, `recipe_not_found`.
+- **§5 / §170 / §173 failure-class lifecycle:** page-state failures leave the bootstrap browser open as a login/inspect surface (`blind.end` + no cleanup); secret-bearing failures attempt `hide_selector` (best-effort) → close tab → `blind.end`; cleanup rejection is caught as unverified so blind stays active and the operator-facing message carries both the recipe failure code AND the cleanup reason.
+- **Unified provider coverage matrix in README** (recipes + CLI mechanisms with explicit "Real-page verified" column).
+- **Honest steady-state copy in demo scene-0 + README:** "first time per provider, log in once in the Secret Shuttle browser; after that, one approval ships everything for providers with a recipe."
+
+### Changed (Burst 8)
+
+- `cleanupCaptureTarget` moved from `executor.ts` (private) to `src/daemon/chrome/capture-target-ops.ts` (exported) so `runCaptureStep` and `runBrowserInject` share the same conservative `verified=false`-on-`getTargetURL`-throw semantics.
+- `planRequiresCapture` renamed to `planRequiresHumanPending` (covers `capture` + `human_paste`), with a new `planRequiresBootstrapBrowser` predicate that also catches `browser_inject` destinations — the bootstrap-browser preflight / ensure / teardown in `/v1/bootstrap/continue` and `/abandon` now use it so browser-inject-only plans don't slip through without provisioning.
+- Teardown in `/v1/bootstrap/continue` preserves the visible tab on page-state failures (§5 visible recovery surface) only when blind is no longer active — if any entry left blind on, teardown wins and the renderer is killed so a possibly-rendered secret never lingers.
+- CLI `--version` synced from stale `0.1.1` to `0.4.0`.
+
+### Known limitations — Burst 8 (real-page dogfood pending)
+
+- **Stripe + Vercel recipe selectors carry `verified_against_real_page: "2026-06-01-needs-dogfood"`.** Browser-harness couldn't connect during authoring; selectors are best-effort from public docs and must be re-verified against real logged-in pages before the recipes are production-trustworthy.
+- **Vercel inject recipe URL is intentionally a non-resolving placeholder** (`vercel.com/TEAM_PLACEHOLDER/PROJECT_PLACEHOLDER/...`). The recipe is plumbed end-to-end but cannot route a real destination until a real dogfood URL is committed AND the operator opts in via `SECRET_SHUTTLE_INJECT_RECIPE_SCOPES=vercel.com:vercel:<scope>`.
+- **CLI-availability probe narrowed to "binary on `$PATH`"** — per-vendor auth probing (`vercel whoami`, `stripe config --list`, etc.) is deferred; an installed-but-logged-out CLI stays on the CLI template (surfaces vendor's own auth error, no silent recipe fallthrough).
+
 ### Added (Burst 7 — Identity & Memory Hardening)
 
 - **Opt-in per-project agent IDs (Plan 5s):** `deriveAutoAgentId` gains an optional `projectScope` (the git-repo-root path, `git rev-parse --show-toplevel`, or `cwd` when not in a repo) folded into the sha256 material. Opt in via `identity: { perProject: true }` in `secret-shuttle.config.json` or `secret-shuttle init --per-project-identity` (which merges the key into the config, preserving any `infer.*` block). **Fully back-compatible:** without opt-in, the 2-arg derivation is byte-identical to before, so no existing agent identity changes. Monorepo sub-projects share the git-root id (one repo = one trust domain); moving a project re-derives its id on the next `init`. Closes the per-(machine, runtime) identity collision where a session-affordance leak in one project was consumable by the same agent id in another.
