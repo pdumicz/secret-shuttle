@@ -4,7 +4,7 @@
 
 Cooperative blind mode, CLI, local encrypted vault, focused-field CDP capture/injection, stdin handoff, agent instructions, Stripe→Vercel walkthrough.
 
-## V2 — Secure Mode (this branch, not yet released)
+## V2 — Daemon Rewrite (released as 0.4.0)
 
 Daemon-owned vault key (passphrase + scrypt envelope), one-shot context-bound approval grants through a local web UI, daemon-owned Chrome over `--remote-debugging-pipe`, filtered CDP proxy that blocks screenshots / DOM / AX / Runtime / Console / network-body reads during blind mode, command templates (no arbitrary `use-as-stdin`), exact-by-default domain matching, migration from V0.
 

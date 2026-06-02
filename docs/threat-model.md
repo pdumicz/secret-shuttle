@@ -55,7 +55,7 @@ The vault is AES-256-GCM encrypted with a master key wrapped in a scrypt-derived
 
 ### Agent bypasses approval with a CLI flag
 
-There is no such flag in Secure Mode. `--confirm-production` is removed. Approval is daemon-issued and bound to the exact action context.
+There is no such flag. `--confirm-production` is removed. Approval is daemon-issued and bound to the exact action context.
 
 ### Agent runs `use-as-stdin --command "rm -rf /"`
 
@@ -80,7 +80,7 @@ an explicit minimal env that contains no `SECRET_SHUTTLE_*` variable.
 
 ## Non-Goals
 
-- Defense against a user with unrestricted same-user shell, process, or GUI access. Secure Mode assumes the agent is sandboxed to the Secret Shuttle CLI and CDP proxy.
+- Defense against a user with unrestricted same-user shell, process, or GUI access. Secret Shuttle assumes the agent is sandboxed to the Secret Shuttle CLI and CDP proxy.
 - Compromised kernel.
 - Browser extension already trusted in the daemon-owned profile.
 - Enterprise compliance — SSO, RBAC, audit attestations.

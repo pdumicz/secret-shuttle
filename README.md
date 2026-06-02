@@ -58,7 +58,7 @@ secret-shuttle agent print-skill-url   # → the raw URL (one line, paste it)
 
 Snippet targets (AGENTS.md, .github/copilot-instructions.md) wrap the Secret Shuttle block in `<!-- secret-shuttle:begin -->` / `<!-- secret-shuttle:end -->` markers — re-running `agent install` only replaces the marked block, never the surrounding content.
 
-## How Secure Mode Works
+## How It Works
 
 ```text
 Agent CLI (untrusted client)

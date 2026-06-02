@@ -11,7 +11,7 @@ function requireInsecureDevMode(): void {
   if (!isInsecureDevMode()) {
     throw new ShuttleError(
       "removed_in_secure_mode",
-      "Direct passphrase unlock is disabled in Secure Mode. Use `secret-shuttle unlock` (web UI).",
+      "Direct passphrase unlock over HTTP is disabled. Use `secret-shuttle unlock` (web UI flow).",
     );
   }
 }

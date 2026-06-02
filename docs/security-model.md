@@ -1,10 +1,10 @@
 # Security Model
 
-Secret Shuttle V2 is a local Secure-Mode bridge for AI coding agent workflows.
+Secret Shuttle is a local daemon-mediated bridge for AI coding agent workflows.
 
 ## Claim
 
-In Secure Mode, the agent can request generation, capture, injection, comparison, and approved template execution, but raw secret values and vault keys never leave the daemon. Browser observation is blocked during blind mode by the Secret Shuttle CDP proxy.
+The agent can request generation, capture, injection, comparison, and approved template execution, but raw secret values and vault keys never leave the daemon. Browser observation is blocked during blind mode by the Secret Shuttle CDP proxy.
 
 ## Two Planes
 
@@ -82,7 +82,7 @@ means the secret is injectable **nowhere** (fail closed), never everywhere.
   vault.json.enc
   key-envelope.json    (KDF salt + AES-GCM wrapped master key)
   daemon-socket.json   (port + bearer token + pid)
-  state.json           (legacy V0 blind state, unused in Secure Mode)
+  state.json           (legacy V0 blind state, unused)
   audit.jsonl
 ```
 
@@ -90,7 +90,7 @@ means the secret is injectable **nowhere** (fail closed), never everywhere.
 
 ## Honest Limitations
 
-Secure Mode protects against:
+Secret Shuttle protects against:
 - Agents reading the vault.
 - Agents observing the browser during blind mode through the proxy.
 - Agents running arbitrary commands with a secret on stdin.
@@ -103,10 +103,10 @@ Secure Mode protects against:
 - Daemon-spawned binaries/Chrome reading the daemon bearer token (scrubbed from the
   daemon process env and never placed in child envs).
 
-Secure Mode does NOT protect against:
+Secret Shuttle does NOT protect against:
 - A user with unrestricted same-user shell or process access. The agent must be sandboxed to the Secret Shuttle CLI and CDP proxy surfaces; if it can read process memory, drive arbitrary GUI windows, or open the approval UI on its own, the local guarantee no longer holds.
 - A browser extension already installed in the daemon-owned Chrome profile.
 - A malicious destination site receiving a secret that the user intentionally injects.
 - A compromised kernel.
 
-The next steps to harden Secure Mode are OS-keychain key storage and a signed desktop binary.
+The next hardening steps are OS-keychain key storage and a signed desktop binary.

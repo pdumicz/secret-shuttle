@@ -1,6 +1,6 @@
 # Browser Harness And Playwright Usage
 
-In Secure Mode, the daemon owns the browser. The agent does not start Chrome directly.
+The daemon owns the browser. The agent does not start Chrome directly.
 
 ## Start Chrome Through The Daemon
 
