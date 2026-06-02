@@ -13,6 +13,7 @@ import type {
 import type { CdpClient } from "../../chrome/cdp-client.js";
 import type { ProxyServer } from "../../proxy/cdp-proxy.js";
 import type { BrowserOps } from "../../chrome/internal-ops.js";
+import { RecipeRegistry } from "../../recipes/registry.js";
 
 // ── shared harness ──────────────────────────────────────────────────────────
 // Mirrors bootstrap.test.ts: SECRET_SHUTTLE_INSECURE_DEV_MODE=1 so the dev
@@ -74,8 +75,16 @@ async function withDaemon<T>(
   // We only need a valid BrowserSession shape — the executor will fail at the
   // first CDP call against the stub, which is fine for the tests in this file
   // (they don't assert on executor outcome, only on guard/approval invariants).
+  //
+  // Also inject an empty RecipeRegistry so vercel:* shorthands always resolve
+  // to template destinations, independent of whether the vercel CLI is
+  // installed. Without this, the singleton inject recipe + missing CLI emit
+  // browser_inject destinations, which makes non-capture plans trip the
+  // needsBrowser path — defeating the guard tests' assertion that non-capture
+  // plans do NOT need the browser.
   const services = new DaemonServices({
     createBrowserSessionImpl: async (opts) => makeStubSession(opts.owner),
+    recipes: new RecipeRegistry(),
   });
   let port = 0;
   registerRoutes(server, services, () => port);
@@ -594,6 +603,7 @@ test("POST /v1/bootstrap/continue: concurrent capture plans from two batches →
       await factoryReleaseSignal;
       return makeStubSession(opts.owner);
     },
+    recipes: new RecipeRegistry(),
   });
   let port = 0;
   registerRoutes(server, services, () => port);

@@ -21,6 +21,7 @@ import type { BrowserSession, BrowserSessionChild } from "./bootstrap/browser-se
 import { PendingCapturesRegistry } from "./bootstrap/pending-captures.js";
 import type { KeychainAdapter } from "../vault/keychain/types.js";
 import { ShuttleError } from "../shared/errors.js";
+import type { RecipeRegistry } from "./recipes/registry.js";
 
 /**
  * A lease handle returned by reserveBootstrapBrowser. Opaque to callers —
@@ -89,6 +90,16 @@ export interface DaemonServicesOptions {
    * a real browser.
    */
   createBrowserSessionImpl?: typeof createBrowserSessionReal;
+  /**
+   * Test-only injection point for the RecipeRegistry used by
+   * computeBootstrapPlan. Production leaves this undefined and the
+   * module-level singleton (with all built-in recipes registered) is
+   * used. Tests that want to keep vercel:* destinations on the template
+   * path (independent of whether the vercel CLI is installed) pass
+   * `new RecipeRegistry()` — an empty registry with no inject recipe —
+   * so the plan always falls through to the template destination.
+   */
+  recipes?: RecipeRegistry;
 }
 
 export class DaemonServices {
@@ -252,6 +263,13 @@ export class DaemonServices {
    * Tests inject a stub via DaemonServicesOptions.createBrowserSessionImpl.
    */
   private readonly createBrowserSessionImpl: typeof createBrowserSessionReal;
+  /**
+   * Optional RecipeRegistry override for computeBootstrapPlan. When set
+   * (tests only), the bootstrap route uses this registry instead of the
+   * module-level singleton, so tests can control which inject recipes are
+   * visible without relying on whether vendor CLIs are installed.
+   */
+  readonly recipes: RecipeRegistry | undefined;
 
   /**
    * Synchronous reservation tracker for the bootstrap-owned daemon browser.
@@ -294,6 +312,7 @@ export class DaemonServices {
       opts.hubBroker ??
       new HubBroker({ openUrlImpl: opts.hubOpenUrlImpl ?? openUrl });
     this.createBrowserSessionImpl = opts.createBrowserSessionImpl ?? createBrowserSessionReal;
+    this.recipes = opts.recipes;
   }
 
   /**

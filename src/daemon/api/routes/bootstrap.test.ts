@@ -8,6 +8,7 @@ import { DaemonServices } from "../../services.js";
 import { registerRoutes } from "../router.js";
 import { encryptEnvelope, writeEnvelope } from "../../../vault/envelope.js";
 import { randomBytes } from "node:crypto";
+import { RecipeRegistry } from "../../recipes/registry.js";
 
 // ── shared harness ──────────────────────────────────────────────────────────
 
@@ -22,7 +23,12 @@ async function withDaemon<T>(
   process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
   process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
   const server = new DaemonServer({ token: "t" });
-  const services = new DaemonServices();
+  // Inject an empty RecipeRegistry so vercel:* shorthands always resolve to
+  // the template destination, independent of whether the vercel CLI is
+  // installed on the test machine. Without this, computeBootstrapPlan sees
+  // the singleton inject recipe + missing CLI and emits browser_inject,
+  // flipping the production-gate trigger and forcing Chrome startup.
+  const services = new DaemonServices({ recipes: new RecipeRegistry() });
   let port = 0;
   registerRoutes(server, services, () => port);
   ({ port } = await server.listen(0));

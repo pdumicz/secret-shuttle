@@ -10,6 +10,7 @@ import { DaemonServer } from "../server.js";
 import { DaemonServices } from "../services.js";
 import { registerRoutes } from "../api/router.js";
 import type { SessionPattern } from "./session.js";
+import { RecipeRegistry } from "../recipes/registry.js";
 
 // ── shared harness (mirrors src/daemon/api/routes/bootstrap.test.ts) ────────
 
@@ -24,7 +25,11 @@ async function withDaemon<T>(
   process.env.SECRET_SHUTTLE_INSECURE_DEV_MODE = "1";
   process.env.SECRET_SHUTTLE_NO_OPEN_URL = "1";
   const server = new DaemonServer({ token: "t" });
-  const services = new DaemonServices();
+  // Inject an empty RecipeRegistry so vercel:* shorthands resolve to template
+  // destinations, not browser_inject. Without this, inferSessionPatternFromPlan
+  // skips browser_inject destinations and returns no patterns — breaking the
+  // session_affordance tests that expect vercel-env-add patterns.
+  const services = new DaemonServices({ recipes: new RecipeRegistry() });
   let port = 0;
   registerRoutes(server, services, () => port);
   ({ port } = await server.listen(0));

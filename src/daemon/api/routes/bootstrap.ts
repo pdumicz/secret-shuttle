@@ -57,7 +57,7 @@ export function registerBootstrapRoutes(
       parsed,
       { has: (ref: string) => existingRefs.has(ref) },
       { force, source: "local", environment },
-      { isCliConfigured },
+      { isCliConfigured, ...(services.recipes !== undefined ? { recipes: services.recipes } : {}) },
     );
 
     // Nothing to do: short-circuit with success.
