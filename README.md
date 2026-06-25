@@ -4,11 +4,11 @@
 
 Let AI agents use secrets without seeing them.
 
-[**▶ Walk through the demo →**](https://pdumicz.github.io/secret-shuttle/demo/?scene=0)  ·  opens on the one-approval `provision` flow, then a 9-scene click-through of the low-level mechanics — a dev shipping a Stripe webhook secret to Vercel prod without ever seeing the value.
+![Your agent generates a secret and ships it to Vercel production — and never sees the value](demo/agent-secret-flow.svg)
 
-[![Secret Shuttle demo — reveal-capture scene](demo/preview.png)](https://pdumicz.github.io/secret-shuttle/demo/?scene=0)
+[**▶ Walk through the interactive demo →**](https://pdumicz.github.io/secret-shuttle/demo/?scene=0)  ·  opens on the one-approval `provision` flow, then a 9-scene click-through of the low-level mechanics — a dev shipping a Stripe webhook secret to Vercel prod without ever seeing the value.
 
-> **Status: 0.4.0 — beta.** The architecture has been through seven bursts of adversarial security review with fixes shipped at each gate. Not yet independently audited; recommend test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployments.
+> **Status: 0.5.0 — beta.** The architecture has been through multiple bursts of adversarial security review with fixes shipped at each gate. Not yet independently audited; recommend test accounts and rotating tokens until that audit lands. Suitable for development workflows and prototype deployments.
 
 Secret Shuttle is a local bridge that lets coding agents — Claude Code, Codex, Cursor, browser-using agents — capture, generate, store, compare, and inject secrets through browser and CLI workflows. The agent sees only refs like `ss://stripe/prod/STRIPE_WEBHOOK_SECRET`, fingerprints, field metadata, and status — never the raw value.
 
