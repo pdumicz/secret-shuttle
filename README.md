@@ -75,6 +75,15 @@ Secret Shuttle daemon
 
 The daemon owns every secret moment. The agent sees refs and status, never raw values, never the raw Chrome CDP URL, never the vault key.
 
+### Two paths, one guarantee
+
+- **CLI templates (most reliable).** Push a secret to Vercel / GitHub Actions / Cloudflare / Supabase — the value goes to the vendor's own CLI, never through the agent. This is the path the hero demo above shows.
+- **Universal browser handoff (experimental).** Your agent drives *any* vendor portal with its normal browser tool, and hands off only the secret moment — it marks the field, the daemon types/reads it under blind mode with the agent's view severed. No per-vendor recipe; it works on a portal nobody integrated.
+
+![An agent drives an arbitrary portal and hands off only the secret moment — the key lands in the vault, never seen](demo/agent-browser-handoff.svg)
+
+The browser path is early (v0.5, best-effort, pending real-page verification): the guarantee is "the agent never sees the plaintext," **not** "a hostile destination page can't exfiltrate a secret you enter." See [SECURITY.md](SECURITY.md); for untrusted destinations, prefer the CLI path.
+
 ## Quickstart
 
 ```bash
@@ -103,7 +112,7 @@ secret-shuttle template run vercel-env-add \
 
 Templates run vetted binaries with `shell: false`, absolute paths only, and never echo stdout/stderr back to the agent.
 
-## What Works Today (0.4.0)
+## What Works Today (0.5.0)
 
 - TypeScript CLI distributed as `secret-shuttle`
 - Local daemon with bearer-authenticated HTTP API on 127.0.0.1
@@ -153,7 +162,7 @@ What's automated, by provider and direction. Browser recipes drive the page hand
 | Cloudflare | inject (secret) | CLI (`cloudflare-secret-put`) | ✅ shipped | n/a | |
 | Supabase edge | inject (secret) | CLI (`supabase-edge-secret-set`) | ✅ shipped | n/a | |
 
-The absence proof stays conservatively fail-closed for every mechanism — "best-effort" means "auto-resume may not succeed on every page", never "the secret may leak". Every new provider is a new row.
+The absence proof is fail-closed: the daemon won't hand the agent back its view unless it can confirm the secret is gone from the page's DOM/URL (otherwise it stops with `manual_recovery_required`). That guarantees the **agent** never sees the plaintext — it does **not** hook network/clipboard/storage, so it can't stop a hostile destination page from transmitting a value you deliberately entered. Only run browser flows against pages you trust ([SECURITY.md](SECURITY.md)). Every new provider is a new row.
 - Deferred provider templates (`github-actions-env-secret-set`, `github-actions-org-secret-set`, `railway-variable-set`, `netlify-env-set`, `clerk-env-set`) — see [docs/templates-deferred.md](docs/templates-deferred.md) for the reason and re-open criteria
 - Signed desktop binaries
 - Secret export workflows (rotation and `.env` import ship; export does not)
