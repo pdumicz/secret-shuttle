@@ -46,6 +46,27 @@ secret-shuttle provision --secret STRIPE_WEBHOOK_SECRET --from capture \
 - `internal session create|list|revoke` — pre-approved batch sessions
 - `daemon start|stop|status` — daemon lifecycle
 
+## Two ways to put a secret into a vendor (or capture one out)
+
+You never type, paste, read, or see the secret in either path:
+
+- **Path A — CLI templates (most reliable, no browser).** If `template list`
+  covers the destination (Vercel / GitHub Actions / Cloudflare / Supabase), use
+  `template run <id> --ref <ref> --param k=v`. The daemon hands the value to the
+  vendor's own CLI on stdin or a `0600` env-file.
+- **Path B — universal browser handoff (works on ANY portal).** Drive any
+  vendor dashboard with your normal browser tool (pointed at the daemon's proxy
+  from `browser start`). At the secret moment, hand it off: `browser mark` the
+  element(s), then `reveal-capture` (pull a revealed key into the vault) or
+  `inject-submit` (write a key into a field + save). The daemon does the
+  secret-bearing click/read/type under blind mode with your view severed — **no
+  recipe or pre-baked selector required, because you found the element live.**
+  This is the general path: it works on a portal nobody has ever integrated.
+
+Generate-without-seeing is orthogonal to both: `provision --secret NAME --from
+random_32_bytes` mints a value straight into the vault; combine with Path A or B
+to place it at the vendor.
+
 ## What you see vs never see
 
 - **You see**: refs, fingerprints, metadata, batch ids, exit codes, error codes, audit summaries.
@@ -169,31 +190,34 @@ It is safe to report:
 
 It is **never** safe to report raw secret values.
 
-## Provider browser-flow status
+## Browser-flow maturity + honest scope
 
-The browser-driven flows (`inject-submit` for Vercel-style env-var writes,
-`reveal-capture` for Stripe-style secret reveals) depend on the target
-provider's page structure. The Phase-2 and Phase-3 [P2a] real-page gates and
-the Phase-4 [P2b] template-CLI gates record per-provider production-or-best-
-effort status in this repository's plan files:
+Path B (the universal handoff) is **general** — it has no per-provider
+selectors. You locate the elements live; the daemon owns only the secret
+moment. (The daemon also ships optional per-provider "recipes" that fully
+automate the daemon-opened capture tab during `provision --continue` batches —
+those are an internal convenience you do not invoke, and are experimental /
+pending real-page verification.)
 
-- Vercel browser flow ([P2a], Phase-2 plan): **PENDING** — see
-  `docs/superpowers/plans/2026-05-18-agentic-blind-transactions-phase2-inject-submit.md`
-  "## [P2a] Gate outcome".
-- Stripe browser flow ([P2a], Phase-3 plan): **PENDING** (user-deferred) —
-  see `docs/superpowers/plans/2026-05-19-agentic-blind-transactions-phase3-reveal-capture.md`
-  "## [P2a] Gate outcome".
-- Provider templates ([P2b], Phase-4 plan): **PENDING** — see
-  `docs/superpowers/plans/2026-05-20-agentic-blind-transactions-phase4-templates.md`
-  "## [P2b] Gate outcome".
+**Maturity:** the blind machinery (transition gate, inject success gate,
+absence proof) is implemented and covered by route + unit tests, but it is
+**not yet certified end-to-end against real logged-in dashboards** — treat
+every browser flow as **best-effort**. For the four covered vendors,
+`template run` (Path A) is the more reliable path.
 
-Until those gates are recorded as PASS, treat every browser flow as
-**best-effort**. The absence proof stays conservatively fail-closed regardless
-(the daemon refuses to auto-resume unless it can prove the secret is gone), so
-"best-effort" means "auto-resume may not succeed on every page", not "the
-secret may leak". When in doubt, use `template run` for the four shipped
-templates (`vercel-env-add`, `github-actions-secret-set`,
-`cloudflare-secret-put`, `supabase-edge-secret-set`).
+**What the absence proof does and does not guarantee** (report this precisely
+to the human — do not overstate):
+- It DOES: after a blind transaction, scan the live DOM and URL of same-origin,
+  fully-loaded documents and refuse to auto-resume your view unless the secret
+  is no longer present there. So the value is not left visible **to you** once
+  blind ends. Fail-closed — if it cannot prove that, it stays blind and returns
+  `next: "manual_recovery_required"` for the human.
+- It does NOT: hook network, clipboard, or storage, and cannot read
+  cross-origin frames. It cannot prove a destination page didn't *transmit* a
+  value you deliberately entered there. So Path B's guarantee is **"the agent
+  never sees the plaintext,"** NOT "a hostile vendor page cannot exfiltrate a
+  secret you chose to enter." Only run blind transactions against pages you
+  trust; for untrusted/unknown destinations, prefer Path A.
 
 ## Recap of forbidden actions during blind mode
 
